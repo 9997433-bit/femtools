@@ -174,7 +174,17 @@ class FRFResult:
         if kind == self.response:
             return self
         omega = self.omega
-        scale = _response_scale(kind, omega) / _response_scale(self.response, omega)
+        current = _response_scale(self.response, omega)
+        # Mobility and accelerance are identically zero at f = 0 whatever the structure
+        # does statically, so dividing them back by i*w / -w^2 there is 0/0. It used to
+        # come out as a nan line announced by nothing but a numpy RuntimeWarning.
+        if np.any(current == 0.0):
+            raise ValueError(
+                f"converting {self.response} to {kind} divides by omega, and this FRF "
+                "has a line at f = 0 where the source is identically zero and carries "
+                "nothing about the static response; drop the DC line before converting"
+            )
+        scale = _response_scale(kind, omega) / current
         return FRFResult(
             H=self.H * scale[None, None, :],
             freq_hz=self.freq_hz.copy(),
@@ -389,6 +399,34 @@ def modal_frf(
     )
 
 
+def _damping_matrix(value: Any, ndof: int, name: str) -> Any:
+    """Check that a viscous damping term really is an ``(ndof, ndof)`` matrix.
+
+    ``Z(w)`` is built as ``... + 1j w C``, and numpy broadcasts a length-``ndof`` vector
+    across the *rows* of that sum rather than onto its diagonal. A caller passing the
+    diagonal of ``C`` therefore used to get a fully populated, plausible-looking and
+    quietly wrong dynamic stiffness.
+    """
+    if value is None:
+        return None
+    shape = getattr(value, "shape", None)
+    if shape is None:
+        value = np.asarray(value, dtype=float)
+        shape = value.shape
+    if tuple(shape) != (ndof, ndof):
+        hint = (
+            "; a 1-D array is not read as a diagonal, it would broadcast across every "
+            "row of Z(w)"
+            if len(shape) == 1
+            else ""
+        )
+        raise ValueError(
+            f"{name} must be a square ({ndof}, {ndof}) viscous damping matrix, got "
+            f"shape {tuple(shape)}{hint}"
+        )
+    return value
+
+
 def _dynamic_stiffness_solver(
     K: Any, M: Any, C: Any, eta: float, omega: float, sparse: bool
 ) -> Any:
@@ -487,9 +525,11 @@ def direct_frf(
                 "complete basis here"
             ) from exc
         raise
+    C_total = _damping_matrix(C_total, ndof, f"the C matrix of {type(dmp).__name__}")
     if system.C is not None:
         C_total = system.C if C_total is None else C_total + system.C
     if C is not None:
+        C = _damping_matrix(C, ndof, "C")
         C_total = C if C_total is None else C_total + C
     eta = dmp.loss_factor()
 

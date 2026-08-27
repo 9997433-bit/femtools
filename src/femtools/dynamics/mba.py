@@ -139,6 +139,19 @@ class AssemblyResult(ModalModel):
 # ---------------------------------------------------------------------------
 # specification parsing
 # ---------------------------------------------------------------------------
+def _pop_alias(d: dict[str, Any], *names: str) -> Any:
+    """Pop the first of ``names`` that is present, leaving the others for the key check.
+
+    Spelling it out matters: ``d.pop("dof_i", d.pop("dof", None))`` evaluates the default
+    *first*, so ``"dof"`` was always consumed and a spec giving both spellings lost the
+    "unknown keys" error instead of raising it.
+    """
+    for name in names:
+        if name in d:
+            return d.pop(name)
+    return None
+
+
 def _as_spring(spec: Any) -> SpringModification:
     if isinstance(spec, SpringModification):
         return spec
@@ -147,8 +160,8 @@ def _as_spring(spec: Any) -> SpringModification:
         if "dofs" in d:
             i, j = d.pop("dofs")
         else:
-            i, j = d.pop("dof_i", d.pop("dof", None)), d.pop("dof_j", None)
-        k = d.pop("k", d.pop("stiffness", None))
+            i, j = _pop_alias(d, "dof_i", "dof"), d.pop("dof_j", None)
+        k = _pop_alias(d, "k", "stiffness")
         if i is None or k is None:
             raise ValueError(f"spring spec needs a DOF and a stiffness: {spec!r}")
         if d:
@@ -168,7 +181,7 @@ def _as_mass(spec: Any) -> MassModification:
     if isinstance(spec, Mapping):
         d = dict(spec)
         dof = d.pop("dof", None)
-        m = d.pop("mass", d.pop("m", None))
+        m = _pop_alias(d, "mass", "m")
         if dof is None or m is None:
             raise ValueError(f"mass spec needs a DOF and a mass: {spec!r}")
         if d:

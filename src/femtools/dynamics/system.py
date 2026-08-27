@@ -339,12 +339,25 @@ def as_system(
     -----
     Every mesh-backed branch returns the free-free partition; see the module docstring.
     """
+    def _reject_assemble(source: str) -> None:
+        # Only the model branch assembles anything, so anywhere else these keywords are a
+        # request the caller believes has been honoured: lumped_mass=True on an assembly
+        # that was built with a consistent mass matrix used to change nothing at all.
+        if assemble:
+            raise ValueError(
+                f"assemble={dict(assemble)!r} was given, but the first argument is "
+                f"{source}, so there is nothing left to assemble here; pass the model "
+                "instead, or assemble it yourself with those options"
+            )
+
     if isinstance(K, SystemMatrices):
         if M is not None:
             raise ValueError("M must be omitted when the first argument is a SystemMatrices")
+        _reject_assemble("an existing SystemMatrices")
         return K
 
     if M is not None:
+        _reject_assemble("a matrix pair")
         if not is_matrix_like(K):
             raise TypeError(
                 f"M was supplied, so K must be a matrix, got {type(K).__name__}"
@@ -355,6 +368,7 @@ def as_system(
         raise TypeError("expected matrices, an assembly or a model, got None")
 
     if _is_assembly_like(K):
+        _reject_assemble("an assembly")
         return _from_assembly(K, getattr(K, "model", None), "assembly")
 
     if hasattr(K, "assembly"):
@@ -365,6 +379,7 @@ def as_system(
                 "not available from it; pass K and M, an AssemblyResult or the model"
             )
         if _is_assembly_like(assembly):
+            _reject_assemble(f"a {type(K).__name__} carrying its assembly")
             return _from_assembly(assembly, getattr(K, "model", None), "assembly")
 
     if _is_model_like(K):

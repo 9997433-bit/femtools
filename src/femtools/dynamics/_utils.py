@@ -6,6 +6,7 @@ from :mod:`femtools.dynamics`.
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Sequence
 from typing import Any
 
@@ -14,6 +15,7 @@ import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
 __all__ = [
+    "SINGULAR_RCOND",
     "as_dense",
     "broadcast_scalar",
     "factorized_solver",
@@ -97,31 +99,78 @@ def resolve_dofs(
     return np.where(idx < 0, idx + ndof, idx)
 
 
-def factorized_solver(A: Any):  # noqa: N803 - matrix name follows the maths
+#: A matrix whose reciprocal condition number falls to this level is singular to working
+#: precision: the LU solve still returns *a* vector, but none of its digits are the
+#: caller's, and the null-space content it picks up is arbitrary.
+SINGULAR_RCOND = float(np.finfo(float).eps)
+
+
+def _pinv_solver(dense: np.ndarray, why: str):
+    """Minimum-norm solver for a matrix that LU cannot be trusted on."""
+    warnings.warn(
+        f"the matrix is {why}, so the solve falls back to the minimum-norm "
+        "pseudo-inverse solution; a component floating on a mechanism (an unrestrained "
+        "interior partition, a free-free stiffness) is the usual cause",
+        RuntimeWarning,
+        stacklevel=3,
+    )
+    pinv = np.linalg.pinv(dense)
+    return lambda b: pinv @ np.asarray(b)
+
+
+def _reciprocal_condition(A: np.ndarray, lu: np.ndarray) -> float:  # noqa: N803
+    """LAPACK 1-norm reciprocal condition estimate of ``A`` from its LU factor."""
+    diag = np.abs(np.diag(lu))
+    if not np.isfinite(lu).all() or diag.size == 0 or diag.min() == 0.0:
+        return 0.0
+    anorm = float(np.linalg.norm(A, 1))
+    if not np.isfinite(anorm) or anorm == 0.0:
+        return 0.0
+    from scipy.linalg.lapack import get_lapack_funcs
+
+    (gecon,) = get_lapack_funcs(("gecon",), (lu,))
+    rcond, info = gecon(lu, anorm)
+    return float(rcond) if info == 0 and np.isfinite(rcond) else 0.0
+
+
+def factorized_solver(A: Any, *, rcond: float = SINGULAR_RCOND):  # noqa: N803
     """Return a callable solving ``A x = b`` for dense or sparse ``A``.
 
-    Falls back to a least-squares / pseudo-inverse solve when ``A`` is singular so
-    that free-free models do not blow up the caller.
+    Falls back to a minimum-norm pseudo-inverse solve when ``A`` is singular, so that a
+    free-free model does not blow up the caller. That promise needs the singularity to be
+    *detected*, which an exactly-zero pivot does not do: LU on a numerically singular
+    matrix normally produces a pivot around ``1e-16`` rather than ``0``, returns a vector
+    that satisfies ``A x = b`` to round-off, and hides an arbitrary multiple of the null
+    space inside it — arbitrary enough that the dense and the sparse path of this very
+    function used to disagree by a factor of three on the same free-free chain. The
+    factorisation is therefore accepted only when LAPACK's reciprocal condition estimate
+    (its sparse proxy: the spread of the ``U`` diagonal) stays above ``rcond``.
     """
     if sp.issparse(A):
         Acsc = sp.csc_matrix(A)
         try:
             lu = spla.splu(Acsc)
         except (RuntimeError, ValueError):
-            dense = Acsc.toarray()
-            pinv = np.linalg.pinv(dense)
-            return lambda b: pinv @ np.asarray(b)
+            return _pinv_solver(Acsc.toarray(), "exactly singular")
+        pivots = np.abs(lu.U.diagonal())
+        if pivots.size and (
+            not np.isfinite(pivots).all()
+            or pivots.max() <= 0.0
+            or pivots.min() <= rcond * pivots.max()
+        ):
+            return _pinv_solver(Acsc.toarray(), "singular to working precision")
         return lambda b: lu.solve(np.asarray(b, dtype=float))
 
     dense = as_dense(A)
-    try:
-        from scipy.linalg import lu_factor, lu_solve
+    from scipy.linalg import lu_factor, lu_solve
 
-        piv = lu_factor(dense)
-        cond_ok = np.isfinite(piv[0]).all() and np.abs(np.diag(piv[0])).min() > 0.0
-        if not cond_ok:
-            raise np.linalg.LinAlgError("singular")
+    try:
+        with warnings.catch_warnings():
+            # LinAlgWarning duplicates the check below, which reports it properly.
+            warnings.simplefilter("ignore")
+            piv = lu_factor(dense)
+        if _reciprocal_condition(dense, piv[0]) <= rcond:
+            raise np.linalg.LinAlgError("singular to working precision")
     except (np.linalg.LinAlgError, ValueError):
-        pinv = np.linalg.pinv(dense)
-        return lambda b: pinv @ np.asarray(b)
+        return _pinv_solver(dense, "singular to working precision")
     return lambda b: lu_solve(piv, np.asarray(b, dtype=float))

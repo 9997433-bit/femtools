@@ -174,15 +174,29 @@ class ViscousDamping(DampingModel):
 
     C: Any = None
 
+    def _matrix(self, ndof: int) -> Any:
+        """The damping matrix, checked against the model it is about to be used on.
+
+        A 1-D ``C`` is a plausible mistake — it looks like "the diagonal" — and every
+        product it takes part in broadcasts happily, so the check has to be explicit.
+        """
+        shape = tuple(getattr(self.C, "shape", np.shape(self.C)))
+        if shape != (ndof, ndof):
+            raise ValueError(
+                f"ViscousDamping.C must be a square ({ndof}, {ndof}) matrix, got shape "
+                f"{shape}" + ("; a 1-D array is not read as a diagonal" if len(shape) == 1 else "")
+            )
+        return self.C
+
     def modal_terms(self, modal: ModalModel) -> tuple[np.ndarray, np.ndarray]:
         mm = modal.mass_normalized()
-        Cm = as_dense(mm.modes.T @ (self.C @ mm.modes))
+        Cm = as_dense(mm.modes.T @ (self._matrix(mm.ndof) @ mm.modes))
         return np.diag(Cm).copy(), np.zeros(mm.n_modes)
 
     def coupling_ratio(self, modal: ModalModel) -> float:
         """Max off-diagonal / diagonal magnitude of the projected ``C`` (0 = classical)."""
         mm = modal.mass_normalized()
-        Cm = np.abs(as_dense(mm.modes.T @ (self.C @ mm.modes)))
+        Cm = np.abs(as_dense(mm.modes.T @ (self._matrix(mm.ndof) @ mm.modes)))
         diag = np.diag(Cm).copy()
         off = Cm - np.diag(diag)
         scale = diag.max() if diag.size and diag.max() > 0 else 1.0

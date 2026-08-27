@@ -14,8 +14,13 @@ from typing import Any
 import numpy as np
 
 from ._utils import TWO_PI
-from .damping import DampingModel, as_damping
-from .frf import _check_freq, _dynamic_stiffness_solver, _normalize_response
+from .damping import DampingModel, ViscousDamping, as_damping
+from .frf import (
+    _check_freq,
+    _damping_matrix,
+    _dynamic_stiffness_solver,
+    _normalize_response,
+)
 from .modal import ModalModel, as_modal
 from .system import SystemMatrices, as_system, is_matrix_like
 
@@ -207,7 +212,11 @@ def harmonic_response(
     damping:
         Anything :func:`~femtools.dynamics.damping.as_damping` accepts.
     C:
-        Extra explicit viscous damping matrix (direct method only).
+        Extra explicit viscous damping matrix, ``(ndof, ndof)``. It is added to ``Z(w)``
+        by the direct method and projected onto the modal basis by the modal one, as is
+        any viscous damping that came with an assembly; the modal branch keeps the
+        diagonal of that projection (the classical-damping assumption) and reports what
+        it dropped as ``meta["damping_coupling"]``.
     modal:
         Modal model; enables (and is required by) ``method="modal"``.
     method:
@@ -255,7 +264,21 @@ def harmonic_response(
         mm = modal_model.mass_normalized()
         ndof = mm.ndof
         F = _build_load(load, ndof, f.size, omega, system)
-        two_zeta_omega, eta = dmp.modal_terms(mm)
+        meta: dict[str, Any] = {"n_modes": mm.n_modes}
+        # Viscous damping that came as a *matrix* — assembled with the model, or handed
+        # in as C — is part of the structure, not of the method. The modal branch used to
+        # drop both silently and return the undamped response of a damped model.
+        physical_C = system.C if system is not None else None
+        if C is not None:
+            physical_C = C if physical_C is None else physical_C + C
+        dmp_modal: DampingModel = dmp
+        if physical_C is not None:
+            projected = ViscousDamping(_damping_matrix(physical_C, ndof, "C"))
+            dmp_modal = dmp + projected
+            # Modal superposition can only carry the diagonal of the projected matrix;
+            # this says how much of it is being left behind (0 = classically damped).
+            meta["damping_coupling"] = projected.coupling_ratio(mm)
+        two_zeta_omega, eta = dmp_modal.modal_terms(mm)
         wr2 = np.asarray(mm.eigenvalues, dtype=float)
         denom = (
             wr2[:, None] * (1.0 + 1j * eta[:, None])
@@ -265,7 +288,6 @@ def harmonic_response(
         denom = np.where(denom == 0, np.finfo(float).tiny, denom)
         q = (mm.modes.T @ F) / denom
         X = mm.modes @ q
-        meta: dict[str, Any] = {"n_modes": mm.n_modes}
         modal_coords: np.ndarray | None = q
     else:
         if system is None:
@@ -273,10 +295,13 @@ def harmonic_response(
         ndof = system.ndof
         F = _build_load(load, ndof, f.size, omega, system)
         sparse = system.sparse
-        C_total = dmp.viscous_matrix(K, M, modal_model)
+        C_total = _damping_matrix(
+            dmp.viscous_matrix(K, M, modal_model), ndof, f"the C matrix of {type(dmp).__name__}"
+        )
         if system.C is not None:
             C_total = system.C if C_total is None else C_total + system.C
         if C is not None:
+            C = _damping_matrix(C, ndof, "C")
             C_total = C if C_total is None else C_total + C
         eta_phys = dmp.loss_factor()
         X = np.empty((ndof, f.size), dtype=np.complex128)
