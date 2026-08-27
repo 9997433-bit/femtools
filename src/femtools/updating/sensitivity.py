@@ -85,8 +85,7 @@ class SensitivityResult:
 
     # -- array protocol -------------------------------------------------
     def __array__(self, dtype: Any = None, copy: Any = None) -> np.ndarray:
-        arr = self.matrix if dtype is None else self.matrix.astype(dtype)
-        return arr
+        return np.array(self.matrix, dtype=dtype, copy=copy)
 
     def __getitem__(self, key: Any) -> Any:
         return self.matrix[key]

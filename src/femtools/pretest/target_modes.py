@@ -410,15 +410,14 @@ def select_target_modes(
     if exclude is not None:
         band[np.asarray(exclude, dtype=int).reshape(-1)] = False
 
+    sub = None if em is None else em[:, _direction_columns(directions, labels, em.shape[1])]
+
     keep = np.zeros(n, dtype=bool)
     reason = "frequency band"
-    achieved: NDArray[np.float64] | None = None
 
-    if em is None:
+    if sub is None:
         keep |= band
     else:
-        cols = _direction_columns(directions, labels, em.shape[1])
-        sub = em[:, cols]
         if min_fraction > 0.0:
             keep |= band & (sub.max(axis=1) >= min_fraction)
         if mass_fraction is not None:
@@ -428,26 +427,23 @@ def select_target_modes(
             reason = f"effective mass >= {min_fraction:.3g}"
         else:
             keep |= band
-        achieved = sub[keep].sum(axis=0)
 
     if include is not None:
         keep[np.asarray(include, dtype=int).reshape(-1)] = True
 
     idx = np.flatnonzero(keep).astype(np.intp)
     if n_modes is not None and idx.size > n_modes:
-        if em is not None:
-            cols = _direction_columns(directions, labels, em.shape[1])
-            rank = np.argsort(-em[idx][:, cols].max(axis=1), kind="stable")
+        if sub is not None:
+            rank = np.argsort(-sub[idx].max(axis=1), kind="stable")
         elif freqs is not None:
             rank = np.argsort(freqs[idx], kind="stable")
         else:  # pragma: no cover - unreachable, n>0 requires one of the two
             rank = np.arange(idx.size)
         idx = np.sort(idx[rank[:n_modes]])
         reason += f", capped to {n_modes} modes"
-        if em is not None:
-            cols = _direction_columns(directions, labels, em.shape[1])
-            achieved = em[idx][:, cols].sum(axis=0)
 
+    # Measured on the final selection, so it also covers `include`.
+    achieved = None if sub is None else sub[idx].sum(axis=0)
     rejected = np.setdiff1d(np.arange(n, dtype=np.intp), idx)
     return TargetModeSelection(
         indices=idx,

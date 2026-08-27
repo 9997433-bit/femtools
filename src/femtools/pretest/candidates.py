@@ -29,7 +29,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from ..correlation._linalg import as_mode_matrix, mode_frequencies, mode_source
+from ..correlation._linalg import as_mode_matrix, mode_frequencies, mode_source, row_index
 from ..correlation.dofmap import DOFMap
 from ._result import IdSequenceMixin
 
@@ -89,8 +89,11 @@ class CandidateSet(IdSequenceMixin):
         return int(self.phi.shape[1])
 
     def take(self, index: ArrayLike) -> CandidateSet:
-        """Sub-set for the given candidate rows (e.g. ``EFIResult.index``)."""
-        rows = np.asarray(index, dtype=np.intp).reshape(-1)
+        """Sub-set for the given candidate rows (e.g. ``EFIResult.index``).
+
+        Accepts positions or a boolean mask over the candidates.
+        """
+        rows = row_index(index, self.n_candidates)
         return CandidateSet(
             phi=self.phi[rows],
             dofs=self.dofs[rows],

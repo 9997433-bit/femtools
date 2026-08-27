@@ -7,8 +7,8 @@ all modes mass-normalized ($\Phi^\top M \Phi = I$).
 
 ## Measured status (merged tree, 2026-08-27)
 
-Verified by running `examples/*.py` and `pytest tests/` against the merged
-`cursor/femtools-sota-d551` tree (17 passed, 3 perf skips). Checked = measured
+Verified by running `examples/*.py` (5/5 PASS) and `pytest tests/` against the merged
+`cursor/femtools-sota-d551` tree (21 passed, 3 perf skips). Checked = measured
 passing with the quoted numbers; unchecked = not yet exercised by a test or
 example on this tree.
 
@@ -19,7 +19,7 @@ example on this tree.
       (both planes, 16.71–439.95 Hz) max rel err **2.55e-4** (tol 2e-2);
       `tests/test_golden_fea.py::test_euler_bernoulli_cantilever_first_three_modes_per_bending_plane` green
 - [x] **3a** mass normalization — `examples/cantilever_beam.py`:
-      $\max|\Phi^\top M \Phi - I|$ = **6.66e-16** (tol 1e-8); `tests/test_mass_normalization.py` green
+      $\max|\Phi^\top M \Phi - I|$ = **2.22e-16** (tol 1e-8); `tests/test_mass_normalization.py` green
 - [ ] **3b** stiffness orthogonality — not asserted separately yet
 - [x] **4a–4c** MAC identities — `examples/mac_demo.py`: identity/scale-invariance dev
       **2.22e-16** (tol 1e-12/1e-10); `tests/test_mac.py` (2 tests) green; Hungarian pairing
@@ -46,6 +46,10 @@ example on this tree.
 - [ ] **16** FDD synthetic 2-DOF — no test/example yet
 - [x] **SIMP** (small-mesh smoke level only) — `tests/test_topology.py` green; the full
       60×20 MBB criteria of §8 remain unmeasured
+- [x] **HEX8 anti-locking** (`fea.md` §2.5/§8, not in the master table) —
+      `tests/test_hex8_verification.py` (3 tests) green: one-through-thickness bending ratio
+      **0.9855** with the default incompatible modes (tol > 0.95) vs **0.6428** with `"full"`;
+      distorted patch test **5.0e-16** (tol 1e-10); free–free block exactly 6 rigid-body modes
 
 ## 0. Master table
 

@@ -113,7 +113,7 @@ class OptimizationResult:
     extras: dict[str, Any] = field(default_factory=dict)
 
     def __array__(self, dtype: Any = None, copy: Any = None) -> np.ndarray:
-        return self.x if dtype is None else self.x.astype(dtype)
+        return np.array(self.x, dtype=dtype, copy=copy)
 
     def __getitem__(self, key: Any) -> Any:
         if isinstance(key, str):
@@ -400,14 +400,14 @@ def size_optimize(
     ]
     con_scale = {id(c): r for c, r in zip(cons, crefs, strict=True) if isinstance(c, dict)}
 
+    # `tol` is handed to SciPy itself rather than written into `options`, so that
+    # each method translates it into its own native tolerance (ftol for SLSQP,
+    # gtol for BFGS, xatol/fatol for Nelder-Mead, ...).
     opts: dict[str, Any] = {"maxiter": int(max_iter)}
-    if method.upper() in ("SLSQP", "COBYLA", "TRUST-CONSTR"):
-        opts["ftol" if method.upper() == "SLSQP" else "tol"] = tol
     if verbose:
         opts["disp"] = True
     if options:
         opts.update(options)
-    opts.pop("tol", None)
 
     scipy_bounds = None
     if bnds is not None:
@@ -435,6 +435,7 @@ def size_optimize(
             bounds=scipy_bounds,
             constraints=scaled_cons if scaled_cons else (),
             method=method,
+            tol=tol,
             options=opts,
             callback=(lambda z, _cb=callback: _cb(z * scale)) if callback else None,
         )
@@ -461,11 +462,7 @@ def size_optimize(
         n_iter=int(getattr(res, "nit", 0)),
         n_fev=counters["fev"],
         n_gev=counters["gev"],
-        jac=(
-            np.asarray(res.jac)[: x0.size] * fref / scale
-            if getattr(res, "jac", None) is not None
-            else None
-        ),
+        jac=_objective_gradient(res, n, fref, scale),
         history=history,
         constraint_violation=float(viol),
         x0=x0,
@@ -473,6 +470,25 @@ def size_optimize(
         method=method,
         names=list(names) if names else [f"x{i + 1}" for i in range(n)],
     )
+
+
+def _objective_gradient(
+    res: Any, n: int, fref: float, scale: np.ndarray
+) -> np.ndarray | None:
+    """Objective gradient in physical units, or ``None`` if the solver gave none.
+
+    ``trust-constr`` reports the objective gradient as ``grad`` and reuses ``jac``
+    for the list of *constraint* Jacobians, so the attribute has to be picked by
+    name and then validated against the number of design variables.
+    """
+    for attr in ("grad", "jac"):
+        raw = getattr(res, attr, None)
+        if raw is None:
+            continue
+        g = np.asarray(raw, dtype=float).ravel()
+        if g.size >= n:
+            return g[:n] * fref / scale
+    return None
 
 
 def _scaled_violation(

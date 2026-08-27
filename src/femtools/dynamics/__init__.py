@@ -15,6 +15,13 @@ it anchors the 0.2-0.8 fmax band on the last retained mode (``retained_band``).
 
 Everything is also re-exported from this package. Modal input is duck-typed: any object
 exposing ``freq_hz`` and ``modes`` works, including ``femtools.fea.eigen.ModalResult``.
+
+Physical input is duck-typed in the same spirit. ``direct_frf``, ``harmonic_response`` and
+``verify_modal_vs_direct`` are defined on ``(K, M)`` and keep that signature, but a single
+first argument may also be an ``AssemblyResult``, a ``ModalResult`` carrying one, or a model
+database, which is assembled here and reduced to its free partition
+(``femtools.dynamics.system.as_system``). :mod:`femtools.fea` is imported only inside those
+branches, so the package still runs on nothing but numpy/scipy.
 """
 
 from __future__ import annotations
@@ -54,6 +61,7 @@ from .mba import (
 from .modal import ModalModel, as_modal
 from .residuals import ResidualVectorResult, residual_vectors
 from .synthetic import SyntheticTest, synthetic_frf, synthetic_time_response
+from .system import SystemMatrices, as_system
 from .time_domain import TimeHistoryResult, time_history
 
 __all__ = [
@@ -74,10 +82,12 @@ __all__ = [
     "SpringModification",
     "StructuralDamping",
     "SyntheticTest",
+    "SystemMatrices",
     "TimeHistoryResult",
     "ViscousDamping",
     "as_damping",
     "as_modal",
+    "as_system",
     "craig_bampton",
     "direct_frf",
     "frf_based_assembly",

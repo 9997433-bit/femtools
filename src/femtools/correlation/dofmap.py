@@ -28,7 +28,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from ._linalg import mode_source
+from ._linalg import mode_source, row_index
 
 __all__ = [
     "DOFMap",
@@ -76,13 +76,24 @@ def parse_component(component: Any) -> tuple[int, float]:
         raise ValueError(f"unknown DOF component {component!r}") from None
 
 
+def _as_item_list(items: Any) -> Any:
+    """Wrap a bare string so it is one label, not a sequence of characters.
+
+    ``components="RZ"`` and ``keys="12Z"`` must mean a single item; iterating
+    them would parse ``"R"`` and ``"Z"`` (or ``"1"``, ``"2"``, ``"Z"``).
+    """
+    return [items] if isinstance(items, str) else items
+
+
 def parse_components(components: Iterable[Any]) -> tuple[NDArray[np.int8], NDArray[np.float64]]:
     """Vectorized :func:`parse_component` over an iterable.
 
     Returns ``(component_ids, signs)``.  An integer array (the common case
     when a map is built from an FE kernel DOF map) is converted with pure
-    NumPy; anything else falls back to the per-item parser.
+    NumPy; anything else falls back to the per-item parser.  A single label
+    may be passed as a bare string.
     """
+    components = _as_item_list(components)
     arr = components if isinstance(components, np.ndarray) else np.asarray(list(components))
     if arr.ndim > 1:
         raise ValueError(f"components must be 1-D, got shape {arr.shape}")
@@ -211,6 +222,7 @@ class DOFMap:
         base: int | None = None,
     ) -> None:
         node_arr = _node_array(nodes)
+        components = _as_item_list(components)
         comp_in = components if isinstance(components, np.ndarray) else np.asarray(list(components))
         if base != 1 and comp_in.size and np.issubdtype(comp_in.dtype, np.integer):
             if base == 0 or bool(np.any(comp_in == 0)):
@@ -261,12 +273,15 @@ class DOFMap:
     def from_keys(
         cls, keys: Iterable[Any], scale: ArrayLike | None = None, *, base: int | None = None
     ) -> DOFMap:
-        """Build from ``(node, component)`` tuples or labels like ``"12Z"``."""
+        """Build from ``(node, component)`` tuples or labels like ``"12Z"``.
+
+        A bare string is a single key, not a sequence of characters.
+        """
         nodes: list[int] = []
         comps: list[int] = []
         signs: list[float] = []
         from_int: list[bool] = []
-        for key in keys:
+        for key in _as_item_list(keys):
             node, comp, sgn, is_int = _parse_key_raw(key)
             nodes.append(node)
             comps.append(comp)
@@ -287,7 +302,7 @@ class DOFMap:
     ) -> DOFMap:
         """Cartesian product of ``nodes`` with ``components`` (node-major)."""
         node_arr = _node_array(nodes)
-        comps = list(components)
+        comps = list(_as_item_list(components))
         rep_nodes = np.repeat(node_arr, len(comps))
         rep_comps = comps * node_arr.size
         return cls(rep_nodes, rep_comps, base=base)
@@ -396,7 +411,7 @@ class DOFMap:
     def __getitem__(self, item: int | slice | ArrayLike) -> tuple[int, int] | DOFMap:
         if isinstance(item, (int, np.integer)):
             return (int(self._nodes[item]), int(self._components[item]))
-        idx = np.arange(len(self))[item] if isinstance(item, slice) else np.asarray(item)
+        idx = np.arange(len(self))[item] if isinstance(item, slice) else item
         return self.take(idx)
 
     def __contains__(self, key: Any) -> bool:
@@ -433,10 +448,11 @@ class DOFMap:
         """Positions of ``keys``.
 
         ``missing='raise'`` (default) errors on unknown DOFs, ``'skip'`` drops
-        them and ``'mark'`` returns ``-1`` for them.
+        them and ``'mark'`` returns ``-1`` for them.  A bare string is a
+        single key.
         """
         out: list[int] = []
-        for key in keys:
+        for key in _as_item_list(keys):
             idx = self.index_of(key)
             if idx < 0:
                 if missing == "raise":
@@ -449,8 +465,8 @@ class DOFMap:
         return np.asarray(out, dtype=np.intp)
 
     def take(self, index: ArrayLike) -> DOFMap:
-        """Sub-map for the given positions."""
-        idx = np.asarray(index, dtype=np.intp).reshape(-1)
+        """Sub-map for the given positions, or for a boolean mask over them."""
+        idx = row_index(index, len(self))
         return DOFMap(self._nodes[idx], self._components[idx].tolist(), self._scale[idx])
 
     def subset(
@@ -463,10 +479,13 @@ class DOFMap:
     def select(
         self, components: Iterable[Any] | None = None, nodes: ArrayLike | None = None
     ) -> NDArray[np.intp]:
-        """Positions of the DOFs matching the given components and/or nodes."""
+        """Positions of the DOFs matching the given components and/or nodes.
+
+        ``components`` may be a single label (``"RZ"``) or an iterable of them.
+        """
         mask = np.ones(len(self), dtype=bool)
         if components is not None:
-            wanted = {parse_component(c)[0] for c in components}
+            wanted = {parse_component(c)[0] for c in _as_item_list(components)}
             mask &= np.isin(self._components, sorted(wanted))
         if nodes is not None:
             mask &= np.isin(self._nodes, _node_array(nodes))
@@ -593,10 +612,12 @@ def align_modes(
 def restrict(matrix: Any, index: ArrayLike, index_col: ArrayLike | None = None) -> Any:
     """Extract the sub-matrix ``matrix[index, index]`` (dense or sparse).
 
-    Used to build a test-DOF mass matrix for a cross-orthogonality check.
+    ``index`` holds positions or a boolean mask over the rows.  Used to build
+    a test-DOF mass matrix for a cross-orthogonality check.
     """
-    rows = np.asarray(index, dtype=np.intp).reshape(-1)
-    cols = rows if index_col is None else np.asarray(index_col, dtype=np.intp).reshape(-1)
+    shape = np.shape(matrix)
+    rows = row_index(index, shape[0] if shape else None)
+    cols = rows if index_col is None else row_index(index_col, shape[-1] if shape else None)
     if hasattr(matrix, "tocsr") and not isinstance(matrix, np.ndarray):
         return matrix.tocsr()[rows, :][:, cols]
     dense = np.asarray(matrix)

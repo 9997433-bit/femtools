@@ -447,6 +447,31 @@ def update_cmd(
 # ----------------------------------------------------------------------
 # pretest
 # ----------------------------------------------------------------------
+def _pretest_candidates(modal: Any) -> Any | None:
+    """Translational free-DOF candidate set of a modal result, if available.
+
+    An accelerometer measures one translation of one node, so the EFI
+    ranking must not consider rotational or SPC-constrained DOFs.  Returns
+    ``None`` when the candidate slicing cannot run (stripped installation,
+    or a modal result without a usable DOF map); the caller then falls back
+    to ranking the raw mode matrix.
+    """
+    import numpy as np
+
+    try:
+        from femtools.pretest.candidates import translational_dofs
+    except ImportError:
+        return None
+    try:
+        cand = translational_dofs(modal)
+    except (TypeError, ValueError, KeyError):
+        return None
+    phi = getattr(cand, "phi", None)
+    if phi is None or getattr(cand, "dofs", None) is None or not np.size(phi):
+        return None
+    return cand
+
+
 @app.command("pretest")
 def pretest_cmd(
     model_file: Annotated[Path, typer.Argument(exists=True, help="Model file.")],
@@ -468,10 +493,41 @@ def pretest_cmd(
         from femtools.pretest.efi import effective_independence
     except ImportError as exc:
         raise _missing("pretest sensor selection", exc) from exc
+
+    cand = _pretest_candidates(modal)
+    if cand is not None:
+        phi = np.asarray(cand.phi)
+        candidate_ids = np.asarray(cand.dofs).reshape(-1)
+        labels = list(getattr(cand, "labels", None) or [])
+        label_of = {int(d): lab
+                    for d, lab in zip(candidate_ids.tolist(), labels, strict=False)}
+        n_dropped = int(np.size(getattr(cand, "dropped", ())))
+        note = f" ({n_dropped} constrained/inactive DOFs dropped)" if n_dropped else ""
+        console.print(f"candidates: {phi.shape[0]} translational free DOFs{note}")
+        if n_sensors > phi.shape[0]:
+            err_console.print(
+                f"[yellow]warning:[/yellow] --n-sensors {n_sensors} exceeds the "
+                f"{phi.shape[0]} candidate DOFs; keeping all of them"
+            )
+            n_sensors = int(phi.shape[0])
+    else:
+        phi = np.asarray(modal.modes)
+        candidate_ids = None
+        label_of = {}
+        err_console.print(
+            "[yellow]warning:[/yellow] translational candidate slicing is "
+            "unavailable; ranking every row of the raw mode matrix"
+        )
+
+    kwargs = {} if candidate_ids is None else {"candidate_dofs": candidate_ids}
     try:
-        ranked = effective_independence(np.asarray(modal.modes), n_sensors=n_sensors)
-    except TypeError:
-        ranked = effective_independence(np.asarray(modal.modes))
+        try:
+            ranked = effective_independence(phi, n_sensors=n_sensors, **kwargs)
+        except TypeError:
+            ranked = effective_independence(phi)
+    except ValueError as exc:
+        err_console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
 
     # duck-typed unpack: (ids, values) tuple, object with fields, or plain ids
     ids, values = None, None
@@ -490,18 +546,25 @@ def pretest_cmd(
 
     table = Table(title=f"EFI sensor ranking (top {len(ids)})")
     table.add_column("rank", justify="right")
+    if label_of:
+        table.add_column("sensor", justify="left")
     table.add_column("DOF id", justify="right")
     if vals is not None:
         table.add_column("EFI", justify="right")
     for rank, dof_id in enumerate(ids, start=1):
-        row = [str(rank), str(dof_id)]
+        row = [str(rank)]
+        if label_of:
+            row.append(label_of.get(int(dof_id), "?"))
+        row.append(str(dof_id))
         if vals is not None and rank - 1 < len(vals):
             row.append(f"{float(vals[rank - 1]):.5g}")
         table.add_row(*row)
     console.print(table)
 
     if output is not None:
-        payload = {"dof_ids": ids}
+        payload: dict[str, Any] = {"dof_ids": ids}
+        if label_of:
+            payload["labels"] = [label_of.get(int(i), "") for i in ids]
         if vals is not None:
             payload["efi"] = vals[: len(ids)]
         output.write_text(json.dumps(payload, indent=2), encoding="utf-8")

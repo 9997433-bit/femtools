@@ -137,7 +137,7 @@ stabilization, otherwise keep 2×2; (iii) $\det J \le 0$ at any Gauss point mean
 misnumbered element — raise with the element id; (iv) warped QUAD4 (non-planar nodes): project
 onto the mean plane and warn beyond a warp tolerance (e.g. 10° normal deviation).
 
-### 2.5 HEX8 — trilinear solid
+### 2.5 HEX8 — trilinear solid, incompatible modes by default
 
 $N_i = \tfrac18 (1+\xi\xi_i)(1+\eta\eta_i)(1+\zeta\zeta_i)$, 2×2×2 Gauss, strain-displacement
 $B$ is 6×24, isotropic $D$ from Lamé constants
@@ -146,11 +146,46 @@ $\lambda = E\nu/((1+\nu)(1-2\nu))$, $\mu = G$:
 $$K_e = \sum_{g=1}^{8} B_g^\top D B_g \det J_g w_g,\qquad
   M_e = \rho \sum_g \bar N_g^\top \bar N_g \det J_g w_g \ (24\times 24).$$
 
-Pitfalls: volumetric locking as $\nu \to 0.5$ (mitigate with $\bar B$ / selective reduced
-integration on the volumetric part — optional, flag it); parasitic shear stiffness in thin
-bending (one HEX8 through the thickness is ~an order of magnitude too stiff — require ≥2, or use
-shells); node ordering must follow the standard bottom-face-CCW-then-top convention or
-$\det J < 0$.
+The *plain* trilinear displacement element shear-locks in bending: on the slender verification
+cantilever (10×1×1 mesh, i.e. a single element through the thickness) it recovers only ~64 % of
+the Timoshenko tip deflection — noticeably too stiff, though not by an order of magnitude. The
+implemented default is therefore the **incompatible modes** formulation of Wilson et al.
+(a.k.a. Q6/QM6): the three quadratic bubbles $1-\xi^2$, $1-\eta^2$, $1-\zeta^2$ add nine
+internal displacement DOFs that supply the linear bending strains the trilinear field cannot
+represent, and are statically condensed out per element,
+$K = K_{uu} - K_{ua} K_{aa}^{-1} K_{ua}^\top$. The bubble gradients are mapped with the
+centre Jacobian $J_0$ scaled by $\det J_0 / \det J$ (Taylor–Beresford–Wilson correction), so
+$\int_e B_{enh}\, dV = 0$ and the element still passes the constant-stress patch test on
+distorted meshes (measured ~5e-16). With this default, **one HEX8 through the thickness
+reaches ~98.6 % of the reference deflection** (0.9855 at 10×1×1, 0.96 already at 4×1×1) —
+no ≥2-layer rule needed for well-shaped meshes. The condensation is a Schur complement of a
+positive semi-definite matrix, so it cannot introduce a zero-energy mechanism: a free–free
+block keeps exactly 6 rigid-body modes with the 7th eigenvalue cleanly separated (no hourglass
+modes). The internal DOFs carry no mass; $M_e$ stays the consistent trilinear matrix above.
+Cost: one extra 9×9 solve per element (~+13 % assembly time).
+
+Formulation selection — `HEX8_FORMULATIONS = ("incompatible", "bbar", "full")`, settable on
+the element/property record or assembly-wide via `assemble_km(model, options={"hex8": ...})`:
+
+- `"incompatible"` (default): Wilson/Taylor element above; use it unless a note below applies.
+- `"bbar"`: mean dilatation, numerically identical to selective reduced integration
+  (volumetric term at the centroid, deviatoric 2×2×2). Cures volumetric locking as
+  $\nu \to 0.5$ on bulky meshes, but does *not* cure shear locking and **over-softens thin
+  bending** (deflection ratio 1.20 at 10×1×1, diverging with axial refinement) — reserve it
+  for thick, nearly-incompressible parts.
+- `"full"`: plain 2×2×2 displacement element, kept as the reference / patch-test baseline.
+
+Pitfalls: incompatible modes still lose accuracy near incompressibility (deflection ratio
+0.84 at $\nu = 0.499$ on the thin cantilever — prefer `"bbar"` there, on bulky meshes) and
+are sensitive to element distortion (parallelogram-skewed cantilever drops 0.98 → 0.36 as
+skew → 0.4; still better than `"full"` at every distortion level, but don't expect 90 %
+accuracy from a bad mesh — enforce mesh quality or refine); combining `"bbar"` with the
+internal modes is deliberately not offered (it is either rank-deficient or grossly over-soft
+— see `elements/solid.py`); node ordering must follow the standard
+bottom-face-CCW-then-top convention or $\det J < 0$. Reproducible builders behind every
+number quoted here live in `femtools.fea.verification` (`hex8_bending_ratio`,
+`hex8_patch_test_error`, `hex8_rigid_body_frequencies`) and are pinned by
+`tests/test_hex8_verification.py`.
 
 ### 2.6 TET4, MASS, SPRING, DAMPER
 
@@ -275,7 +310,7 @@ rotation within it — tests must compare via MAC/subspace, never entrywise (see
 
 | Step | Cost |
 |---|---|
-| Element matrices | $O(n_e)$, constants: 4/8-point Gauss |
+| Element matrices | $O(n_e)$, constants: 4/8-point Gauss; HEX8 incompatible modes add one 9×9 condensation per element (~+13 %) |
 | Triplet assembly + CSR | $O(\sum n_{dof,e}^2)$ + sort |
 | SuperLU factorization | ~$O(n^{1.5})$ 2D-like, ~$O(n^2)$ 3D fill |
 | ARPACK per iteration | $O(nnz_{LU})$ solve + $O(n \cdot ncv)$ orthogonalization |
@@ -288,4 +323,10 @@ rotation within it — tests must compare via MAC/subspace, never entrywise (see
   $10^{-8}$ without mesh-convergence excuses.
 - Cantilever BEAM2 vs Euler–Bernoulli $\beta L$ roots — 2 % at 10 elements.
 - Free–free: exactly 6 rigid-body modes at ~0 Hz, elastic modes match free–free roots.
-- Patch tests: single QUAD4/HEX8 under uniform strain reproduces exact constant stress.
+- Patch tests: single QUAD4/HEX8 under uniform strain reproduces exact constant stress; HEX8
+  additionally on the distorted 2×2×2 patch with one enclosed node (the Taylor-correction
+  check, `verification.hex8_patch_test_error`).
+- HEX8 anti-locking: one-through-thickness cantilever ≥ 0.95 of the Timoshenko tip deflection
+  with the default formulation vs ~0.64 for `"full"`; free–free block has exactly 6 rigid
+  modes (`verification.hex8_bending_ratio`, `verification.hex8_rigid_body_frequencies`,
+  pinned by `tests/test_hex8_verification.py`).

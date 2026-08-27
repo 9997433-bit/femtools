@@ -14,6 +14,7 @@ __all__ = [
     "as_mode_matrix",
     "mode_source",
     "mode_frequencies",
+    "row_index",
     "same_array",
     "weighted",
     "column_norms_sq",
@@ -72,6 +73,22 @@ def as_mode_matrix(phi: ArrayLike, name: str = "phi") -> NDArray[Any]:
     if np.issubdtype(arr.dtype, np.integer) or arr.dtype == bool:
         arr = arr.astype(float)
     return arr
+
+
+def row_index(index: Any, size: int | None = None) -> NDArray[np.intp]:
+    """Normalize a row selector to integer positions.
+
+    A boolean array is a *mask* and is expanded with :func:`numpy.flatnonzero`;
+    casting it to positions would silently turn ``[False, True]`` into rows
+    ``0`` and ``1``.  Anything else is taken as integer positions, negative
+    values included.
+    """
+    arr = np.asarray(index)
+    if arr.dtype == bool:
+        if size is not None and arr.size != size:
+            raise ValueError(f"boolean mask has {arr.size} entries, expected {size}")
+        return np.flatnonzero(arr).astype(np.intp)
+    return arr.reshape(-1).astype(np.intp)
 
 
 def same_array(a: NDArray[Any], b: NDArray[Any] | None) -> bool:

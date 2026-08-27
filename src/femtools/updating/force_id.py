@@ -64,7 +64,7 @@ class ForceIdResult:
 
     # -- convenience ----------------------------------------------------
     def __array__(self, dtype: Any = None, copy: Any = None) -> np.ndarray:
-        return self.forces if dtype is None else self.forces.astype(dtype)
+        return np.array(self.forces, dtype=dtype, copy=copy)
 
     def __getitem__(self, key: Any) -> Any:
         return self.forces[key]
@@ -114,10 +114,20 @@ def _gcv_alpha(
     that lies outside the range of ``A``.  With a thin SVD it must be added
     back, otherwise GCV degenerates to zero regularisation whenever the system
     is barely over-determined.
+
+    GCV needs residual degrees of freedom: its denominator
+    ``m - sum_i s_i^2/(s_i^2 + a^2)`` only separates the candidates when there
+    are more measurements than unknowns.  For a square or under-determined
+    transfer matrix numerator and denominator vanish at the same rate as
+    ``a -> 0``, the criterion is flat, and the grid search returns an arbitrary
+    point.  There is no noise level to estimate in that case, so no
+    regularisation is selected; use ``max_condition=`` to impose one explicitly.
     """
     s = np.asarray(s, dtype=float)
     beta = np.abs(np.asarray(beta).ravel()[: s.size])
     if s.size == 0 or s[0] <= 0:
+        return 0.0
+    if m <= s.size:
         return 0.0
     lo, hi = max(s[-1], s[0] * 1e-10), s[0]
     grid = np.geomspace(lo * 1e-3, hi * 1.0e1, 120)
@@ -152,7 +162,15 @@ def _lcurve_alpha(
         return float(grid[0])
     d1r, d1e = np.gradient(rho_a), np.gradient(eta_a)
     d2r, d2e = np.gradient(d1r), np.gradient(d1e)
-    curv = np.abs(d1r * d2e - d1e * d2r) / np.power(d1r**2 + d1e**2, 1.5) + 1e-300
+    # Curvature is undefined where the L-curve is locally flat.  Scoring those
+    # points 0 keeps them out of the running; leaving them as 0/0 would make
+    # argmax return the first NaN instead of the actual corner.
+    speed = np.power(d1r**2 + d1e**2, 1.5)
+    curv = np.where(
+        speed > 0.0, np.abs(d1r * d2e - d1e * d2r) / np.where(speed > 0.0, speed, 1.0), 0.0
+    )
+    if not np.any(curv > 0.0):
+        return float(grid[0])
     return float(grid[int(np.argmax(curv))])
 
 

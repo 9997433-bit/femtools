@@ -13,10 +13,11 @@ from typing import Any
 
 import numpy as np
 
-from ._utils import TWO_PI, is_sparse
+from ._utils import TWO_PI
 from .damping import DampingModel, as_damping
 from .frf import _check_freq, _dynamic_stiffness_solver, _normalize_response
 from .modal import ModalModel, as_modal
+from .system import SystemMatrices, as_system, is_matrix_like
 
 __all__ = ["HarmonicResult", "harmonic_response"]
 
@@ -120,7 +121,13 @@ class HarmonicResult:
         return self.freq_hz[interior]
 
 
-def _build_load(load: Any, ndof: int, n_freq: int, omega: np.ndarray) -> np.ndarray:
+def _build_load(
+    load: Any,
+    ndof: int,
+    n_freq: int,
+    omega: np.ndarray,
+    system: SystemMatrices | None = None,
+) -> np.ndarray:
     """Normalise a load specification to a complex ``(ndof, n_freq)`` array."""
     if load is None:
         raise ValueError("a load specification is required")
@@ -131,10 +138,19 @@ def _build_load(load: Any, ndof: int, n_freq: int, omega: np.ndarray) -> np.ndar
         F = np.zeros((ndof, n_freq), dtype=complex)
         for dof, value in load.items():
             v = np.asarray(value, dtype=complex).reshape(-1)
+            if isinstance(dof, tuple):
+                if system is None:
+                    raise ValueError(
+                        "a (node, component) load key needs a model or assembly; pass "
+                        "one as the first argument or key the load by row index"
+                    )
+                row = int(system.resolve([dof], "load")[0])
+            else:
+                row = int(dof)
             if v.size == 1:
-                F[int(dof), :] += v[0]
+                F[row, :] += v[0]
             elif v.size == n_freq:
-                F[int(dof), :] += v
+                F[row, :] += v
             else:
                 raise ValueError(
                     f"load for DOF {dof} must be scalar or length {n_freq}, got {v.size}"
@@ -171,6 +187,7 @@ def harmonic_response(
     modal: Any = None,
     method: str = "auto",
     response: str = "receptance",
+    assemble: Mapping[str, Any] | None = None,
 ) -> HarmonicResult:
     """Steady-state response to a harmonic load; the result carries the ODS.
 
@@ -178,10 +195,13 @@ def harmonic_response(
     ----------
     K, M:
         Stiffness / mass matrices for the direct method (optional if ``modal`` is given).
+        As in :func:`~femtools.dynamics.frf.direct_frf`, ``K`` alone may be an assembly or
+        a model, which is then assembled here and reduced to its free partition.
     load:
         Complex load amplitudes. One of: a ``(ndof,)`` vector (same at every line), an
         ``(ndof, n_freq)`` array, a ``{dof: amplitude_or_series}`` mapping, or a callable
-        ``omega -> vector``.
+        ``omega -> vector``. With an assembly or a model behind ``K`` the mapping keys may
+        be ``(node_id, component)`` pairs.
     freq_hz:
         Frequency lines in Hz.
     damping:
@@ -191,11 +211,15 @@ def harmonic_response(
     modal:
         Modal model; enables (and is required by) ``method="modal"``.
     method:
-        ``"modal"``, ``"direct"``, or ``"auto"`` (direct when ``K``/``M`` are available).
+        ``"modal"``, ``"direct"``, or ``"auto"`` (direct when the physical system is
+        available).
     response:
         Kinematic quantity stored in :attr:`HarmonicResult.displacement`:
         ``"receptance"``/``"displacement"`` (default), ``"mobility"``/``"velocity"`` or
         ``"accelerance"``/``"acceleration"``.
+    assemble:
+        Keyword arguments for :func:`femtools.fea.assemble.assemble_km`, used only when a
+        model is assembled here.
 
     Returns
     -------
@@ -205,10 +229,23 @@ def harmonic_response(
     f = _check_freq(freq_hz)
     omega = TWO_PI * f
     dmp: DampingModel = as_damping(damping)
-    modal_model: ModalModel | None = as_modal(modal) if modal is not None else None
+    # A bare K with no M is not a system; it stays unusable here so that method="auto"
+    # keeps falling back to the modal branch exactly as it did before.
+    incomplete_pair = K is not None and M is None and is_matrix_like(K)
+    system: SystemMatrices | None = (
+        None if (K is None or incomplete_pair) else as_system(K, M, assemble=assemble)
+    )
+    if system is not None:
+        K, M = system.K, system.M
+    if modal is None:
+        modal_model: ModalModel | None = None
+    elif system is not None:
+        modal_model = system.modal_basis(modal)
+    else:
+        modal_model = as_modal(modal)
 
     if method == "auto":
-        method = "direct" if (K is not None and M is not None) else "modal"
+        method = "direct" if system is not None else "modal"
     if method not in ("modal", "direct"):
         raise ValueError(f"unknown method {method!r}; expected 'modal', 'direct' or 'auto'")
 
@@ -217,7 +254,7 @@ def harmonic_response(
             raise ValueError("method='modal' requires a modal model")
         mm = modal_model.mass_normalized()
         ndof = mm.ndof
-        F = _build_load(load, ndof, f.size, omega)
+        F = _build_load(load, ndof, f.size, omega, system)
         two_zeta_omega, eta = dmp.modal_terms(mm)
         wr2 = np.asarray(mm.eigenvalues, dtype=float)
         denom = (
@@ -231,12 +268,14 @@ def harmonic_response(
         meta: dict[str, Any] = {"n_modes": mm.n_modes}
         modal_coords: np.ndarray | None = q
     else:
-        if K is None or M is None:
+        if system is None:
             raise ValueError("method='direct' requires K and M")
-        ndof = int(K.shape[0])
-        F = _build_load(load, ndof, f.size, omega)
-        sparse = is_sparse(K) or is_sparse(M)
+        ndof = system.ndof
+        F = _build_load(load, ndof, f.size, omega, system)
+        sparse = system.sparse
         C_total = dmp.viscous_matrix(K, M, modal_model)
+        if system.C is not None:
+            C_total = system.C if C_total is None else C_total + system.C
         if C is not None:
             C_total = C if C_total is None else C_total + C
         eta_phys = dmp.loss_factor()
@@ -244,7 +283,7 @@ def harmonic_response(
         for k, w in enumerate(omega):
             solve = _dynamic_stiffness_solver(K, M, C_total, eta_phys, float(w), sparse)
             X[:, k] = np.asarray(solve(F[:, k])).reshape(-1)
-        meta = {"ndof": ndof, "sparse": bool(sparse)}
+        meta = system.meta()
         modal_coords = None
 
     if kind == "mobility":

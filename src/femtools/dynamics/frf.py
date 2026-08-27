@@ -10,11 +10,17 @@ the last *retained* mode — :func:`retained_fmax_hz` — so that the 0.2-0.8 fm
 ``docs/CONTRACT_API.md`` contains only resonances the modal sum actually carries.
 :func:`retained_band` and :func:`retained_band_lines` build that band, and
 :func:`verify_modal_vs_direct` uses it by default when it truncates the basis itself.
+
+:func:`direct_frf` is defined on ``(K, M)`` and keeps that signature, but it also accepts a
+single argument saying where the matrices come from — an assembly or a model, which is
+assembled and reduced to its free partition by :func:`~femtools.dynamics.system.as_system`.
+The mesh-backed forms additionally address DOFs as ``(node_id, component)``.
 """
 
 from __future__ import annotations
 
 import warnings
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,9 +28,10 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-from ._utils import TWO_PI, as_dense, is_sparse, resolve_dofs
+from ._utils import TWO_PI, as_dense, resolve_dofs
 from .damping import DampingModel, as_damping
 from .modal import ModalModel, as_modal
+from .system import SystemMatrices, as_system, resolve_selection
 
 __all__ = [
     "FRFResult",
@@ -406,7 +413,7 @@ def _dynamic_stiffness_solver(
 
 def direct_frf(
     K: Any,
-    M: Any,
+    M: Any = None,
     inputs: Any = None,
     outputs: Any = None,
     freq_hz: Any = None,
@@ -415,6 +422,7 @@ def direct_frf(
     C: Any = None,
     modal: Any = None,
     response: str = "receptance",
+    assemble: Mapping[str, Any] | None = None,
 ) -> FRFResult:
     """FRF by direct inversion of the dynamic stiffness.
 
@@ -424,7 +432,13 @@ def direct_frf(
     Parameters
     ----------
     K, M:
-        Stiffness and mass matrices, dense or scipy sparse, shape ``(ndof, ndof)``.
+        Stiffness and mass matrices, dense or scipy sparse, shape ``(ndof, ndof)``. ``K``
+        may instead be a *single* argument describing where those matrices come from — an
+        ``AssemblyResult``, a ``ModalResult`` carrying one, or a model database, which is
+        assembled here (see :func:`~femtools.dynamics.system.as_system`). In that case the
+        system solved is the free-free partition ``Kff``/``Mff``, any damping assembled
+        with the model is included, and ``inputs``/``outputs`` additionally accept
+        ``(node_id, component)`` pairs.
     inputs, outputs, freq_hz, damping, response:
         As in :func:`modal_frf`.
     C:
@@ -432,25 +446,47 @@ def direct_frf(
     modal:
         Modal basis, required only when ``damping`` is
         :class:`~femtools.dynamics.damping.ModalDamping`, which needs the modes to build
-        the equivalent physical ``C = M Phi diag(2 zeta w_r) Phi^T M``.
+        the equivalent physical ``C = M Phi diag(2 zeta w_r) Phi^T M``. With a model or an
+        assembly this may be the string ``"auto"``, which solves the complete basis here.
+    assemble:
+        Keyword arguments for :func:`femtools.fea.assemble.assemble_km`, used only when a
+        model is assembled here.
+
+    Examples
+    --------
+    The two calls below solve the same system; the second needs no knowledge of how the
+    free partition is numbered::
+
+        direct_frf(assembly.Kff, assembly.Mff, inputs=[37], freq_hz=f, damping=0.01)
+        direct_frf(model, inputs=[(17, "uz")], freq_hz=f, damping=0.01, modal="auto")
     """
-    sparse = is_sparse(K) or is_sparse(M)
-    ndof = int(K.shape[0])
-    if K.shape != M.shape or K.shape[0] != K.shape[1]:
-        raise ValueError(f"K and M must be square and equally sized, got {K.shape}, {M.shape}")
+    system: SystemMatrices = as_system(K, M, assemble=assemble)
+    K, M = system.K, system.M
+    sparse = system.sparse
+    ndof = system.ndof
 
     f = _check_freq(freq_hz)
     omega = TWO_PI * f
     dmp: DampingModel = as_damping(damping)
-    modal_model: ModalModel | None = as_modal(modal) if modal is not None else None
+    modal_model: ModalModel | None = system.modal_basis(modal)
 
-    C_total = dmp.viscous_matrix(K, M, modal_model)
+    try:
+        C_total = dmp.viscous_matrix(K, M, modal_model)
+    except ValueError as exc:
+        if modal_model is None and system.can_solve_modal:
+            raise ValueError(
+                f"{exc}. This system came from a model, so modal='auto' would solve the "
+                "complete basis here"
+            ) from exc
+        raise
+    if system.C is not None:
+        C_total = system.C if C_total is None else C_total + system.C
     if C is not None:
         C_total = C if C_total is None else C_total + C
     eta = dmp.loss_factor()
 
-    in_idx = resolve_dofs(inputs, ndof, "inputs")
-    out_idx = resolve_dofs(outputs, ndof, "outputs")
+    in_idx = system.resolve(inputs, "inputs")
+    out_idx = system.resolve(outputs, "outputs")
 
     F = np.zeros((ndof, in_idx.size), dtype=complex)
     F[in_idx, np.arange(in_idx.size)] = 1.0
@@ -468,6 +504,14 @@ def direct_frf(
         H[:, :, k] = np.asarray(X)[out_idx, :]
 
     H = H * _response_scale(response, omega)[None, None, :]
+    meta = system.meta()
+    meta["damping"] = type(dmp).__name__
+    labels_in = system.labels(in_idx)
+    if labels_in is not None:
+        meta["input_dofs"] = system.global_dofs(in_idx)
+        meta["output_dofs"] = system.global_dofs(out_idx)
+        meta["input_labels"] = labels_in
+        meta["output_labels"] = system.labels(out_idx)
     return FRFResult(
         H=H,
         freq_hz=f,
@@ -475,14 +519,14 @@ def direct_frf(
         inputs=in_idx,
         response=_normalize_response(response),
         method="direct",
-        meta={"ndof": ndof, "damping": type(dmp).__name__, "sparse": bool(sparse)},
+        meta=meta,
     )
 
 
 def verify_modal_vs_direct(
     K: Any,
-    M: Any,
-    modal: Any,
+    M: Any = None,
+    modal: Any = None,
     freq_hz: Any = None,
     damping: Any = None,
     inputs: Any = None,
@@ -493,6 +537,8 @@ def verify_modal_vs_direct(
     fmax_hz: float | None = None,
     n_lines: int = 240,
     band_fractions: tuple[float, float] = DEFAULT_BAND_FRACTIONS,
+    full_modes: int | None = None,
+    assemble: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compare modal and direct FRF and report the relative L2 error.
 
@@ -504,10 +550,14 @@ def verify_modal_vs_direct(
     Parameters
     ----------
     K, M:
-        Physical matrices driving the direct side.
+        Physical matrices driving the direct side, or a single assembly / model argument
+        as in :func:`direct_frf`.
     modal:
         Modal basis. When ``n_modes`` or ``fmax_hz`` is given this is the *complete*
-        basis and the modal side is truncated from it; otherwise it is used as-is.
+        basis and the modal side is truncated from it; otherwise it is used as-is. With
+        an assembly or a model it may be left out entirely, in which case the complete
+        basis is solved here — ``verify_modal_vs_direct(model, n_modes=20)`` is then the
+        whole acceptance case.
     freq_hz:
         Frequency lines in Hz. ``None`` (the default) builds ``n_lines`` lines across
         :func:`retained_band` of the truncated basis, i.e. anchored on the last
@@ -528,15 +578,38 @@ def verify_modal_vs_direct(
     band_fractions:
         ``(low, high)`` multipliers of ``fmax`` for the generated lines and for
         ``band="retained"``. Defaults to ``(0.2, 0.8)``.
+    full_modes:
+        Size of the basis solved here when ``modal`` is omitted. The default is the
+        complete basis, because that is what makes a
+        :class:`~femtools.dynamics.damping.ModalDamping` ``C`` — and hence the comparison
+        itself — exact. Damping that has a physical form of its own (Rayleigh, structural,
+        explicit ``C``) does not need it, so on a large model pass something just above
+        ``n_modes`` instead of paying for the full spectrum.
+    assemble:
+        Keyword arguments for :func:`femtools.fea.assemble.assemble_km`, used only when a
+        model is assembled here.
 
     Returns
     -------
     dict
         ``rel_l2``, ``abs_l2``, ``max_rel_pointwise``, ``n_modes`` (retained),
-        ``n_modes_full``, ``fmax_hz`` (last retained mode), ``band_hz``, ``n_freq`` and
-        both :class:`FRFResult` objects under ``modal``/``direct``.
+        ``n_modes_full``, ``fmax_hz`` (last retained mode), ``band_hz``, ``n_freq``,
+        ``system`` and both :class:`FRFResult` objects under ``modal``/``direct``.
     """
-    full = as_modal(modal)
+    system = as_system(K, M, assemble=assemble)
+    if modal is None:
+        if not system.can_solve_modal:
+            raise ValueError(
+                "a modal basis is required; it can only be solved here when the first "
+                "argument is an assembly or a model"
+            )
+        full = system.solve_modal(full_modes)
+    else:
+        if full_modes is not None:
+            raise ValueError("full_modes only applies when the basis is solved here")
+        full = system.align_modal(modal)
+    inputs = resolve_selection(system, inputs, "inputs")
+    outputs = resolve_selection(system, outputs, "outputs")
     truncate = n_modes is not None or fmax_hz is not None
     truncated = full.truncate(n_modes, fmax_hz) if truncate else full
     if truncated.n_modes == 0:
@@ -560,7 +633,7 @@ def verify_modal_vs_direct(
         band_hz = None
 
     Hm = modal_frf(truncated, inputs, outputs, f, damping)
-    Hd = direct_frf(K, M, inputs, outputs, f, damping, modal=full)
+    Hd = direct_frf(system, None, inputs, outputs, f, damping, modal=full)
     mask = _band_mask(Hd.freq_hz, band_hz)
     if not mask.any():
         raise ValueError(f"no frequency line falls inside the band {band_hz}")
@@ -580,6 +653,7 @@ def verify_modal_vs_direct(
         "fmax_hz": retained_fmax_hz(truncated),
         "band_hz": band_hz,
         "n_freq": int(mask.sum()),
+        "system": system,
         "modal": Hm,
         "direct": Hd,
     }

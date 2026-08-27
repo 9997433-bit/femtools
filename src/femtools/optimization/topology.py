@@ -19,7 +19,7 @@ the optimizer does not depend on the general FEA layer.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -61,7 +61,7 @@ class TopologyResult:
     extras: dict[str, Any] = field(default_factory=dict)
 
     def __array__(self, dtype: Any = None, copy: Any = None) -> np.ndarray:
-        return self.density if dtype is None else self.density.astype(dtype)
+        return np.array(self.density, dtype=dtype, copy=copy)
 
     def __getitem__(self, key: Any) -> Any:
         return self.density[key]
@@ -243,8 +243,14 @@ def _oc_update(
     volfrac: float,
     move: float = 0.2,
     xmin: float = 1.0e-3,
+    physical: Callable[[np.ndarray], np.ndarray] | None = None,
 ) -> np.ndarray:
-    """Optimality-criteria update with bisection on the Lagrange multiplier."""
+    """Optimality-criteria update with bisection on the Lagrange multiplier.
+
+    ``physical`` maps design variables to the densities the volume is measured
+    on.  Under a density filter the two differ, and the constraint belongs to the
+    filtered field, so the bisection has to evaluate the filter on every trial.
+    """
     l1, l2 = 0.0, 1.0e9
     n = x.size
     target = volfrac * n
@@ -254,7 +260,8 @@ def _oc_update(
         with np.errstate(divide="ignore", invalid="ignore"):
             be = np.maximum(-dc / (lmid * np.maximum(dv, 1e-30)), 0.0)
         xnew = np.clip(x * np.sqrt(be), np.maximum(xmin, x - move), np.minimum(1.0, x + move))
-        if xnew.sum() > target:
+        volume = xnew.sum() if physical is None else float(np.sum(physical(xnew)))
+        if volume > target:
             l1 = lmid
         else:
             l2 = lmid
@@ -382,6 +389,10 @@ def topology_simp(
     KE_flat = KE.ravel()
 
     H, Hs = _filter_matrix(nelx, nely, rmin)
+    density_filtering = rmin > 1.0 and not filter.lower().startswith("sens")
+
+    def to_physical(z: np.ndarray) -> np.ndarray:
+        return np.asarray(H @ z).ravel() / Hs
 
     # -- design field (column-major internally, (nely, nelx) externally) --
     if x0 is None:
@@ -428,22 +439,22 @@ def topology_simp(
         dv = np.ones(n_elem)
 
         # ---- filtering ----------------------------------------------------
-        if rmin > 1.0:
-            if filter.lower().startswith("sens"):
-                dc = np.asarray(H @ (x * dc)).ravel() / (Hs * np.maximum(x, 1.0e-3))
-            else:
-                dc = np.asarray(H @ (dc / Hs)).ravel()
-                dv = np.asarray(H @ (dv / Hs)).ravel()
+        if density_filtering:
+            dc = np.asarray(H @ (dc / Hs)).ravel()
+            dv = np.asarray(H @ (dv / Hs)).ravel()
+        elif rmin > 1.0:
+            dc = np.asarray(H @ (x * dc)).ravel() / (Hs * np.maximum(x, 1.0e-3))
 
         # ---- OC update -----------------------------------------------------
-        xnew = _oc_update(x, dc, dv, volfrac, move=move)
+        xnew = _oc_update(
+            x, dc, dv, volfrac, move=move,
+            physical=to_physical if density_filtering else None,
+        )
         if passive_v is not None:
             xnew = np.where(passive_v == 1, 1.0e-3, np.where(passive_v == 2, 1.0, xnew))
         change = float(np.max(np.abs(xnew - x)))
         x = xnew
-        xphys = np.asarray(H @ x).ravel() / Hs if (
-            rmin > 1.0 and not filter.lower().startswith("sens")
-        ) else x.copy()
+        xphys = to_physical(x) if density_filtering else x.copy()
 
         rec = {
             "iteration": it,
