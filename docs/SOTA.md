@@ -82,10 +82,11 @@ deviations.
   Proc. 7th IMAC, 1989 (adds inertial correction to Guyan).
 * **SEREP.** O'Callahan, J., Avitabile, P., Riemer, R., *System Equivalent Reduction Expansion
   Process (SEREP)*, Proc. 7th IMAC, 1989 (modal-basis reduction/expansion, exact at retained
-  modes; femtools' default for shape expansion in cross-orthogonality).
-* femtools implements each as an explicit transformation matrix `T` with
-  `K_r = TᵀKT, M_r = TᵀMT`, shared between pretest (test-DOF system matrices) and correlation
-  (expansion of measured shapes).
+  modes; intended default for shape expansion in cross-orthogonality).
+* Planned implementation (`docs/PRODUCT_MAP.md` R3+): each as an explicit transformation
+  matrix `T` with `K_r = TᵀKT, M_r = TᵀMT`, shared between pretest (test-DOF system matrices)
+  and correlation (expansion of measured shapes). Until then, cross-orthogonality requires
+  the caller to supply M at the common DOFs (e.g. via `correlation.dofmap.DOFMap` selection).
 
 ## 5. Structural dynamics: FRF synthesis, CMS
 
@@ -99,10 +100,11 @@ deviations.
   5% relative L2 over 0.2–0.8 f_max with 20 modes).
 * **Craig–Bampton CMS.** Craig, R.R., Bampton, M.C.C., *Coupling of Substructures for Dynamic
   Analyses*, AIAA Journal, 6(7), 1968, pp. 1313–1319 — fixed-interface normal modes +
-  constraint modes. Free-interface alternatives for R2: MacNeal, R.H., *A Hybrid Method of
-  Component Mode Synthesis*, Computers & Structures, 1(4), 1971, pp. 581–601; Rubin, S.,
-  *Improved Component-Mode Representation for Structural Dynamic Analysis*, AIAA Journal,
-  13(8), 1975, pp. 995–1006 (residual-flexibility attachment modes).
+  constraint modes. Free-interface alternatives (planned, `docs/PRODUCT_MAP.md` R3+):
+  MacNeal, R.H., *A Hybrid Method of Component Mode Synthesis*, Computers & Structures,
+  1(4), 1971, pp. 581–601; Rubin, S., *Improved Component-Mode Representation for Structural
+  Dynamic Analysis*, AIAA Journal, 13(8), 1975, pp. 995–1006 (residual-flexibility
+  attachment modes).
 * **Eigen solution.** Lehoucq, R.B., Sorensen, D.C., Yang, C., *ARPACK Users' Guide*, SIAM,
   1998 — implicitly restarted Lanczos, shift-invert for the constrained generalized problem.
 
@@ -118,7 +120,7 @@ deviations.
   Parameter Estimation?*, Shock and Vibration, 11(3–4), 2004, pp. 395–409. femtools implements
   the poly-reference right matrix-fraction model with real-valued reduced normal equations,
   pole extraction from the companion matrix, and LSFD residue estimation; stabilization
-  diagrams are R2.
+  diagrams are built by `mpe.common.stabilization_diagram` / `select_physical_poles`.
 * **FDD / EFDD.** Brincker, R., Zhang, L., Andersen, P., *Modal Identification of Output-Only
   Systems Using Frequency Domain Decomposition*, Smart Materials and Structures, 10(3), 2001,
   pp. 441–445; damping via SDOF autocorrelation fitting: Brincker, R., Ventura, C.E.,
@@ -191,28 +193,54 @@ modeling discrepancy:
 The concrete Round-1 tolerance table lives in `docs/CONTRACT_API.md` and is binding for all
 implementations; `docs/ACCEPTANCE.md` (owned by R1-F3) elaborates the golden cases.
 
-## 10. Merged-code gap (Round-1 reality vs. the references above)
+## 10. Merged-code gap (Round-2 closure and residual distances)
 
-Known distances between the merged Round-1 code and the state of the art it targets.
-Status tags in `docs/PRODUCT_MAP.md` point here; a row tagged R1 is merged and tested but may
-still carry one of these defects.
+Known distances between the merged code and the state of the art it targets. Status tags in
+`docs/PRODUCT_MAP.md` point here; a row tagged R1/R2 is merged and tested but may still carry
+one of these caveats. Capabilities that are absent (rather than imperfect) are the R3+ rows
+of the product map, not repeated here.
 
-* **HEX8 shear locking.** The merged trilinear HEX8 with full 2×2×2 Gauss quadrature locks in
-  bending: a single-element-thick cantilever recovers only ~66% of the reference tip
-  deflection. The literature fix is selective/reduced integration with hourglass control or
-  incompatible (bubble) modes — Wilson, E.L., Taylor, R.L., Doherty, W.P., Ghaboussi, J.,
-  *Incompatible Displacement Models*, in *Numerical and Computer Methods in Structural
-  Mechanics*, Academic Press, 1973; Simo, J.C., Rifai, M.S., *A Class of Mixed Assumed Strain
-  Methods and the Method of Incompatible Modes*, IJNME, 29(8), 1990, pp. 1595–1638. Scheduled
-  R2 in `src/femtools/fea` (owner R2-O1).
-* **UNV material/property cards.** The UNV reader/writer round-trips nodes, elements, trace
-  lines, shapes and functions, but carries no material or property datasets, so a UNV
-  round-trip loses E/ν/ρ and section data (BDF and `.ftproj` do carry them). BDF import also
-  drops TET10/HEX20 midside nodes. Scheduled R2 in `src/femtools/io` (owner R2-F2).
+### Closed in Round 2
+
+* **HEX8 shear locking — fixed.** The Round-1 trilinear HEX8 with full 2×2×2 Gauss quadrature
+  locked in bending (~66% of the reference tip deflection on a single-element-thick
+  cantilever). Round 2 implemented incompatible (bubble) modes — Wilson, E.L., Taylor, R.L.,
+  Doherty, W.P., Ghaboussi, J., *Incompatible Displacement Models*, in *Numerical and
+  Computer Methods in Structural Mechanics*, Academic Press, 1973; static condensation of the
+  internal modes per element. The same case now recovers **98.6%** of the reference
+  deflection, and a free-free mesh still yields exactly 6 rigid-body modes.
+* **UNV material/property cards — closed for femtools round trips.** `write_unv` appends a
+  private dataset 30000 (legal user range; conforming readers skip unknown numbers) holding
+  the material/property tables as JSON, and `read_unv` restores them, so a
+  femtools→femtools UNV round trip no longer loses E/ν/ρ or section data.
+
+### Residual caveats on merged code
+
+* **HEX8 under mesh distortion.** Incompatible modes are calibrated on parallelepiped
+  elements; with strong skew (skew factor → 0.4) the single-layer bending ratio degrades
+  from 0.986 toward ~0.36 — still better than the locking element, but mesh-quality limits
+  apply. The assumed-strain stabilization of Simo, J.C., Rifai, M.S., *A Class of Mixed
+  Assumed Strain Methods and the Method of Incompatible Modes*, IJNME, 29(8), 1990,
+  pp. 1595–1638, is the known distortion-robust upgrade (not implemented).
+* **`bbar` HEX8 variant.** The B-bar (mean-dilatation) option is too soft in thin bending
+  (~2.13× reference deflection); it is intended only for near-incompressible, thick
+  components.
+* **Truncated-FRF acceptance is a 20-mode statement.** The ≤5% relative-L2 band of
+  `docs/CONTRACT_API.md` (0.2–0.8 f_max, `retained_band`) is contractual for 20 retained
+  modes with light damping; with fewer than ~20 modes or ζ ≈ 0.02 the 5% band may not be
+  met and residual-term compensation (§5) is required.
+* **UNV materials are invisible to third parties.** Dataset 30000 is femtools-private by
+  design; external UFF readers skip it, so materials/properties still do not transfer to
+  other tools via UNV (BDF and `.ftproj` remain the lossless routes).
+* **BDF midside nodes.** TET10/HEX20 import still collapses to TET4/HEX8 (midside nodes
+  dropped, one aggregated warning per card type).
 * **DAQ: hardware acquisition is N/A by design** (hardware and vendor-licensing scope, not an
   algorithmic gap). The supported substitute is synthetic test data with controlled noise and
   fixed seeds — `femtools.dynamics.synthetic` and `femtools.mpe.synthetic` — which is what the
   MPE/OMA validation cases of §6 and §9.5 consume.
+* **Static typing.** `py.typed` ships and the public API has a full static view
+  (`TYPE_CHECKING` re-exports), but mypy still reports a few dozen informational findings in
+  internal modules; the CI mypy step is non-blocking.
 
 ## Non-infringement note
 
