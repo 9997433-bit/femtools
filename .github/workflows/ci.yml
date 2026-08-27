@@ -42,21 +42,20 @@ jobs:
       - name: Import smoke test
         run: python -c "import femtools; print('femtools', femtools.__version__)"
 
-      - name: Pytest
-        # Round 1 lands packages and tests from parallel branches; keep CI green
-        # when the tests/ tree is absent or collects nothing (pytest exit code 5).
-        # Tests for not-yet-merged modules must skip via importorskip.
+      - name: Public API smoke test
         run: |
-          if [ ! -d tests ]; then
-            echo "No tests/ directory on this branch yet - skipping pytest."
-            exit 0
-          fi
-          set +e
-          pytest -q
-          code=$?
-          set -e
-          if [ "$code" -eq 5 ]; then
-            echo "pytest collected no tests - treating as success."
-            exit 0
-          fi
-          exit "$code"
+          python - <<'EOF'
+          import femtools
+
+          missing = [name for name in femtools.__all__ if getattr(femtools, name, None) is None]
+          assert not missing, f"unresolvable exports: {missing}"
+          print(f"femtools {femtools.__version__}: {len(femtools.__all__)} exports resolve")
+          EOF
+
+      - name: Pytest
+        # Strict since Round 2: an empty collection (exit 5) is a failure.
+        run: pytest -q
+
+      - name: Mypy (non-blocking)
+        continue-on-error: true
+        run: mypy src/femtools

@@ -4,14 +4,18 @@ Goal: a 1:1 *functional* equivalent of the commercial FEMtools product family (D
 Solutions). This is an original implementation; no proprietary source, file formats
 documentation, or manual text is used. Public-literature algorithm references: `docs/SOTA.md`.
 
-**Status legend**
+**Status legend** (retagged after the Round-1 merge to the integration branch)
 
 | Status | Meaning |
 |---|---|
-| **R1** | In the frozen Round-1 contract (`docs/CONTRACT_API.md`); implemented this round |
-| **R2** | Planned next round; API sketched below, subject to contract extension |
+| **R1** | Merged in Round 1; importable from the integration branch and covered by tests |
+| **R2** | Round 2 scope: in progress this round, subject to contract extension |
 | **R3+** | Planned later; direction fixed, API not yet frozen |
 | **N/A** | Out of scope (hardware, licensing) with substitute noted |
+
+Known numerical/functional defects in already-merged (R1) code are tracked in
+`docs/SOTA.md` §10 "Merged-code gap" (HEX8 shear locking, UNV material/property cards,
+DAQ substitute) — a row tagged R1 means *merged and tested*, not *defect-free*.
 
 ## 1. FEMtools Framework
 
@@ -19,14 +23,14 @@ documentation, or manual text is used. Public-literature algorithm references: `
 |---|---|---|
 | FE/test relational database | `core.model.FEModel` (nodes, elements, materials, properties, SPCs, sets) | R1 |
 | Node/element sets, selection | `core.sets.NodeSet`, `core.sets.ElementSet` | R1 |
-| Coordinate systems (rect/cyl/sph) | `core.coords.CoordSys` (rectangular R1; cyl/sph R2) | R1 |
+| Coordinate systems (rect/cyl/sph) | `core.coords.CoordSys` (cartesian, cylindrical, spherical) | R1 |
 | Unit system handling | `core.units.UnitSystem` (SI internal, convert at I/O) | R1 |
 | Project persistence | `io.project.save_project` / `load_project` (`.ftproj` JSON+npz) | R1 |
 | Scripting language (FEMtools Script analog) | `script.engine.ScriptEngine` — command interpreter over the Python API | R1 |
 | Command-line surface | `cli` typer app: `solve-modes`, `mac`, `frf`, `update`, `pretest`, `script` | R1 |
-| Python API | every package below; typed, documented | R1 |
-| GUI shell | `gui` (matplotlib-embedded inspection; interactive shell R3+) | R2 |
-| Mesh/geometry visualization | `viz` (matplotlib R1-level plots; pyvista/plotly optional extra) | R2 |
+| Python API | every package below; frozen contract re-exported from `femtools` top level | R1 |
+| GUI shell | `gui` web shell (`gui.server` on stdlib http, FastAPI optional) — model upload and preloaded examples are R2 | R1 |
+| Mesh/geometry visualization | `viz.plots` (matplotlib) — `plot_mode` draws translations only; rotational DOFs and pyvista/plotly extras are R2 | R1 |
 | Mesh generation / import CAD | not planned — import meshes via UNV/BDF | N/A |
 
 ## 2. FEMtools Dynamics
@@ -35,16 +39,17 @@ documentation, or manual text is used. Public-literature algorithm references: `
 |---|---|---|
 | Real normal modes (FEA) | `fea.eigen.solve_modes` → `ModalResult` (mass-normalized) | R1 |
 | Static solution | `fea.static.solve_static` | R1 |
-| Element library (BAR2, BEAM2, TRUSS2D, QUAD4, TRIA3, HEX8, TET4, MASS, SPRING, DAMPER) | `fea.elements` registry, `fea.assemble.assemble_km` | R1 |
+| Element library (BAR2, BEAM2, TRUSS2D, QUAD4, TRIA3, HEX8, TET4, MASS, SPRING, DAMPER) | `fea.elements` registry, `fea.assemble.assemble_km` — HEX8 anti-locking fix is R2 (SOTA.md §10) | R1 |
 | Modal FRF synthesis (with damping models) | `dynamics.frf.modal_frf` (modal ζ, Rayleigh, structural η) | R1 |
 | Residual flexibility / residual vectors | `dynamics.residuals.residual_vectors`; upper/lower residual terms in `modal_frf` | R1 |
 | Direct (full-order) FRF | `dynamics.frf.direct_frf` (dynamic stiffness inversion) | R1 |
 | Harmonic forced response / ODS | `dynamics.harmonic.harmonic_response` | R1 |
-| Transient response | `dynamics.time_domain.time_history` (modal superposition; Newmark R2) | R1 |
+| Transient response | `dynamics.time_domain.time_history` (Nigam–Jennings exact recurrence and Newmark, on modal coordinates) | R1 |
 | Craig–Bampton CMS / superelements | `dynamics.craig_bampton.craig_bampton` | R1 |
 | Modal-based assembly (coupling by modes) | `dynamics.mba.modal_based_assembly` | R1 |
+| FRF-based assembly (substructure coupling on FRFs) | `dynamics.fba.frf_based_assembly` | R1 |
+| Structural dynamics modification (SDM) | `dynamics.mba.structural_dynamic_modification` (mass/spring modifications on the modal model) | R1 |
 | Free-interface CMS (MacNeal/Rubin) | `dynamics.cms_free` | R2 |
-| Structural dynamics modification (SDM) | `dynamics.sdm` | R2 |
 | Complex modes (general viscous damping) | `fea.eigen` state-space path | R2 |
 | Random/PSD response | `dynamics.random` | R3+ |
 
@@ -55,6 +60,7 @@ documentation, or manual text is used. Public-literature algorithm references: `
 | Target mode selection / modal effective mass | `pretest.target_modes.effective_mass`, `select_target_modes` | R1 |
 | Sensor placement — Effective Independence (EFI) | `pretest.efi.effective_independence` | R1 |
 | Sensor elimination by MAC / kinetic energy ranking | `pretest.sensor.eliminate_by_mac`, `nodal_kinetic_energy` | R1 |
+| Sensor mass-loading check | `pretest.mass_loading.mass_loading`, `sensor_mass_limit` | R1 |
 | Exciter placement (driving-point residues) | `pretest.exciter` | R2 |
 | Test geometry definition & FE↔test node mapping | test geometry as `FEModel`; mapping in `correlation.pairing` (nearest-node R1; geometric alignment R2) | R1 |
 | MAC / CoMAC / POC | `correlation.mac.mac_matrix`, `comac`, `poc` | R1 |
@@ -62,7 +68,8 @@ documentation, or manual text is used. Public-literature algorithm references: `
 | Mass-weighted cross-orthogonality | `correlation.orthogonality.cross_orthogonality` | R1 |
 | FRF correlation (FRAC / CSAC / CSF) | `correlation.frf_corr.frac`, `csac`, `csf` | R1 |
 | Shape expansion/reduction (Guyan, IRS, SEREP) | `fea.reduction` + `correlation.expansion` | R2 |
-| ECOMAC, FMAC and extended metrics | `correlation.mac` extensions | R2 |
+| ECOMAC / FDAC / modal scale factor | `correlation.mac.ecomac`, `modal_scale_factor`; `correlation.frf_corr.fdac` | R1 |
+| FMAC and further extended metrics | `correlation.mac` extensions | R2 |
 | Correlation report generation | `viz` + `cli` report commands | R2 |
 
 ## 4. FEMtools Model Updating
@@ -98,7 +105,7 @@ documentation, or manual text is used. Public-literature algorithm references: `
 | Poly-reference LSCF (PolyMAX-class) | `mpe.p_lscf.poly_lscf` | R1 |
 | LSCE (complex exponential) | `mpe.lsce.lsce` | R1 |
 | Operational: FDD / EFDD | `mpe.fdd.fdd`, `efdd` | R1 |
-| Stabilization diagram construction | `mpe.stabilization` | R2 |
+| Stabilization diagram construction | `mpe.common.stabilization_diagram`, `StabilizationDiagram`, `select_physical_poles` | R1 |
 | MIMO FRF estimation from time data (H1/H2, coherence) | `mpe.frf_estimation` | R2 |
 | SSI (covariance/data-driven) | `mpe.ssi` | R3+ |
 
@@ -113,15 +120,15 @@ documentation, or manual text is used. Public-literature algorithm references: `
 
 | Capability | femtools API | Status |
 |---|---|---|
-| Hardware acquisition (NI etc.) | not planned (hardware/licensing) | N/A |
-| Synthetic test-data generation (noisy FRFs, shaped excitation) for MPE/OMA validation | `dynamics` synthetic generators + `examples/` | R1 |
+| Hardware acquisition (NI etc.) | not planned (hardware/licensing) — see SOTA.md §10 | N/A |
+| Synthetic test-data generation (noisy FRFs, time responses) for MPE/OMA validation | `dynamics.synthetic.synthetic_frf` / `synthetic_time_response`; `mpe.synthetic` | R1 |
 
 ## 9. FEA interfaces
 
 | Capability | femtools API | Status |
 |---|---|---|
-| Universal file (UNV) datasets 15/2411 (nodes), 82 (trace lines), 55 (shapes), 58 (FRFs/functions), 151/164 (header/units) | `io.unv.read_unv`, `write_unv` | R1 |
-| Nastran BDF subset (GRID, CQUAD4, CTRIA3, CBAR, CHEXA, MAT1, PSHELL, PBAR, SPC, FORCE) | `io.bdf.read_bdf`, `write_bdf` | R1 |
+| Universal file (UNV) datasets 15/2411 (nodes), 2412 (elements), 82 (trace lines), 55 (shapes), 58 (FRFs/functions), 151/164 (header/units) | `io.unv.read_unv`, `write_unv` — material/property datasets not carried yet (SOTA.md §10) | R1 |
+| Nastran BDF subset (GRID, C\*, MAT1, PSHELL/PBAR/P\*, SPC, FORCE) | `io.bdf.read_bdf`, `write_bdf` — TET10/HEX20 midside nodes dropped (SOTA.md §10) | R1 |
 | Native project file | `io.project` (`.ftproj`) | R1 |
 | Nastran OP2 results | `femtools.drivers` entry point (`SolverDriver` protocol, `docs/ARCHITECTURE.md` §10) | R2 |
 | ANSYS cdb/rst | driver plug-in | R2+ |
@@ -130,7 +137,11 @@ documentation, or manual text is used. Public-literature algorithm references: `
 
 ## Cross-cutting quality gates (all rounds)
 
-* Typed public API (`py.typed` marker once subpackages land), pydantic-validated core.
+* Typed public API (`py.typed` marker still pending — R2, owned with `src/femtools/core`),
+  pydantic-validated core.
+* Frozen contract (`docs/CONTRACT_API.md`) re-exported lazily from `femtools`
+  (`src/femtools/__init__.py`), so `import femtools` is cheap and cycle-free.
 * Golden analytical acceptance tests with the tolerance table of `docs/CONTRACT_API.md`.
-* ruff + pytest in CI on Python 3.11 (`.github/workflows/ci.yml`); mypy gate planned R2.
+* ruff + strict pytest (an empty collection fails CI since Round 2) on Python 3.11,
+  plus a non-blocking mypy step (`.github/workflows/ci.yml`).
 * Deterministic seeds for every stochastic routine.

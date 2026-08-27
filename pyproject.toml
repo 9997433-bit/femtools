@@ -97,7 +97,9 @@ select = ["E", "F", "I", "UP", "B"]
 known-first-party = ["femtools"]
 
 [tool.mypy]
-python_version = "3.11"
+# 3.12+: numpy's stubs use PEP 695 `type` statements, which mypy rejects for
+# older targets. The CI mypy step is informational (non-blocking) anyway.
+python_version = "3.12"
 strict = false
 ignore_missing_imports = true
 
