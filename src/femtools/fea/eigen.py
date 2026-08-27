@@ -511,6 +511,11 @@ class ComplexModalResult:
         return self.modes
 
     @property
+    def modes_complex(self) -> np.ndarray:
+        """Alias for :attr:`modes` (frozen extra-API name)."""
+        return self.modes
+
+    @property
     def n_modes(self) -> int:
         return int(self.freq_hz.size)
 

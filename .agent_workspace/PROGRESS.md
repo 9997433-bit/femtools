@@ -1,16 +1,10 @@
-# PROGRESS — remaining FEMtools capabilities
+# PROGRESS
 
-## Branch
+Branch `cursor/femtools-remaining-d551` PR #2
 
-`cursor/femtools-remaining-d551`
-
-## Loop
-
-| Round | Status | Notes |
-|-------|--------|--------|
-| R1–R3 | done | merged to main |
-| Round 4 | in_flight | Guyan/IRS/SEREP, complex modes, Rubin CMS, H1/H2, SSI, FRF updating, … |
-| Round 5 | pending | |
-| Round 6 | pending | |
-
-Backlog: `.agent_workspace/REMAINING.md`
+| Round | Status |
+|-------|--------|
+| R1–R3 | done on main |
+| Round 4 | done — remaining APIs merged, pytest green |
+| Round 5 | in_flight — examples live, PRODUCT_MAP retag |
+| Round 6 | pending |
