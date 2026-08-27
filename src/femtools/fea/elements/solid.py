@@ -10,6 +10,13 @@ to the **incompatible modes** formulation of Wilson et al. with the Taylor,
 Beresford and Wilson correction, which passes the patch test on distorted
 meshes and removes the parasitic shear stiffness.  See
 :data:`HEX8_FORMULATIONS` for the alternatives and how to select them.
+
+Both solids reject geometry they cannot integrate meaningfully: a hexahedron
+whose Jacobian changes sign inside the element is folded through itself, and a
+solid of either type whose volume has collapsed relative to its own size would
+otherwise contribute stiffness far outside the dynamic range of the rest of the
+model.  Consistently reversed node ordering is *not* an error; it integrates
+correctly and stays accepted.
 """
 
 from __future__ import annotations
@@ -24,11 +31,36 @@ from ..protocols import get_any
 from ..quadrature import gauss_3d
 from .base import ElementContext, ElementMatrices, register
 
-__all__ = ["HEX8_FORMULATIONS", "hex8", "hex8_formulation", "tet4"]
+__all__ = ["DEGENERACY_TOLERANCE", "HEX8_FORMULATIONS", "hex8", "hex8_formulation", "tet4"]
+
+#: A solid whose volume is below this fraction of the cube of its bounding-box
+#: diagonal is rejected as degenerate.
+#:
+#: The element stiffness of a flattened solid grows like the inverse of its
+#: thinnest dimension, so an element at this aspect ratio contributes entries
+#: some twelve orders of magnitude above the rest of the model and destroys the
+#: conditioning of the whole assembly rather than just its own answer.  The
+#: threshold is deliberately far below any mesh a user would defend: a
+#: plate-like brick with a 1000:1 aspect ratio still scores about 3.5e-4.
+DEGENERACY_TOLERANCE = 1.0e-12
 
 _TET_MASS = np.array(
     [[2.0, 1.0, 1.0, 1.0], [1.0, 2.0, 1.0, 1.0], [1.0, 1.0, 2.0, 1.0], [1.0, 1.0, 1.0, 2.0]]
 )
+
+
+def _size_scale(xyz: np.ndarray) -> float:
+    """Bounding-box diagonal, the length the element volume is measured against."""
+    return float(np.linalg.norm(xyz.max(axis=0) - xyz.min(axis=0)))
+
+
+def _check_volume(element_id: Any, etype: str, xyz: np.ndarray, volume: float) -> None:
+    scale = _size_scale(xyz)
+    if volume <= DEGENERACY_TOLERANCE * scale**3:
+        raise ValueError(
+            f"element {element_id}: degenerate {etype} (volume {volume:.3e} is below "
+            f"{DEGENERACY_TOLERANCE:g} x the cube of its {scale:.3e} bounding-box diagonal)"
+        )
 
 
 def _strain_matrix(grad: np.ndarray) -> np.ndarray:
@@ -84,8 +116,7 @@ def tet4(ctx: ElementContext) -> ElementMatrices:
     M = np.column_stack([np.ones(4), xyz])
     det = float(np.linalg.det(M))
     volume = abs(det) / 6.0
-    if volume <= 0.0:
-        raise ValueError(f"element {ctx.element_id}: degenerate TET4 (zero volume)")
+    _check_volume(ctx.element_id, "TET4", xyz, volume)
     C = np.linalg.inv(M)
     grad = C[1:4, :].T  # (4, 3): rows are dN_i/d{x,y,z}
 
@@ -144,7 +175,12 @@ def _hex_enhanced_dn(xi: float, eta: float, zeta: float) -> np.ndarray:
 #:     restores the linear bending strain the trilinear field cannot represent.
 #:     The internal gradients use the Jacobian at the element centre scaled by
 #:     ``det J0 / det J`` (Taylor, Beresford and Wilson 1976) so the element
-#:     passes the constant-stress patch test on distorted meshes.
+#:     passes the constant-stress patch test on distorted meshes.  Passing the
+#:     patch test is not the same as staying accurate: the bending advantage
+#:     survives any parallelepiped shape untouched but decays quickly once the
+#:     Jacobian varies *within* the element.  See
+#:     :mod:`femtools.fea.verification` for the sweep and for
+#:     ``hex8_jacobian_spread``, the mesh measure that predicts it.
 #: ``"bbar"``
 #:     Mean dilatation, identical to selectively reduced integration (volumetric
 #:     term at the centroid, deviatoric term 2x2x2).  Cures volumetric locking as
@@ -233,8 +269,31 @@ def hex8(ctx: ElementContext) -> ElementMatrices:
     mean_dilatation = formulation == "bbar"
 
     n_gp = wts.size
+    shapes = np.empty((n_gp, 8))
+    jacobians = np.empty((n_gp, 3, 3))
+    naturals = np.empty((n_gp, 8, 3))
+    dets = np.empty(n_gp)
+    for g, (xi, eta, zeta) in enumerate(pts):
+        shapes[g], naturals[g] = _hex_shape(xi, eta, zeta)
+        jacobians[g] = naturals[g].T @ xyz
+        dets[g] = np.linalg.det(jacobians[g])
+
+    scales = wts * np.abs(dets)
+    _check_volume(ctx.element_id, "HEX8", xyz, float(scales.sum()))
+    if not (np.all(dets > 0.0) or np.all(dets < 0.0)):
+        # Taking ``abs(det)`` above keeps a mesh written with the node ordering
+        # reversed integrating correctly.  A sign change *within* one element is
+        # a different animal: the hexahedron is folded through itself, part of
+        # it is integrated inside out, and the resulting matrices are wrong
+        # while still looking perfectly healthy (positive definite, six rigid
+        # body modes).  Refuse rather than return a plausible wrong answer.
+        raise ValueError(
+            f"element {ctx.element_id}: folded HEX8 (the Jacobian determinant changes "
+            f"sign over the element, from {dets.min():.3e} to {dets.max():.3e}); "
+            "check the node ordering"
+        )
+
     grads = np.empty((n_gp, 8, 3))
-    scales = np.empty(n_gp)
     grads_e = np.empty((n_gp, 3, 3)) if enhanced else None
 
     if enhanced:
@@ -248,17 +307,12 @@ def hex8(ctx: ElementContext) -> ElementMatrices:
             raise ValueError(f"element {ctx.element_id}: degenerate HEX8 (zero Jacobian)")
 
     m = np.zeros((24, 24))
-    for g, ((xi, eta, zeta), w) in enumerate(zip(pts, wts, strict=True)):
-        n, dn = _hex_shape(xi, eta, zeta)
-        J = dn.T @ xyz
-        det = float(np.linalg.det(J))
-        if det == 0.0:
-            raise ValueError(f"element {ctx.element_id}: degenerate HEX8 (zero Jacobian)")
-        grads[g] = np.linalg.solve(J, dn.T).T
-        scales[g] = w * abs(det)
+    for g in range(n_gp):
+        grads[g] = np.linalg.solve(jacobians[g], naturals[g].T).T
         if enhanced:
-            grads_e[g] = np.linalg.solve(J0, _hex_enhanced_dn(xi, eta, zeta).T).T * (det0 / det)
-        m += _expand_mass(np.outer(n, n) * (scales[g] * ctx.mat.rho))
+            enh = _hex_enhanced_dn(*pts[g])
+            grads_e[g] = np.linalg.solve(J0, enh.T).T * (det0 / dets[g])
+        m += _expand_mass(np.outer(shapes[g], shapes[g]) * (scales[g] * ctx.mat.rho))
 
     if mean_dilatation:
         gbar = np.einsum("g,gij->ij", scales, grads) / float(scales.sum())
