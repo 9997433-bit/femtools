@@ -29,7 +29,7 @@ deviations.
   treatment in Heylen, W., Lammens, S., Sas, P., *Modal Analysis Theory and Testing*,
   KU Leuven, 1997. femtools implements FRAC per FRF pair, CSAC/CSF (cross-signature assurance
   criterion / scale factor) per frequency line.
-* **NMD / MACX (Round-6 target — `correlation.mac.nmd` / `macx`, PRODUCT_MAP R6-wip).**
+* **NMD / MACX (merged Round 6 — `correlation.mac.nmd` / `macx`, PRODUCT_MAP R6).**
   Normalized modal difference: a MAC-derived distance metric from the MAC-extension family
   reviewed in Allemang, R.J., *The Modal Assurance Criterion — Twenty Years of Use and Abuse*
   (cited above); the Round-6 brief freezes the form `nmd = sqrt(1 − MAC)`. Extended MAC for
@@ -77,8 +77,8 @@ deviations.
   and shape residual sensitivities). Finite-difference fallback is retained for verification.
 * **Regularization.** Tikhonov-type side constraints for ill-posed parameter sets; discussion
   in Friswell–Mottershead (1995) ch. on ill-conditioning and in the 2011 tutorial.
-* **Parameter uncertainty / first-order covariance (Round-6 target — `updating.uq`,
-  PRODUCT_MAP R6-wip).** First-order propagation of the residual covariance through the
+* **Parameter uncertainty / first-order covariance (merged Round 6 — `updating.uq`,
+  PRODUCT_MAP R6).** First-order propagation of the residual covariance through the
   weighted least-squares solution: with sensitivity `S` and residual covariance `Cov(ε)`, the
   estimator gain `G = (SᵀW_ε S + W_θ)⁻¹ SᵀW_ε` gives `Cov(θ) = G Cov(ε) Gᵀ` — the linearized
   parameter-uncertainty analysis of Friswell–Mottershead (1995), building on the statistical
@@ -147,7 +147,7 @@ deviations.
 * **SSI (merged Round 4 — `mpe.ssi.ssi_cov`, covariance-driven).** Van Overschee, P.,
   De Moor, B., *Subspace Identification for Linear Systems: Theory — Implementation —
   Applications*, Kluwer, 1996. The same monograph is the basis for the **data-driven**
-  variant (Round-6 target — `mpe.ssi.ssi_data`, PRODUCT_MAP R6-wip): N4SID-class
+  variant (merged Round 6 — `mpe.ssi.ssi_data`, PRODUCT_MAP R6): N4SID-class
   identification by orthogonal projection of the future-output block-Hankel row space onto
   the past-output row space, followed by the same SVD + shift-invariance realization step
   as the covariance-driven path (and returning the same result type). Application to
@@ -177,8 +177,8 @@ deviations.
   Compliant Mechanisms*, CMAME, 190(26–27), 2001, pp. 3443–3459.
 * **Size optimization.** Gradient-based NLP on the updating parameter protocol (scipy
   SLSQP/trust-constr), with the eigen-sensitivities of §3.
-* **Shape optimization (Round-6 target — `optimization.shape.shape_optimize`, PRODUCT_MAP
-  R6-wip).** Haftka, R.T., Grandhi, R.V., *Structural shape optimization — a survey*,
+* **Shape optimization (merged Round 6 — `optimization.shape.shape_optimize`, PRODUCT_MAP
+  R6).** Haftka, R.T., Grandhi, R.V., *Structural shape optimization — a survey*,
   Computer Methods in Applied Mechanics and Engineering, 57(1), 1986, pp. 91–106; textbook
   treatment: Haftka, R.T., Gürdal, Z., *Elements of Structural Optimization*, 3rd ed.,
   Kluwer, 1992. Selected node coordinates as design variables on the same scipy
@@ -229,9 +229,9 @@ implementations; `docs/ACCEPTANCE.md` (owned by R1-F3) elaborates the golden cas
 ## 10. Merged-code gap (Round-2 closure and residual distances)
 
 Known distances between the merged code and the state of the art it targets. Status tags in
-`docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4 is merged and tested but may still carry
-one of these caveats. Capabilities that are absent (rather than imperfect) are the R6-wip,
-R5+ and N/A rows of the product map, not repeated here.
+`docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4/R6 is merged and tested but may still carry
+one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+
+and N/A rows of the product map, not repeated here.
 
 ### Closed in Round 2
 

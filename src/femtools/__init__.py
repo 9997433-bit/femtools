@@ -29,6 +29,8 @@ Round-4 API (``docs/PRODUCT_MAP.md`` tag *R4*): the names frozen in
 carried through Round 4 as a *provisional* lazy tier and are **stable** exports since
 Round 5: every module is merged, so they live in ``_EXPORTS`` (with ``TYPE_CHECKING``
 re-exports) like the rest of the contract, and the provisional machinery is retired.
+Round-6 names (``read_inp``, ``read_k``, ``shape_optimize``, ``ssi_data``, ``nmd``,
+``macx``, ``parameter_covariance``, ``modal_strain_energy``, …) are stable the same way.
 """
 
 from __future__ import annotations
@@ -73,6 +75,9 @@ _EXPORTS: dict[str, str] = {
     "read_pch": "femtools.io.pch",
     "write_pch": "femtools.io.pch",
     "read_cdb": "femtools.io.cdb",
+    "read_inp": "femtools.io.inp",
+    "write_inp": "femtools.io.inp",
+    "read_k": "femtools.io.kfile",
     "save_project": "femtools.io.project",
     "load_project": "femtools.io.project",
     # solver drivers
@@ -103,6 +108,8 @@ _EXPORTS: dict[str, str] = {
     "FreeCMSResult": "femtools.dynamics.cms_free",
     "psd_response": "femtools.dynamics.random",
     "PSDResult": "femtools.dynamics.random",
+    "modal_strain_energy": "femtools.dynamics.energy",
+    "modal_kinetic_energy": "femtools.dynamics.energy",
     "time_history": "femtools.dynamics.time_domain",
     "residual_vectors": "femtools.dynamics.residuals",
     # correlation
@@ -110,6 +117,8 @@ _EXPORTS: dict[str, str] = {
     "comac": "femtools.correlation.mac",
     "poc": "femtools.correlation.mac",
     "fmac": "femtools.correlation.mac",
+    "nmd": "femtools.correlation.mac",
+    "macx": "femtools.correlation.mac",
     "pair_modes": "femtools.correlation.pairing",
     "frac": "femtools.correlation.frf_corr",
     "csac": "femtools.correlation.frf_corr",
@@ -132,6 +141,9 @@ _EXPORTS: dict[str, str] = {
     "UpdateResult": "femtools.updating.updater",
     "update_from_frf": "femtools.updating.frf_updating",
     "select_parameters": "femtools.updating.selection",
+    "parameter_covariance": "femtools.updating.uq",
+    "monte_carlo_update": "femtools.updating.uq",
+    "UQResult": "femtools.updating.uq",
     "identify_harmonic_forces": "femtools.updating.force_id",
     # optimization
     "size_optimize": "femtools.optimization.size",
@@ -141,6 +153,8 @@ _EXPORTS: dict[str, str] = {
     "fit_rsm": "femtools.optimization.surrogate",
     "predict_rsm": "femtools.optimization.surrogate",
     "pareto_weighted": "femtools.optimization.multi",
+    "shape_optimize": "femtools.optimization.shape",
+    "ShapeResult": "femtools.optimization.shape",
     # MPE / RBPE
     "poly_lscf": "femtools.mpe.p_lscf",
     "fdd": "femtools.mpe.fdd",
@@ -150,6 +164,7 @@ _EXPORTS: dict[str, str] = {
     "estimate_h2": "femtools.mpe.frf_estimation",
     "coherence": "femtools.mpe.frf_estimation",
     "ssi_cov": "femtools.mpe.ssi",
+    "ssi_data": "femtools.mpe.ssi",
     "rigid_body_properties": "femtools.rbpe.rbfit",
     # scripting
     "ScriptEngine": "femtools.script.engine",
@@ -265,6 +280,8 @@ if TYPE_CHECKING:
     from femtools.correlation.mac import comac as comac
     from femtools.correlation.mac import fmac as fmac
     from femtools.correlation.mac import mac_matrix as mac_matrix
+    from femtools.correlation.mac import macx as macx
+    from femtools.correlation.mac import nmd as nmd
     from femtools.correlation.mac import poc as poc
     from femtools.correlation.orthogonality import cross_orthogonality as cross_orthogonality
     from femtools.correlation.pairing import pair_modes as pair_modes
@@ -279,6 +296,12 @@ if TYPE_CHECKING:
         rubin as rubin,
     )
     from femtools.dynamics.craig_bampton import craig_bampton as craig_bampton
+    from femtools.dynamics.energy import (
+        modal_kinetic_energy as modal_kinetic_energy,
+    )
+    from femtools.dynamics.energy import (
+        modal_strain_energy as modal_strain_energy,
+    )
     from femtools.dynamics.frf import (
         FRFResult as FRFResult,
     )
@@ -330,6 +353,9 @@ if TYPE_CHECKING:
     from femtools.io.bdf import read_bdf as read_bdf
     from femtools.io.bdf import write_bdf as write_bdf
     from femtools.io.cdb import read_cdb as read_cdb
+    from femtools.io.inp import read_inp as read_inp
+    from femtools.io.inp import write_inp as write_inp
+    from femtools.io.kfile import read_k as read_k
     from femtools.io.pch import read_pch as read_pch
     from femtools.io.pch import write_pch as write_pch
     from femtools.io.project import load_project as load_project
@@ -350,6 +376,7 @@ if TYPE_CHECKING:
     from femtools.mpe.lsce import lsce as lsce
     from femtools.mpe.p_lscf import poly_lscf as poly_lscf
     from femtools.mpe.ssi import ssi_cov as ssi_cov
+    from femtools.mpe.ssi import ssi_data as ssi_data
     from femtools.optimization.doe import (
         full_factorial as full_factorial,
     )
@@ -357,6 +384,8 @@ if TYPE_CHECKING:
         latin_hypercube as latin_hypercube,
     )
     from femtools.optimization.multi import pareto_weighted as pareto_weighted
+    from femtools.optimization.shape import ShapeResult as ShapeResult
+    from femtools.optimization.shape import shape_optimize as shape_optimize
     from femtools.optimization.size import size_optimize as size_optimize
     from femtools.optimization.surrogate import (
         fit_rsm as fit_rsm,
@@ -392,3 +421,6 @@ if TYPE_CHECKING:
     from femtools.updating.sensitivity import sensitivity_matrix as sensitivity_matrix
     from femtools.updating.updater import UpdateResult as UpdateResult
     from femtools.updating.updater import update_model as update_model
+    from femtools.updating.uq import UQResult as UQResult
+    from femtools.updating.uq import monte_carlo_update as monte_carlo_update
+    from femtools.updating.uq import parameter_covariance as parameter_covariance

@@ -7,10 +7,9 @@ documentation, or manual text is used. Public-literature algorithm references: `
 **Status legend** (retagged at the start of Round 5: every Round-4 module is merged on
 the integration branch, so the transitional *R4-wip* tag became the merged tag **R4**.
 Rounds 1–3 are merged to main — Round 3 hardened docs/CI/packaging and added no
-capability rows, so R1/R2 remain the merged-capability tags. Round 6 — the last round of
-this remaining cycle — froze the exact API names for the leftover R5+ capabilities
-(`.agent_workspace/ROUND6_BRIEF.md` / `REMAINING.md`); their rows carry the transitional
-tag **R6-wip** until the module is importable from this tree, then become **R6**)
+capability rows, so R1/R2 remain the merged-capability tags. Round 6 merged the leftover
+R5+ APIs frozen in `.agent_workspace/ROUND6_BRIEF.md` / `REMAINING.md`; those rows are
+tagged **R6**. The transitional **R6-wip** tag is retired.)
 
 | Status | Meaning |
 |---|---|
@@ -18,12 +17,11 @@ tag **R6-wip** until the module is importable from this tree, then become **R6**
 | **R2** | Merged in Round 2; importable from the integration branch and covered by tests |
 | **R4** | Merged in Round 4 (API frozen in `.agent_workspace/REMAINING.md`); importable from the integration branch, covered by tests, and a **stable** lazy export at the `femtools` top level (`src/femtools/__init__.py`) since Round 5 |
 | **R6** | Merged in Round 6 (this remaining-cycle's last round; API frozen in `.agent_workspace/ROUND6_BRIEF.md`); importable from the integration branch, covered by tests, and a stable lazy export at the `femtools` top level |
-| **R6-wip** | Round-6 work in progress: the API (exact names) is frozen, but the module is **not yet importable from this tree** — no top-level export exists yet (CI resolves every export); promoted to **R6** on merge |
-| **R5+** | Not merged and not API-frozen for Round 6; direction fixed, API not yet frozen |
+| **R5+** | Direction fixed, API not frozen in this cycle (e.g. pyvista extras) |
 | **N/A** | Out of scope (hardware, licensing, closed binary dumps) with substitute noted |
 
-Known numerical/functional distances between merged (R1/R2/R4) code and the state of the
-art are tracked in `docs/SOTA.md` §10 "Merged-code gap" — a row tagged R1/R2/R4 means
+Known numerical/functional distances between merged (R1/R2/R4/R6) code and the state of the
+art are tracked in `docs/SOTA.md` §10 "Merged-code gap" — a row tagged R1/R2/R4/R6 means
 *merged and tested*, not *defect-free*. Round 2 closed the two largest §10 items (HEX8
 shear locking, UNV material/property cards); the residual caveats remain listed there.
 
@@ -37,10 +35,10 @@ shear locking, UNV material/property cards); the residual caveats remain listed 
 | Unit system handling | `core.units.UnitSystem` (SI internal, convert at I/O) | R1 |
 | Project persistence | `io.project.save_project` / `load_project` (`.ftproj` JSON+npz) | R1 |
 | Scripting language (FEMtools Script analog) | `script.engine.ScriptEngine` — command interpreter over the Python API | R1 |
-| Command-line surface | `cli` typer app: `solve-modes`, `mac`, `frf`, `update`, `pretest`, `script` | R1 |
+| Command-line surface | `cli` typer app: `solve-modes`, `mac`, `frf`, `update`, `pretest`, `script`, `report-mac`, `reduce`, `estimate-frf`, `read-mesh` | R1 |
 | Python API | every package below; frozen contract re-exported from `femtools` top level | R1 |
 | GUI shell | `gui` web shell (`gui.server` on stdlib http, FastAPI optional); model upload / preloaded examples via `/api/load` landed R2 | R1 |
-| Mesh/geometry visualization | `viz.plots` (matplotlib) — `plot_mode` draws translations and rotation pseudo-vectors (rotations landed R2); an optional plotly backend is Round-6 work (R6-F4, only if plotly is importable — matplotlib remains the default); pyvista extras remain R5+ | R1 |
+| Mesh/geometry visualization | `viz.plots` (matplotlib default; optional `backend="plotly"` if plotly is installed); pyvista extras remain R5+ | R1 |
 | Mesh generation / import CAD | not planned — import meshes via UNV/BDF | N/A |
 
 ## 2. FEMtools Dynamics
@@ -49,7 +47,7 @@ shear locking, UNV material/property cards); the residual caveats remain listed 
 |---|---|---|
 | Real normal modes (FEA) | `fea.eigen.solve_modes` → `ModalResult` (mass-normalized) | R1 |
 | Static solution | `fea.static.solve_static` | R1 |
-| Element library (BAR2, BEAM2, TRUSS2D, QUAD4, TRIA3, HEX8, TET4, MASS, SPRING, DAMPER) | `fea.elements` registry, `fea.assemble.assemble_km` — HEX8 uses Wilson–Taylor incompatible modes since R2 (98.6% reference tip deflection single-layer; residual caveats SOTA.md §10). Round-6 direction (R6-O1, not yet merged): per-node shell drilling frames for arbitrarily oriented flat shells, with a Simo–Rifai EAS distortion upgrade as an optional follow-on | R1 |
+| Element library (BAR2, BEAM2, TRUSS2D, QUAD4, TRIA3, HEX8, TET4, MASS, SPRING, DAMPER) | `fea.elements` registry, `fea.assemble.assemble_km` — HEX8 uses Wilson–Taylor incompatible modes since R2 (98.6% reference tip deflection single-layer; residual caveats SOTA.md §10). Flat shells use per-node rotational frames so drilling can be auto-constrained at any orientation (Round 6) | R1 |
 | Modal FRF synthesis (with damping models) | `dynamics.frf.modal_frf` (modal ζ, Rayleigh, structural η); truncation-aware `retained_band` helper and `dynamics.damping` specs landed R2 | R1 |
 | Residual flexibility / residual vectors | `dynamics.residuals.residual_vectors`; upper/lower residual terms in `modal_frf` | R1 |
 | Direct (full-order) FRF | `dynamics.frf.direct_frf` (dynamic stiffness inversion) | R1 |
@@ -62,7 +60,7 @@ shear locking, UNV material/property cards); the residual caveats remain listed 
 | Free-interface CMS (MacNeal/Rubin) | `dynamics.cms_free.rubin` / `macneal` → `FreeCMSResult` (residual-flexibility free-interface CMS) | R4 |
 | Complex modes (general viscous damping) | `fea.eigen.solve_complex_modes` → `ComplexModalResult` (state-space / quadratic eigenvalue) | R4 |
 | Random/PSD response | `dynamics.random.psd_response` → `PSDResult` (modal PSD; rms and 1σ) | R4 |
-| Modal strain / kinetic energy diagnostics | `dynamics.energy.modal_strain_energy` / `modal_kinetic_energy` — per-mode (optional per-element) MSE/MKE from assembled K, M and mass-normalized Φ | R6-wip |
+| Modal strain / kinetic energy diagnostics | `dynamics.energy.modal_strain_energy` / `modal_kinetic_energy` — per-mode (optional per-element) MSE/MKE from assembled K, M and mass-normalized Φ | R6 |
 
 ## 3. FEMtools Pretest & Correlation
 
@@ -82,7 +80,7 @@ shear locking, UNV material/property cards); the residual caveats remain listed 
 | Shape expansion/reduction (Guyan, IRS, SEREP) | `fea.reduction.guyan` / `irs` / `serep` → `ReductionResult`; `correlation.expansion.expand_guyan` / `expand_serep` | R4 |
 | ECOMAC / FDAC / modal scale factor | `correlation.mac.ecomac`, `modal_scale_factor`; `correlation.frf_corr.fdac` | R1 |
 | FMAC and further extended metrics | `correlation.mac.fmac` (Round 4); NMD/MACX are the Round-6 row below | R4 |
-| NMD / extended MAC for complex modes | `correlation.mac.nmd` (Allemang normalized modal difference), `correlation.mac.macx` (extended MAC using both φ and conj(φ)); `mac_matrix`/`fmac` numerics on real modes unchanged | R6-wip |
+| NMD / extended MAC for complex modes | `correlation.mac.nmd` (Allemang normalized modal difference), `correlation.mac.macx` (extended MAC using both φ and conj(φ)); `mac_matrix`/`fmac` numerics on real modes unchanged | R6 |
 | Correlation report generation | `viz.report.mac_report_html` / `mac_report_text` / `save_mac_report` + `cli` `report-mac` | R4 |
 
 ## 4. FEMtools Model Updating
@@ -97,7 +95,7 @@ shear locking, UNV material/property cards); the residual caveats remain listed 
 | Regularization (Tikhonov, parameter weighting) | inside `update_model` options | R1 |
 | Local (element-level) parameters, grouping | entity descriptors in `updating.parameters.as_parameters` target materials/properties/elements; region grouping via shared material/property | R2 |
 | FRF-based updating (full-curve residuals) | `updating.frf_updating.update_from_frf` | R4 |
-| Robust / uncertainty-quantified updating | `updating.uq.parameter_covariance` / `monte_carlo_update` → `UQResult` — first-order Cov(θ) from residual covariance and the sensitivity matrix (Friswell–Mottershead), seeded Monte Carlo | R6-wip |
+| Robust / uncertainty-quantified updating | `updating.uq.parameter_covariance` / `monte_carlo_update` → `UQResult` — first-order Cov(θ) from residual covariance and the sensitivity matrix (Friswell–Mottershead), seeded Monte Carlo | R6 |
 | Automated parameter selection (subset selection) | `updating.selection.select_parameters` (EFS / column subset selection) | R4 |
 
 ## 5. FEMtools Optimization
@@ -108,7 +106,7 @@ shear locking, UNV material/property cards); the residual caveats remain listed 
 | Topology optimization (SIMP + OC/MMA-style update, density filter) | `optimization.topology.topology_simp` | R1 |
 | DOE — Latin hypercube, full factorial | `optimization.doe.latin_hypercube`, `full_factorial` | R1 |
 | Response surface / surrogate models | `optimization.surrogate.fit_rsm`, `predict_rsm` (quadratic RSM) | R4 |
-| Shape optimization | `optimization.shape.shape_optimize` → `ShapeResult` — selected node xyz as design variables, frequency/compliance objectives, SLSQP/trust-constr, mesh-quality barrier (Haftka–Grandhi class) | R6-wip |
+| Shape optimization | `optimization.shape.shape_optimize` → `ShapeResult` — selected node xyz as design variables, frequency/compliance objectives, SLSQP/trust-constr, mesh-quality barrier (Haftka–Grandhi class) | R6 |
 | Multi-objective (Pareto) | `optimization.multi.pareto_weighted` (weighted sum; NSGA-lite optional) | R4 |
 
 ## 6. FEMtools MPE (Modal Parameter Extraction)
@@ -121,7 +119,7 @@ shear locking, UNV material/property cards); the residual caveats remain listed 
 | Stabilization diagram construction | `mpe.common.stabilization_diagram`, `StabilizationDiagram`, `select_physical_poles` | R1 |
 | MIMO FRF estimation from time data (H1/H2, coherence) | `mpe.frf_estimation.estimate_h1`, `estimate_h2`, `coherence` | R4 |
 | SSI (covariance-driven) | `mpe.ssi.ssi_cov` | R4 |
-| SSI (data-driven, N4SID-class) | `mpe.ssi.ssi_data` — past/future output Hankel projection, then the `ssi_cov` SVD + shift-invariance path; same result type as `ssi_cov` (Van Overschee–De Moor 1996) | R6-wip |
+| SSI (data-driven, N4SID-class) | `mpe.ssi.ssi_data` — past/future output Hankel projection, then the `ssi_cov` SVD + shift-invariance path; same result type as `ssi_cov` (Van Overschee–De Moor 1996) | R6 |
 
 ## 7. FEMtools RBPE (Rigid Body Property Extraction)
 
@@ -148,18 +146,17 @@ shear locking, UNV material/property cards); the residual caveats remain listed 
 | Nastran punch results (`.pch` text: eigenvalues, mode shapes) | `io.pch.read_pch`, `write_pch` | R4 |
 | ANSYS CDB mesh import (NBLOCK/EBLOCK subset) | `io.cdb.read_cdb` | R4 |
 | Nastran OP2 / ANSYS RST / Abaqus ODB binary results | closed binary dumps — substitutes: the `.pch`/CDB text readers above plus the `SolverDriver` plug-in protocol | N/A |
-| Abaqus INP / LS-DYNA K (text subsets) | `io.inp.read_inp`, `io.kfile.read_k` — public card layouts only, mapped into `FEModel`; no OP2/RST/ODB binaries (those stay N/A above) | R6-wip |
+| Abaqus INP / LS-DYNA K (text subsets) | `io.inp.read_inp` / `write_inp`, `io.kfile.read_k` — public card layouts only, mapped into `FEModel`; no OP2/RST/ODB binaries (those stay N/A above) | R6 |
 
 ## Cross-cutting quality gates (all rounds)
 
 * Typed public API (`py.typed` marker ships in the wheel since R2), pydantic-validated core.
 * Frozen contract (`docs/CONTRACT_API.md`), the frozen Round-4 API
   (`.agent_workspace/REMAINING.md`), and the `femtools.core.errors` exception hierarchy
-  re-exported lazily from `femtools` (`src/femtools/__init__.py`, 99 stable names +
+  re-exported lazily from `femtools` (`src/femtools/__init__.py`, 112 stable names +
   15 subpackages), so `import femtools` is cheap and cycle-free — no numpy/scipy/pydantic
-  at import time. The transitional *provisional* export tier that carried the Round-4
-  names while their modules were in flight was retired in Round 5: every Round-4 module
-  is merged, and all names are stable `__all__` entries with `TYPE_CHECKING` re-exports.
+  at import time. Round-4 names were promoted to stable exports in Round 5; Round 6 added
+  the remaining R5+ names (`read_inp`, `shape_optimize`, `ssi_data`, `nmd`, …) the same way.
 * Golden analytical acceptance tests with the tolerance table of `docs/CONTRACT_API.md`.
 * ruff + strict pytest (an empty collection fails CI since Round 2) on Python 3.11,
   plus a non-blocking mypy step (`.github/workflows/ci.yml`).
