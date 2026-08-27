@@ -10,6 +10,8 @@ PR: https://github.com/9997433-bit/femtools/pull/1
 | Round | Status | Notes |
 |-------|--------|--------|
 | Prep | done | Contract + seed |
-| Round 1 | done | kernels + pytest 17/3/0 |
-| Round 2 | done | HEX8 98.6%, retained FRF 3%, examples 5/5; ruff clean |
-| Round 3 | in_flight | SOTA polish + cross-check; see ROUND2_BRIEF.md |
+| Round 1 | done | kernels; pytest 17/3/0 |
+| Round 2 | done | HEX8 98.6%, retained FRF, examples 5/5 |
+| Round 3 | done | SOTA polish; pytest 21/3/0; ruff clean |
+
+See `ROUND3_BRIEF.md` and `FINAL_REPORT.md`.
