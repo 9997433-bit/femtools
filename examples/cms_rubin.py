@@ -6,17 +6,20 @@ A fixed-fixed steel beam (20 BEAM2 elements) is cut at midspan into two
 clamped at x = L and free at the interface. Each component is reduced with
 free-interface normal modes plus residual-flexibility attachment modes
 (Rubin keeps the residual inertia, MacNeal drops it), the two superelements
-are coupled primally on the 6 shared interface DOFs, and the coupled
-frequencies are compared against the unsplit 20-element reference and the
-analytic fixed-fixed roots cosh(bL)cos(bL) = 1 (bL = 4.7300, 7.8532, ...).
-The existing fixed-interface Craig-Bampton reduction runs through the same
-coupling harness as a baseline.
+are coupled on the 6 shared interface DOFs, and the coupled frequencies are
+compared against the unsplit 20-element reference and the analytic
+fixed-fixed roots cosh(bL)cos(bL) = 1 (bL = 4.7300, 7.8532, ...). The
+existing fixed-interface Craig-Bampton reduction runs as a baseline.
 
-Uses the Round-4 kernel `femtools.dynamics.cms_free` (owner R4-O2, frozen in
-.agent_workspace/REMAINING.md); this example fails with ImportError until it
-lands. Reduced-coordinate ordering is assumed [boundary..., modal...] like
-`CraigBamptonResult`. See docs/algorithms/dynamics.md section 9 and
-docs/ACCEPTANCE.md (case 18).
+Uses the Round-4 kernel `femtools.dynamics.cms_free` (owner R4-O2, merged).
+A `FreeCMSResult` orders its generalized coordinates [kept modes...,
+residual modes...] -- none of them is a physical DOF -- so the coupling goes
+through `free_interface_assembly`, which ties the *physical* interface DOFs
+of the two components rigidly (null-space elimination) and condenses
+whatever carries no mass (MacNeal's residual block). `CraigBamptonResult`
+does expose its boundary DOFs as the leading generalized coordinates, so the
+CB baseline is assembled primally by the local `couple` harness. See
+docs/algorithms/dynamics.md section 9 and docs/ACCEPTANCE.md (case 18).
 """
 
 from __future__ import annotations
@@ -25,7 +28,7 @@ import numpy as np
 import scipy.linalg as sla
 
 from femtools.core.model import FEModel
-from femtools.dynamics.cms_free import macneal, rubin
+from femtools.dynamics.cms_free import free_interface_assembly, macneal, rubin
 from femtools.dynamics.craig_bampton import craig_bampton
 from femtools.fea.assemble import assemble_km
 from femtools.fea.eigen import solve_modes
@@ -66,28 +69,17 @@ def free_index(asm, node_id: int, component: str) -> int:
     return int(pos[0])
 
 
-def reduced_km(res: object) -> tuple[np.ndarray, np.ndarray]:
-    """Reduced (K, M), tolerant to `.K/.M` (CraigBamptonResult style) or
-    `.K_red/.M_red` field names in the FreeCMSResult."""
-    for k_name, m_name in (("K", "M"), ("K_red", "M_red")):
-        k = getattr(res, k_name, None)
-        m = getattr(res, m_name, None)
-        if isinstance(k, np.ndarray) and isinstance(m, np.ndarray):
-            return k, m
-    raise TypeError(f"no reduced K/M found on {type(res).__name__}")
-
-
 def couple(res_a: object, res_b: object, n_b: int) -> np.ndarray:
     """Primal assembly of two superelements sharing their n_b boundary DOFs.
 
     Assumes generalized coordinate order [boundary..., modal...] in both
-    reduced models (the CraigBamptonResult convention). Returns the coupled
-    frequencies in Hz. QZ is used instead of eigh because a strict MacNeal
-    reduction carries no residual inertia -- its interface mass block is
-    singular and the pencil then has infinite eigenvalues to discard.
+    reduced models (the CraigBamptonResult convention -- FreeCMSResult does
+    NOT follow it, see the module docstring). Returns the coupled
+    frequencies in Hz. QZ is used instead of eigh so a singular mass block
+    would surface as infinite eigenvalues to discard, not as an error.
     """
-    ka, ma = reduced_km(res_a)
-    kb, mb = reduced_km(res_b)
+    ka, ma = res_a.K, res_a.M
+    kb, mb = res_b.K, res_b.M
     na, nb_modal = ka.shape[0] - n_b, kb.shape[0] - n_b
     n = n_b + na + nb_modal
     ia = np.r_[np.arange(n_b), n_b + np.arange(na)]
@@ -119,16 +111,21 @@ def main() -> int:
     comp_a = build_beam(range(1, mid + 1), 0.0, L / 2, spc_node=1, name="A")
     comp_b = build_beam(range(mid, N_ELEM + 2), L / 2, L, spc_node=N_ELEM + 1,
                         name="B")
+    asms = [assemble_km(comp) for comp in (comp_a, comp_b)]
+    bnds = [np.array([free_index(asm, mid, c) for c in IFACE_COMPS])
+            for asm in asms]
+    ties = [("A", int(ia), "B", int(ib)) for ia, ib in zip(*bnds, strict=True)]
+
     results: dict[str, np.ndarray] = {}
-    for label, reduce_fn in (("rubin", rubin), ("macneal", macneal),
-                             ("craig_bampton", craig_bampton)):
-        reduced = []
-        for comp in (comp_a, comp_b):
-            asm = assemble_km(comp)
-            boundary = np.array([free_index(asm, mid, c) for c in IFACE_COMPS])
-            reduced.append(reduce_fn(asm.Kff, asm.Mff, boundary,
-                                     n_modes=N_COMP_MODES))
-        results[label] = couple(reduced[0], reduced[1], len(IFACE_COMPS))[:N_CMP]
+    for label, reduce_fn in (("rubin", rubin), ("macneal", macneal)):
+        red_a, red_b = (reduce_fn(asm.Kff, asm.Mff, bnd, n_modes=N_COMP_MODES)
+                        for asm, bnd in zip(asms, bnds, strict=True))
+        coupled = free_interface_assembly([("A", red_a), ("B", red_b)], ties)
+        results[label] = coupled.freq_hz[:N_CMP]
+
+    cb_a, cb_b = (craig_bampton(asm.Kff, asm.Mff, bnd, n_modes=N_COMP_MODES)
+                  for asm, bnd in zip(asms, bnds, strict=True))
+    results["craig_bampton"] = couple(cb_a, cb_b, len(IFACE_COMPS))[:N_CMP]
 
     print(f"{'mode':>4} {'full [Hz]':>10} "
           + " ".join(f"{lbl:>12} {'err':>9}" for lbl in results))
