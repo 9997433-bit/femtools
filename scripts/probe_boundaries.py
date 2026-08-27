@@ -118,12 +118,78 @@ def probe_mock_unv() -> dict[str, Any]:
     return {"fixture": str(fixture.relative_to(ROOT)), "nodes": len(model.nodes)}
 
 
+def probe_guyan() -> dict[str, Any]:
+    from femtools.fea.reduction import guyan
+
+    stiffness = np.array(
+        [
+            [2.0, -1.0, 0.0],
+            [-1.0, 2.0, -1.0],
+            [0.0, -1.0, 2.0],
+        ]
+    )
+    result = guyan(stiffness, [0, 2])
+    if hasattr(result, "T"):
+        transform = np.asarray(result.T)
+        reduced_stiffness = np.asarray(result.K)
+    else:
+        transform, reduced_stiffness = (np.asarray(value) for value in result[:2])
+
+    expected_transform = np.array([[1.0, 0.0], [0.5, 0.5], [0.0, 1.0]])
+    expected_stiffness = expected_transform.T @ stiffness @ expected_transform
+    transform_error = float(np.max(np.abs(transform - expected_transform)))
+    stiffness_error = float(np.max(np.abs(reduced_stiffness - expected_stiffness)))
+    if transform.shape != (3, 2) or transform_error > 1.0e-12:
+        raise AssertionError(f"Guyan transformation error is {transform_error:.3e}")
+    if reduced_stiffness.shape != (2, 2) or stiffness_error > 1.0e-12:
+        raise AssertionError(f"Guyan reduced-stiffness error is {stiffness_error:.3e}")
+    return {
+        "shape": list(transform.shape),
+        "transform_error": transform_error,
+        "stiffness_error": stiffness_error,
+    }
+
+
+def probe_h1() -> dict[str, Any]:
+    from femtools.mpe.frf_estimation import estimate_h1
+
+    fs = 1_024.0
+    excitation = RNG.standard_normal(8_192)
+    gain = 2.5
+    result = estimate_h1(excitation, gain * excitation, fs=fs, nperseg=1_024)
+    if hasattr(result, "H"):
+        estimate = np.asarray(result.H)
+    elif hasattr(result, "frf"):
+        estimate = np.asarray(result.frf)
+    elif isinstance(result, tuple):
+        estimate = np.asarray(result[1])
+    else:
+        estimate = np.asarray(result)
+
+    estimate = np.squeeze(estimate)
+    if estimate.ndim != 1:
+        raise AssertionError(f"H1 estimate has unexpected shape {estimate.shape}")
+    finite = np.isfinite(estimate)
+    if np.count_nonzero(finite) < 0.95 * estimate.size:
+        raise AssertionError("H1 estimate has too many non-finite frequency lines")
+    gain_error = float(np.max(np.abs(estimate[finite] - gain)))
+    if gain_error > 1.0e-10:
+        raise AssertionError(f"H1 constant-gain error is {gain_error:.3e}")
+    return {
+        "frequency_lines": int(estimate.size),
+        "finite_lines": int(np.count_nonzero(finite)),
+        "gain_error": gain_error,
+    }
+
+
 PROBES: tuple[tuple[str, Callable[[], dict[str, Any]]], ...] = (
     ("core_model", probe_core_model),
     ("mac", probe_mac),
     ("eigen", probe_eigen),
     ("modal_frf", probe_modal_frf),
     ("mock_unv", probe_mock_unv),
+    ("guyan", probe_guyan),
+    ("h1", probe_h1),
 )
 
 

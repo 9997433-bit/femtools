@@ -30,6 +30,12 @@ from .candidates import (
     translational_dofs,
 )
 from .efi import EFIResult, effective_independence, efi_distribution
+from .exciter import (
+    DrivingPointResidues,
+    ExciterSelection,
+    driving_point_residues,
+    select_exciters,
+)
 from .mass_loading import MassLoadingResult, mass_loading, sensor_mass_limit
 from .sensor import (
     SensorSelection,
@@ -50,13 +56,16 @@ from .target_modes import (
 __all__ = [
     "DIRECTIONS",
     "CandidateSet",
+    "DrivingPointResidues",
     "EFIResult",
     "EffectiveMassResult",
+    "ExciterSelection",
     "MassLoadingResult",
     "SensorSelection",
     "TargetModeSelection",
     "aggregate_by_node",
     "candidate_dofs",
+    "driving_point_residues",
     "effective_independence",
     "effective_mass",
     "efi_distribution",
@@ -66,6 +75,7 @@ __all__ = [
     "node_coordinates",
     "rigid_body_modes",
     "select_by_kinetic_energy",
+    "select_exciters",
     "select_target_modes",
     "sensor_mass_limit",
     "translational_dofs",

@@ -7,6 +7,8 @@ from femtools.fea.assemble import assemble_km, AssemblyResult
 from femtools.fea.static import solve_static
 from femtools.fea.eigen import solve_modes           # -> ModalResult
 from femtools.fea.elements import available_elements
+# Round-4 additions (REMAINING.md, owner R4-O1) — see §9:
+from femtools.fea.reduction import guyan, irs, serep, ReductionResult
 ```
 
 Notation: $K$, $M$ global stiffness/mass (`scipy.sparse.csr_matrix`, symmetric),
@@ -330,3 +332,98 @@ rotation within it — tests must compare via MAC/subspace, never entrywise (see
   with the default formulation vs ~0.64 for `"full"`; free–free block has exactly 6 rigid
   modes (`verification.hex8_bending_ratio`, `verification.hex8_rigid_body_frequencies`,
   pinned by `tests/test_hex8_verification.py`).
+
+## 9. Model reduction — Guyan, IRS, SEREP (Round 4, owner R4-O1)
+
+Spec for `femtools.fea.reduction`, frozen in `.agent_workspace/REMAINING.md`.
+Matrix-level API like `dynamics.craig_bampton`: inputs are the (typically free–free
+partition) matrices plus **integer row indices**, not `(node_id, dof_code)` tuples — callers
+translate through `dof_map`/`free_dof` exactly as `examples/guyan_serep.py` does.
+
+```python
+def guyan(K, master) -> ReductionResult                 # unpackable as (T, Krr)
+def irs(K, M, master) -> ReductionResult                # O'Callahan IRS
+def serep(phi, master_rows) -> ReductionResult          # T so phi ≈ T @ phi[master]
+# serep must NOT return a bare ndarray: consumers that probe `.T` first
+# (tests/test_round4_reduction.py::_transformation) would read its transpose.
+
+class ReductionResult(NamedTuple):   # positions 0/1 are the "-> T, Krr" of REMAINING.md
+    T: np.ndarray            # (n, n_m) recovery basis, rows in the ORIGINAL DOF ordering
+    Krr: np.ndarray | None   # (n_m, n_m) = T'KT  (None for serep unless K supplied)
+    Mrr: np.ndarray | None   # T'MT when M was an argument
+```
+
+Reduced coordinates are the physical displacements at `master`, in the order given —
+consequently rows `T[master]` are exactly the identity (pinned by
+`tests/test_round4_reduction.py`, which also accepts the reduced stiffness under
+`K`/`Kr`/`Krr`/`K_reduced` or tuple position 1; a NamedTuple satisfies every consumer,
+including plain tuple unpacking). `T` is dense; `K`/`M` may be sparse
+(`T.T @ (K @ T)` stays cheap). The examples only rely on `.T` (or tuple position 0) —
+keep at least that stable.
+
+### 9.1 Guyan (static condensation)
+
+Partition into masters $m$ and slaves $s$ (complement). Neglecting slave inertia in
+$K u = \omega^2 M u$ gives $u_s = -K_{ss}^{-1} K_{sm} u_m \equiv T_{gs}\, u_m$, i.e.
+
+$$T_G = \begin{bmatrix} I \\ -K_{ss}^{-1} K_{sm} \end{bmatrix},\qquad
+K_{rr} = K_{mm} - K_{ms} K_{ss}^{-1} K_{sm} = T_G^\top K\, T_G
+\quad\text{(Schur complement)},\qquad M_{rr} = T_G^\top M\, T_G.$$
+
+Properties to pin: **statics are exact** — for loads applied only at masters,
+$K_{rr}^{-1} f_m$ equals the full solution at the master rows to round-off (ACCEPTANCE
+case 17a); eigenvalues are Rayleigh–Ritz **upper bounds** ($T_G$ spans a subspace);
+accuracy of mode $r$ degrades like $\omega_r^2 / \omega_{s,1}^2$ where $\omega_{s,1}$ is
+the first eigenvalue of the slave structure with masters clamped
+($K_{ss}\phi = \lambda M_{ss}\phi$) — the classic validity rule is "use below
+$\sim\!1/3\,f_{s,1}$". Implementation: one sparse factorization of $K_{ss}$ (CSC + `splu`),
+$n_m$ solves; never invert. Pitfall: $K_{ss}$ is singular when clamping the masters does
+not restrain the structure (free–free component with too few/coplanar masters) — raise
+with the near-null-space DOF, don't regularize silently.
+
+### 9.2 IRS — Improved Reduced System (O'Callahan 1989)
+
+First-order inertia correction to Guyan: with $S = \mathrm{blkdiag}(0,\ K_{ss}^{-1})$ in
+the $(m, s)$ partition,
+
+$$T_{IRS} = T_G + S\, M\, T_G\, M_{rr}^{-1} K_{rr},$$
+
+then $K_{red} = T_{IRS}^\top K T_{IRS}$, $M_{red} = T_{IRS}^\top M T_{IRS}$. The correction
+term injects the $\omega^2$-dependent part of the exact condensation
+$u_s = -(K_{ss} - \omega^2 M_{ss})^{-1}(K_{sm} - \omega^2 M_{sm})u_m$ evaluated with the
+Guyan-reduced dynamics as the frequency estimate. Measured on the 10-element cantilever
+demo (6 masters, 6 modes): mean relative frequency error drops 1.35e-2 (Guyan) →
+**3.78e-4** (IRS); the acceptance check is the *mean* improvement, not per-mode, because
+individual high modes may not improve monotonically. Reuse the $K_{ss}$ factorization from
+§9.1 — the extra cost is one more slave-block solve set plus dense $O(n_m^3)$. Iterated
+IRS (re-inserting $T_{IRS}$) converges toward SEREP accuracy but can diverge on
+ill-conditioned $M_{rr}$; if offered, cap iterations and monitor $\lVert \Delta T \rVert$.
+
+### 9.3 SEREP (System Equivalent Reduction/Expansion Process)
+
+Given kept target shapes $\Phi$ ($n \times m$) and master rows $m$:
+
+$$T = \Phi\, \Phi_m^{+},\qquad \Phi_m = \Phi[\text{master rows}, :].$$
+
+With $n_m = m$ and $\Phi_m$ invertible the reduced model **reproduces the kept modes
+exactly** (frequencies and shapes, ACCEPTANCE 17b: rel dev ≤ 1e-6, reconstruction
+$\max|\Phi - T\Phi_m| \le$ 1e-8 relative); with $n_m > m$ it is the least-squares
+projector and $T^\top M T$ has rank $m$ — the reduced eigenproblem is then singular, so
+either warn or return the rank so callers use QZ. The same $T$ is the SEREP *expansion*
+operator used by `correlation.expansion.expand_serep` (R4-O3). Pitfalls: master selection
+governs $\mathrm{cond}(\Phi_m)$ — pick masters with EFI (`pretest.efi`), never co-linear
+rows; scale/sign of $\Phi$ cancels in $T$; complex shapes need the conjugate-transpose
+pseudo-inverse.
+
+### 9.4 Complexity and hooks
+
+| Kernel | Cost |
+|---|---|
+| `guyan` | 1 LU($K_{ss}$) + $n_m$ solves |
+| `irs` | + 1 slave solve set + dense $O(n_m^3)$ |
+| `serep` | SVD/pinv $O(n_m m^2)$ + $O(n\, m\, n_m)$ |
+
+Verification: `examples/guyan_serep.py` (static exactness 1e-12 measured, upper-bound
+property, IRS mean improvement, SEREP round-off reproduction), ACCEPTANCE case 17, and
+`tests/test_round4_reduction.py` (R4-G1: 3-DOF closed-form Guyan basis, 5-DOF chain IRS
+improving the first eigenvalue error by ≥ 10×, SEREP reconstruction at 1e-13).

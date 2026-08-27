@@ -7,6 +7,9 @@ from femtools.mpe.p_lscf import poly_lscf
 from femtools.mpe.fdd import fdd, efdd
 from femtools.mpe.lsce import lsce
 from femtools.rbpe.rbfit import rigid_body_properties
+# Round-4 additions (REMAINING.md, owner R4-O4) — see §5–§6:
+from femtools.mpe.frf_estimation import estimate_h1, estimate_h2, coherence
+from femtools.mpe.ssi import ssi_cov
 ```
 
 Common conventions: FRFs `H (n_out, n_in, n_f)` on `freq_hz`; continuous-time poles
@@ -194,7 +197,97 @@ $E$ against the measured rigid shapes; suspension-mode tails bias $m$ low and el
 tails bias $J$ high (symptom: parameters drift when the band edges move — report the drift);
 force direction errors at the exciter corrupt $g_q$ — prefer multiple excitation locations.
 
-## 5. Complexity summary
+## 5. H1 / H2 / coherence — `femtools.mpe.frf_estimation` (Round 4, owner R4-O4)
+
+Welch-averaged FRF estimators from measured force and response records. Data layout
+follows `fdd.cross_spectral_density`: records are `(n_channels, n_samples)` (tall arrays
+auto-transposed), `x` may be 1-D for a single input. Cross-spectrum convention is
+scipy's `csd(x, y)` $= E[X^* Y]$.
+
+```python
+estimate_h1(x, y, fs, *, nperseg=1024, noverlap=None, window="hann")
+    -> (freq_hz, H)        # H (n_out, n_in, n_f) complex
+estimate_h2(x, y, fs, *, ...) -> (freq_hz, H)
+coherence(x, y, fs, *, ...)   -> (freq_hz, gamma2)   # gamma2 (n_out, n_in, n_f) real
+```
+
+Tuple returns match `cross_spectral_density`; a small `FrfEstimate` dataclass with
+`.freq_hz` / `.H` is also acceptable — `examples/h1_ssi.py` tolerates both, but pick one
+and keep it. With auto/cross spectra $G_{xx}, G_{yy}, G_{xy}$ from **one shared
+segmentation** (same `nperseg`, overlap, window, detrend):
+
+$$H_1 = \frac{G_{xy}}{G_{xx}},\qquad
+  H_2 = \frac{G_{yy}}{G_{yx}} = \frac{G_{yy}}{\overline{G_{xy}}},\qquad
+  \gamma^2 = \frac{|G_{xy}|^2}{G_{xx} G_{yy}} = \frac{|H_1|}{|H_2|} \le 1 .$$
+
+$H_1$ is unbiased under output noise (underestimates at resonances under *input* noise),
+$H_2$ under input noise (overestimates at antiresonances under output noise); the
+identities $|H_1| \le |H_2|$ and $\gamma^2 = |H_1|/|H_2|$ are line-wise mathematical
+facts given shared spectra and are the acceptance pins (case 19; measured dev 7.8e-16 —
+a violation means the three estimators segment differently, which is a bug, not noise).
+True MIMO ($n_{in} > 1$ simultaneous, partially correlated inputs) needs the full input
+CSD matrix inverse per line, $H_1 = G_{yx} G_{xx}^{-1}$ — guard $\mathrm{cond}(G_{xx})$
+and defer if not needed; the Round-4 example is single-input.
+
+Pitfalls: **leakage** biases $|H_1|$ low at light-damped resonances — require ≥ 10 lines
+across the half-power bandwidth ($n_{perseg} \gtrsim 10 f_s / (2\zeta f_r)$, same rule as
+EFDD §2); coherence drops from noise, nonlinearity *and* leakage alike — don't read it as
+a pure SNR meter near peaks; Welch `scaling` cancels in all three ratios but keep
+`"density"` for consistency; sampled-data validation — an estimator fed ZOH-sampled
+records recovers the *discrete-time* FRF, which differs from the continuous model by a
+half-sample delay and sinc rolloff (measured on the 3-DOF chain at $f_s = 64$ Hz: 4.2 %
+median complex error vs the ZOH-exact FRF, but 32 % vs the continuous receptance —
+compare magnitudes or the ZOH-exact reference, as `examples/h1_ssi.py` does).
+`tests/test_round4_mpe.py` (R4-G1) pins the noise-free case: both estimators recover a
+known discrete IIR filter's `freqz` response to 2 % with coherence > 0.995.
+
+## 6. SSI-cov — `femtools.mpe.ssi` (Round 4, owner R4-O4)
+
+Covariance-driven stochastic subspace identification, the output-only complement of
+p-LSCF/LSCE. Under unmeasured broadband (white) excitation the output correlations of an
+LTI system factor like Markov parameters:
+
+$$R_k = E\big[y_{t+k}\, y_t^\top\big] = C A^{k-1} G,$$
+
+so the block-Hankel matrix of correlations factors into observability × stochastic
+controllability:
+
+$$\mathcal H = \begin{bmatrix} R_1 & R_2 & \cdots & R_i\\ R_2 & R_3 & \cdots & R_{i+1}\\
+\vdots & & & \vdots\\ R_i & R_{i+1} & \cdots & R_{2i-1}\end{bmatrix}
+= \mathcal O_i\, \mathcal C_i .$$
+
+Algorithm: unbiased correlation estimates $\hat R_k = \frac{1}{n-k}\sum_t y_{t+k} y_t^\top$
+for $k = 1..2i$; SVD $\mathcal H = U S V^\top$, keep $n_s = 2 \cdot \texttt{order}$
+singular values, $\mathcal O = U_1 S_1^{1/2}$; then $C = \mathcal O[:l,:]$ ($l$ =
+channels) and the shift invariance $A = \mathcal O[:-l,:]^{+}\, \mathcal O[l:,:]$.
+Eigendecomposition $A \Psi = \Psi \mathrm{diag}(z_r)$ gives poles
+$\lambda_r = f_s \ln z_r$ and (unscaled) shapes $\phi_r = C \psi_r$. Filter to physical
+poles exactly as §1/§3: conjugate pairs, $\mathrm{Re}\,\lambda < 0$, $\zeta$ window;
+run a stabilization sweep over orders when requested.
+
+```python
+ssi_cov(data, fs, *, order=8, n_modes=None, n_block_rows=None, ...) -> ModalParameterResult
+# data (n_ch, n_samples); order = pole PAIRS (state dimension 2*order), matching
+# lsce's convention; n_modes optionally trims to the dominant modes (lsce has the
+# same kwarg and tests/test_round4_mpe.py passes it); n_block_rows i defaults to
+# max(20, 4*order) and must satisfy i >= 2*order/n_ch; i/fs should span ~half a
+# period of the lowest mode.
+```
+
+Returns the shared `mpe.common.ModalParameterResult` (ascending `freq_hz`, `damping`,
+`mode_shapes (n_ch, n_modes)`). Measured reference (3-mode chain, 600 s at 64 Hz, 2 %
+output noise, `order=6`): frequency errors ≤ 0.04 %, damping errors ≤ 9 %, MAC vs truth
+≥ 0.9997, two spurious poles cleanly rejected by the ζ-window + nearest-frequency match
+(acceptance case 20 allows 2 % / 50 %).
+
+Pitfalls: shapes are **unscaled** (no mass normalization without known inputs — same
+caveat as FDD §2); overspecify the order 2–3× and rely on stabilization, exactly like
+Prony/LSCE; biased (divide-by-$n$) correlation estimates shift damping — use unbiased
+$1/(n-k)$; harmonics masquerade as ζ ≈ 0 poles (flag, don't fit); damping estimates need
+record lengths of ≳ 500 cycles of the lowest mode for ~10 % scatter; seeded
+`synthetic_response` is the deterministic test source.
+
+## 7. Complexity summary
 
 | Kernel | Cost |
 |---|---|
@@ -202,4 +295,6 @@ force direction errors at the exciter corrupt $g_q$ — prefer multiple excitati
 | `fdd` | Welch $O(n_o^2 n_t \log n_{seg})$ + $O(n_f n_o^3)$ SVDs |
 | `efdd` | + per-peak IFFT and linear fits, negligible |
 | `lsce` | LS $O(n_o n_i n_t (2m)^2)$ + roots $O((2m)^3)$ |
+| `estimate_h1/h2`, `coherence` | Welch $O(n_o n_i n_t \log n_{seg})$ |
+| `ssi_cov` | correlations $O(n_o^2\, i\, n_t)$ + SVD $O((i\, n_o)^3)$ |
 | `rigid_body_properties` | $O(n_f n_i (n_o \cdot 6 + 6 \cdot 10))$ LS stacks |

@@ -21,6 +21,7 @@ itself remains the module.
 
 from __future__ import annotations
 
+from .alignment import AlignmentResult, align_geometry, rotate_modes
 from .dofmap import (
     COMPONENT_NAMES,
     DOFMap,
@@ -32,8 +33,19 @@ from .dofmap import (
     parse_dof_label,
     restrict,
 )
+from .expansion import ExpansionResult, expand_guyan, expand_serep
 from .frf_corr import csac, csf, fdac, frac, frf_difference
-from .mac import comac, ecomac, mac_matrix, mac_pairs, mac_value, modal_scale_factor, poc
+from .mac import (
+    FMACResult,
+    comac,
+    ecomac,
+    fmac,
+    mac_matrix,
+    mac_pairs,
+    mac_value,
+    modal_scale_factor,
+    poc,
+)
 from .orthogonality import (
     auto_orthogonality,
     cross_orthogonality,
@@ -44,9 +56,13 @@ from .pairing import ModePair, PairingResult, pair_modes
 
 __all__ = [
     "COMPONENT_NAMES",
+    "AlignmentResult",
     "DOFMap",
+    "ExpansionResult",
+    "FMACResult",
     "ModePair",
     "PairingResult",
+    "align_geometry",
     "align_modes",
     "as_dofmap",
     "auto_orthogonality",
@@ -55,7 +71,10 @@ __all__ = [
     "csac",
     "csf",
     "ecomac",
+    "expand_guyan",
+    "expand_serep",
     "fdac",
+    "fmac",
     "frac",
     "frf_difference",
     "mac_matrix",
@@ -71,4 +90,5 @@ __all__ = [
     "parse_dof_label",
     "poc",
     "restrict",
+    "rotate_modes",
 ]

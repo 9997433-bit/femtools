@@ -7,10 +7,13 @@ all modes mass-normalized ($\Phi^\top M \Phi = I$).
 
 ## Measured status (merged tree, 2026-08-27)
 
-Verified by running `examples/*.py` (5/5 PASS) and `pytest tests/` against the merged
-`cursor/femtools-sota-d551` tree (21 passed, 3 perf skips). Checked = measured
-passing with the quoted numbers; unchecked = not yet exercised by a test or
-example on this tree.
+Verified by running the five Round-1–3 examples (5/5 PASS, re-confirmed 2026-08-27) and
+`pytest tests/` against the merged `cursor/femtools-sota-d551` tree (21 passed, 3 perf
+skips). The three Round-4 examples (`guyan_serep.py`, `cms_rubin.py`, `h1_ssi.py`) are
+written against the frozen-but-unlanded R4 kernels and are expected to fail with
+`ModuleNotFoundError` until those merge — see the Round-4 block below. Checked = measured
+passing with the quoted numbers; unchecked = not yet exercised by a test or example on
+this tree.
 
 - [x] **1a** axial bar, 2-node discrete — `tests/test_golden_fea.py::test_two_node_axial_bar_frequency` green
 - [ ] **1b** axial bar N-element dispersion — no test/example yet
@@ -51,6 +54,17 @@ example on this tree.
       **0.9855** with the default incompatible modes (tol > 0.95) vs **0.6428** with `"full"`;
       distorted patch test **5.0e-16** (tol 1e-10); free–free block exactly 6 rigid-body modes
 
+Round-4 cases (17–20, added 2026-08-27): the examples exist and their scaffolding was
+dry-run against throwaway reference implementations of the frozen APIs (measured numbers
+quoted in §9), but the real kernels (R4-O1/O2/O4) have not landed on this tree yet, so
+`examples/guyan_serep.py`, `examples/cms_rubin.py` and `examples/h1_ssi.py` currently exit
+with `ModuleNotFoundError` — expected until the sibling branches merge.
+
+- [ ] **17** Guyan/IRS/SEREP — `examples/guyan_serep.py` written; awaiting `femtools.fea.reduction`
+- [ ] **18** free-interface CMS — `examples/cms_rubin.py` written; awaiting `femtools.dynamics.cms_free`
+- [ ] **19** H1/H2/coherence — `examples/h1_ssi.py` part 1; awaiting `femtools.mpe.frf_estimation`
+- [ ] **20** SSI-cov — `examples/h1_ssi.py` part 2; awaiting `femtools.mpe.ssi`
+
 ## 0. Master table
 
 | # | Case | Exact reference | Metric | Tol |
@@ -77,6 +91,12 @@ example on this tree.
 | 14 | LHS stratification | 1 sample per stratum per dim, seeded reproducibility | exact | — |
 | 15 | RBPE synthetic rigid body | recover $(m, c, J)$ (§8) | rel | 1e-8 |
 | 16 | FDD synthetic 2-DOF | peak at $f_r$ within PSD resolution; shape MAC | $\Delta f \le df$; MAC > 0.99 | — |
+| 17a | Guyan static exactness (load at masters only) | Schur-complement identity (§9.1) | rel dev at masters | 1e-8 |
+| 17b | SEREP square reproduction ($n_m = m$) | $T = \Phi \Phi_m^{-1}$ exact | rel freq / shape recon | 1e-6 / 1e-8 |
+| 17c | Guyan bounds + IRS improvement | Rayleigh–Ritz; O'Callahan correction | $f_{red} \ge f_{full}$; mean err(IRS) ≤ mean err(Guyan) | — |
+| 18 | Free-interface CMS, split fixed–fixed beam | coupled vs unsplit 20×BEAM2 (§9.2) | rel freq, first 4 | 1e-2 Rubin / 3e-2 MacNeal |
+| 19 | H1/H2/coherence identities | $\gamma^2 = \lvert H_1\rvert/\lvert H_2\rvert \le 1$, shared segmentation | max dev | 1e-8 |
+| 20 | SSI-cov synthetic 3-DOF chain (seeded) | known $(f_r, \zeta_r, \phi_r)$ (§9.4) | rel $f$ / rel $\zeta$ / MAC | 2e-2 / 5e-1 / > 0.9 |
 
 ## 1. Axial bar
 
@@ -252,7 +272,60 @@ ramp-invariant recurrence is exact for piecewise-linear loads.
   recovered to 1e-6 relative in $f$, 1e-3 absolute in $\zeta$ at the correct model order;
   with 1 % noise, stabilization diagram contains all 5 physical poles flagged stable.
 
-## 9. Determinism requirements (all tests)
+## 9. Round-4 goldens (reduction, free-interface CMS, H1/H2, SSI-cov)
+
+Constructions live in the three Round-4 examples; every "measured" number below was
+obtained by dry-running them against straight-from-the-literature reference
+implementations of the frozen APIs (2026-08-27), so they are targets for the real
+kernels, not yet regression facts.
+
+### 9.1 Reduction (case 17, `examples/guyan_serep.py`)
+
+10-element BEAM2 cantilever, 60 free DOFs, 6 masters (uy/uz at $x = 0.3L, 0.6L, L$),
+compared on the 6 lowest (all-bending) modes; formulas in `fea.md` §9.
+
+- 17a: unit tip load (a master DOF) → Guyan-reduced static solution equals the full
+  solution at the masters. Measured 1.1e-12 relative; tol 1e-8.
+- 17b: SEREP with 6 masters = 6 kept modes reproduces the kept frequencies (measured
+  2.3e-13 rel, tol 1e-6) and shapes ($\max|\Phi - T\Phi_m|$ 7.4e-16 rel, tol 1e-8).
+- 17c: every Guyan frequency ≥ full-model frequency (Rayleigh–Ritz, measured margin
+  +1.05e-2 Hz on mode 1); mean rel err improves Guyan 1.35e-2 → IRS 3.78e-4. The IRS
+  assertion is on the *mean* — individual high modes need not improve monotonically.
+  Guyan first-mode error < 1 % (measured 6.3e-4).
+
+### 9.2 Free-interface CMS (case 18, `examples/cms_rubin.py`)
+
+Fixed–fixed 20×BEAM2 beam split at midspan into two 10-element supported components
+(A clamped at $x=0$, B at $x=L$), 8 kept free-interface modes + 6 interface DOFs each,
+coupled primally on the shared node and solved with QZ (MacNeal's interface mass block is
+singular — see `dynamics.md` §9.1). Reference: the unsplit model, which itself matches
+the analytic $\cosh\beta L\cos\beta L = 1$ roots (4.7300407449, 7.8532046241, …) to
+example precision. Measured max rel err on the first 4 coupled modes: Rubin **1.9e-7**
+(tol 1e-2), MacNeal **7.7e-5** (tol 3e-2), Craig–Bampton baseline 2.9e-5 through the
+same harness.
+
+### 9.3 H1/H2/coherence (case 19, `examples/h1_ssi.py` part 1)
+
+3-DOF spring–mass chain ($k = 1000$ N/m, $m = 1$ kg → 2.240/6.276/9.069 Hz, $\zeta = 2\%$),
+ZOH-exact simulation at 64 Hz for 1200 s, seeded white-noise force at DOF 1, 10 % output
+noise; Welch `nperseg=8192` (17 averages, ≥ 17 lines across each half-power band).
+Identities pinned on the 1–12 Hz band: $\max |H_1|/|H_2| \le 1$ (measured 0.9996) and
+$\max|\gamma^2 - |H_1|/|H_2||$ ≤ 1e-8 nominal (measured 7.8e-16 — any visible deviation
+means inconsistent segmentation between the three estimators). Accuracy: median complex
+error vs the **ZOH-exact discrete FRF** < 10 % (measured 4.2 %); vs the continuous
+receptance only magnitudes are comparable (half-sample delay — measured 3.0 % median
+magnitude dev, quoted as a note, not a gate); each $|H_1|$ peak within
+$\max(2\,df,\ 1.5\%)$ of the true frequency.
+
+### 9.4 SSI-cov (case 20, `examples/h1_ssi.py` part 2)
+
+Output-only records from `femtools.mpe.synthetic.synthetic_response` (same chain shapes,
+600 s at 64 Hz, seed 11, 2 % noise), `ssi_cov(..., order=6)` → nearest-frequency match to
+truth. Gates: rel frequency error < 2 % (measured ≤ 4e-4), rel damping error < 50 %
+(measured ≤ 9 %), MAC > 0.9 when shapes are returned (measured ≥ 0.9997). Spurious poles
+(2 at order 6) must be tolerated by the matching, not fatal.
+
+## 10. Determinism requirements (all tests)
 
 Fixed seeds via `np.random.default_rng(seed)` only; eigenvector sign convention per
 `fea.md` §6.2; degenerate-subspace comparisons via MAC/S2MAC, never entrywise; no test may

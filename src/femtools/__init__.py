@@ -22,10 +22,21 @@ top level exports the type produced by the contract entry points — ``ModalResu
 and ``StaticResult`` from ``femtools.fea``, ``FRFResult`` from ``femtools.dynamics``,
 ``AssemblyResult`` from ``femtools.fea.assemble``. The containers of
 ``femtools.core.results`` remain available under their subpackage path.
+
+Round-4 transition tier: the frozen remaining API (``.agent_workspace/REMAINING.md``,
+``docs/PRODUCT_MAP.md`` tag *R4-wip*) is pre-wired below as **provisional** lazy
+exports — ``femtools.guyan``, ``femtools.estimate_h1``, ``femtools.read_pch``, … —
+that resolve as soon as their defining module is merged into the tree. Until then,
+attribute access raises a descriptive ``AttributeError`` (so ``hasattr`` probing and
+``from femtools import <name>`` fail cleanly) and the name is kept out of
+``__all__``; a Round-4 module that is absent can never break ``import femtools`` or
+``from femtools import *``. Once merged and verified, names move from
+``_PROVISIONAL_EXPORTS`` to ``_EXPORTS`` (and gain ``TYPE_CHECKING`` re-exports).
 """
 
 from __future__ import annotations
 
+import os
 from importlib import import_module
 from typing import TYPE_CHECKING
 
@@ -116,6 +127,48 @@ _EXPORTS: dict[str, str] = {
     "ScriptEngine": "femtools.script.engine",
 }
 
+# Provisional top-level name -> defining module: the Round-4 API frozen in
+# .agent_workspace/REMAINING.md (docs/PRODUCT_MAP.md tag R4-wip). These modules are
+# merged by other Round-4 agents; each name resolves lazily once its module exists
+# and raises a descriptive AttributeError until then (see _resolve_provisional).
+_PROVISIONAL_EXPORTS: dict[str, str] = {
+    # fea — condensation/expansion bases and complex modes (R4-O1)
+    "guyan": "femtools.fea.reduction",
+    "irs": "femtools.fea.reduction",
+    "serep": "femtools.fea.reduction",
+    "ReductionResult": "femtools.fea.reduction",
+    "solve_complex_modes": "femtools.fea.eigen",
+    "ComplexModalResult": "femtools.fea.eigen",
+    # dynamics — free-interface CMS and random/PSD response (R4-O2)
+    "rubin": "femtools.dynamics.cms_free",
+    "macneal": "femtools.dynamics.cms_free",
+    "FreeCMSResult": "femtools.dynamics.cms_free",
+    "psd_response": "femtools.dynamics.random",
+    "PSDResult": "femtools.dynamics.random",
+    # pretest / correlation (R4-O3)
+    "driving_point_residues": "femtools.pretest.exciter",
+    "select_exciters": "femtools.pretest.exciter",
+    "expand_guyan": "femtools.correlation.expansion",
+    "expand_serep": "femtools.correlation.expansion",
+    "fmac": "femtools.correlation.mac",
+    "align_geometry": "femtools.correlation.alignment",
+    # updating / optimization / mpe (R4-O4)
+    "update_from_frf": "femtools.updating.frf_updating",
+    "select_parameters": "femtools.updating.selection",
+    "fit_rsm": "femtools.optimization.surrogate",
+    "predict_rsm": "femtools.optimization.surrogate",
+    "pareto_weighted": "femtools.optimization.multi",
+    "estimate_h1": "femtools.mpe.frf_estimation",
+    "estimate_h2": "femtools.mpe.frf_estimation",
+    "coherence": "femtools.mpe.frf_estimation",
+    "ssi_cov": "femtools.mpe.ssi",
+    # io / drivers (R4-F2)
+    "read_pch": "femtools.io.pch",
+    "write_pch": "femtools.io.pch",
+    "read_cdb": "femtools.io.cdb",
+    "SolverDriver": "femtools.drivers.base",
+}
+
 # Subpackages reachable as attributes (femtools.fea, femtools.cli, ...).
 _SUBMODULES = frozenset(
     {
@@ -136,7 +189,101 @@ _SUBMODULES = frozenset(
     }
 )
 
-__all__ = ["__version__", *sorted(_EXPORTS), *sorted(_SUBMODULES)]
+# Subpackages scheduled for Round 4 that may not exist in the tree yet.
+_PROVISIONAL_SUBMODULES = frozenset({"drivers"})
+
+assert not set(_PROVISIONAL_EXPORTS) & set(_EXPORTS), "provisional name shadows a stable export"
+assert not _PROVISIONAL_SUBMODULES & _SUBMODULES, "provisional subpackage shadows a stable one"
+
+_PKG_DIR = os.path.dirname(__file__)
+
+
+def _module_source(module_name: str) -> str | None:
+    """Path of the module's source file if it is in the tree, else ``None``.
+
+    Deliberately a filesystem probe and not ``importlib.util.find_spec``: ``find_spec``
+    executes parent-package ``__init__`` modules (``femtools.fea`` and friends import
+    numpy/scipy eagerly), which would defeat the cheap lazy import.
+    """
+    base = os.path.join(_PKG_DIR, *module_name.removeprefix("femtools.").split("."))
+    for candidate in (base + ".py", os.path.join(base, "__init__.py")):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def _defines_name(source_path: str, name: str) -> bool:
+    """Heuristic: does the module source define ``name`` at top level?
+
+    A source-text scan, again to avoid importing numpy-heavy modules at package-import
+    time. It recognizes column-0 ``def``/``class``/assignment statements; exotic
+    definitions (re-exports, ``__getattr__`` factories) are missed until the name is
+    promoted into ``_EXPORTS`` after the Round-4 merge — a benign, transient miss.
+    """
+    prefixes = (
+        f"def {name}(",
+        f"async def {name}(",
+        f"class {name}(",
+        f"class {name}:",
+        f"{name} = ",
+        f"{name}: ",
+    )
+    try:
+        with open(source_path, encoding="utf-8") as stream:
+            return any(line.startswith(prefixes) for line in stream)
+    except OSError:
+        return False
+
+
+def _available_provisional_names() -> list[str]:
+    """Provisional names whose definitions are already present in the tree.
+
+    Only these enter ``__all__`` (evaluated once, at import time): every ``__all__``
+    entry must resolve or ``from femtools import *`` breaks, and the whole point of
+    the provisional tier is that a missing Round-4 module never breaks an import.
+    """
+    names = [
+        name
+        for name, module_name in _PROVISIONAL_EXPORTS.items()
+        if (path := _module_source(module_name)) is not None and _defines_name(path, name)
+    ]
+    names += [sub for sub in _PROVISIONAL_SUBMODULES if _module_source(f"femtools.{sub}")]
+    return names
+
+
+__all__ = [
+    "__version__",
+    *sorted(_EXPORTS),
+    *sorted(_SUBMODULES),
+    *sorted(_available_provisional_names()),
+]
+
+
+def _pending(name: str, module_name: str) -> AttributeError:
+    return AttributeError(
+        f"module {__name__!r} has no attribute {name!r} yet: it belongs to the frozen "
+        f"Round-4 API expected in {module_name!r} (docs/PRODUCT_MAP.md tag R4-wip), "
+        "which has not been merged into this tree."
+    )
+
+
+def _resolve_provisional(name: str) -> object:
+    module_name = _PROVISIONAL_EXPORTS[name]
+    try:
+        module = import_module(module_name)
+    except ModuleNotFoundError as exc:
+        missing = exc.name or ""
+        if missing == module_name or module_name.startswith(missing + "."):
+            # The scheduled module (or its scheduled parent package) is not in the
+            # tree yet: report "pending", keep `hasattr`/star-import semantics clean.
+            raise _pending(name, module_name) from None
+        raise  # a merged module is missing a real dependency: surface it unchanged
+    try:
+        return getattr(module, name)
+    except AttributeError:
+        # Module merged but the symbol not added yet (e.g. femtools.fea.eigen exists
+        # today without solve_complex_modes): same user-facing story as above.
+        raise _pending(name, module_name) from None
 
 
 def __getattr__(name: str) -> object:
@@ -144,16 +291,30 @@ def __getattr__(name: str) -> object:
         value = getattr(import_module(_EXPORTS[name]), name)
         globals()[name] = value  # cache: next access skips __getattr__
         return value
+    if name in _PROVISIONAL_EXPORTS:
+        value = _resolve_provisional(name)
+        globals()[name] = value
+        return value
     if name in _SUBMODULES:
         return import_module(f"femtools.{name}")
+    if name in _PROVISIONAL_SUBMODULES:
+        try:
+            return import_module(f"femtools.{name}")
+        except ModuleNotFoundError as exc:
+            if exc.name == f"femtools.{name}":
+                raise _pending(name, f"femtools.{name}") from None
+            raise
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals()) | set(_EXPORTS) | _SUBMODULES)
+    return sorted(set(globals()) | set(__all__) | set(_EXPORTS) | _SUBMODULES)
 
 
-if TYPE_CHECKING:  # static-analysis view of the lazy exports above (PEP 484 re-exports)
+# Static-analysis view of the *stable* lazy exports (PEP 484 re-exports). Provisional
+# Round-4 names intentionally have no entries here until their modules are merged:
+# static imports of not-yet-existing modules would turn every type-check run red.
+if TYPE_CHECKING:
     from femtools.core.coords import CoordSys as CoordSys
     from femtools.core.errors import (
         AssemblyError as AssemblyError,

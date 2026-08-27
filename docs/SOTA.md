@@ -83,9 +83,10 @@ deviations.
 * **SEREP.** O'Callahan, J., Avitabile, P., Riemer, R., *System Equivalent Reduction Expansion
   Process (SEREP)*, Proc. 7th IMAC, 1989 (modal-basis reduction/expansion, exact at retained
   modes; intended default for shape expansion in cross-orthogonality).
-* Planned implementation (`docs/PRODUCT_MAP.md` R3+): each as an explicit transformation
-  matrix `T` with `K_r = TᵀKT, M_r = TᵀMT`, shared between pretest (test-DOF system matrices)
-  and correlation (expansion of measured shapes). Until then, cross-orthogonality requires
+* Implementation in flight in Round 4 (`docs/PRODUCT_MAP.md` R4-wip — `fea.reduction`,
+  `correlation.expansion`): each as an explicit transformation matrix `T` with
+  `K_r = TᵀKT, M_r = TᵀMT`, shared between pretest (test-DOF system matrices)
+  and correlation (expansion of measured shapes). Until merged, cross-orthogonality requires
   the caller to supply M at the common DOFs (e.g. via `correlation.dofmap.DOFMap` selection).
 
 ## 5. Structural dynamics: FRF synthesis, CMS
@@ -100,7 +101,8 @@ deviations.
   5% relative L2 over 0.2–0.8 f_max with 20 modes).
 * **Craig–Bampton CMS.** Craig, R.R., Bampton, M.C.C., *Coupling of Substructures for Dynamic
   Analyses*, AIAA Journal, 6(7), 1968, pp. 1313–1319 — fixed-interface normal modes +
-  constraint modes. Free-interface alternatives (planned, `docs/PRODUCT_MAP.md` R3+):
+  constraint modes. Free-interface alternatives (Round 4 in flight, `docs/PRODUCT_MAP.md`
+  R4-wip — `dynamics.cms_free`):
   MacNeal, R.H., *A Hybrid Method of Component Mode Synthesis*, Computers & Structures,
   1(4), 1971, pp. 581–601; Rubin, S., *Improved Component-Mode Representation for Structural
   Dynamic Analysis*, AIAA Journal, 13(8), 1975, pp. 995–1006 (residual-flexibility
@@ -127,8 +129,9 @@ deviations.
   Andersen, P., *Damping Estimation by Frequency Domain Decomposition*, Proc. 19th IMAC, 2001.
   Textbook: Brincker, R., Ventura, C., *Introduction to Operational Modal Analysis*, Wiley,
   2015.
-* **SSI (planned R3+).** Van Overschee, P., De Moor, B., *Subspace Identification for Linear
-  Systems: Theory — Implementation — Applications*, Kluwer, 1996.
+* **SSI (Round 4 in flight — `mpe.ssi.ssi_cov`, covariance-driven).** Van Overschee, P.,
+  De Moor, B., *Subspace Identification for Linear Systems: Theory — Implementation —
+  Applications*, Kluwer, 1996.
 
 ## 7. Rigid-body property extraction
 
@@ -197,8 +200,8 @@ implementations; `docs/ACCEPTANCE.md` (owned by R1-F3) elaborates the golden cas
 
 Known distances between the merged code and the state of the art it targets. Status tags in
 `docs/PRODUCT_MAP.md` point here; a row tagged R1/R2 is merged and tested but may still carry
-one of these caveats. Capabilities that are absent (rather than imperfect) are the R3+ rows
-of the product map, not repeated here.
+one of these caveats. Capabilities that are absent (rather than imperfect) are the R4-wip and
+R5+ rows of the product map, not repeated here.
 
 ### Closed in Round 2
 

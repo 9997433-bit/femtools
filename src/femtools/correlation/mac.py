@@ -8,12 +8,20 @@ All routines are vectorized: a full MAC matrix costs a single BLAS ``gemm``.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from ._linalg import as_mode_matrix, column_norms_sq, safe_divide, same_array, weighted
+from ._linalg import (
+    as_mode_matrix,
+    column_norms_sq,
+    mode_frequencies,
+    safe_divide,
+    same_array,
+    weighted,
+)
 from .orthogonality import cross_orthogonality
 
 __all__ = [
@@ -22,9 +30,11 @@ __all__ = [
     "mac_matrix",
     "comac",
     "ecomac",
+    "fmac",
     "poc",
     "modal_scale_factor",
     "mac_pairs",
+    "FMACResult",
 ]
 
 
@@ -218,6 +228,222 @@ def ecomac(
     msf = modal_scale_factor(ah, bh)
     sign = np.where(np.abs(msf) > 0.0, msf / np.where(np.abs(msf) > 0.0, np.abs(msf), 1.0), 1.0)
     return np.abs(ah - bh * sign).sum(axis=1) / (2.0 * a.shape[1])
+
+
+@dataclass
+class FMACResult:
+    """Frequency-scaled MAC data (:func:`fmac`).
+
+    The FMAC diagram plots one point per correlated mode pair at
+    ``(freq_a, freq_b)``, sized or coloured by its MAC value.  Everything the
+    plot shows is available numerically here: ``np.asarray(result)`` gives the
+    MAC value of each pair and :attr:`points` the ``(n_pair, 3)`` array of
+    ``[f_a, f_b, mac]`` rows that the diagram draws.
+    """
+
+    mac: NDArray[np.float64]
+    index_a: NDArray[np.intp]
+    index_b: NDArray[np.intp]
+    values: NDArray[np.float64]
+    freq_a: NDArray[np.float64]
+    freq_b: NDArray[np.float64]
+    unpaired_a: NDArray[np.intp] = field(default_factory=lambda: np.zeros(0, dtype=np.intp))
+    unpaired_b: NDArray[np.intp] = field(default_factory=lambda: np.zeros(0, dtype=np.intp))
+    method: str = "greedy"
+
+    @property
+    def points(self) -> NDArray[np.float64]:
+        """``(n_pair, 3)`` array of ``[f_a, f_b, mac]``, the diagram itself."""
+        return np.column_stack((self.freq_a, self.freq_b, self.values))
+
+    @property
+    def freq_error(self) -> NDArray[np.float64]:
+        """Relative frequency error ``(f_a - f_b) / f_b`` per pair (NaN if unknown)."""
+        with np.errstate(invalid="ignore", divide="ignore"):
+            den = np.where(self.freq_b == 0.0, np.nan, self.freq_b)
+            return np.asarray((self.freq_a - self.freq_b) / den, dtype=float)
+
+    @property
+    def freq_error_pct(self) -> NDArray[np.float64]:
+        return 100.0 * self.freq_error
+
+    @property
+    def scale_factor(self) -> float:
+        """MAC-weighted slope of ``f_b`` against ``f_a`` through the origin.
+
+        The FMAC diagram is read against the 45-degree line: a slope above 1
+        means the analytical frequencies are globally high (model too stiff or
+        too light) rather than individually wrong, which is the distinction
+        the diagram exists to make.  Well-correlated pairs dominate the fit
+        because the MAC values are the weights.
+        """
+        w = self.values
+        den = float(np.sum(w * self.freq_a**2))
+        if den <= 0.0:
+            return float("nan")
+        return float(np.sum(w * self.freq_a * self.freq_b) / den)
+
+    @property
+    def n_pairs(self) -> int:
+        return int(self.values.size)
+
+    def __array__(self, dtype: Any = None, copy: Any = None) -> NDArray[np.float64]:
+        arr = self.values
+        if dtype is not None:
+            arr = arr.astype(dtype, copy=False)
+        return np.array(arr, copy=True) if copy else arr
+
+    def __len__(self) -> int:
+        return self.n_pairs
+
+    def __getitem__(self, item: Any) -> Any:
+        return self.values[item]
+
+    def table(self) -> str:
+        """Plain-text FMAC table, one line per correlated pair."""
+        head = (
+            f"{'#':>3} {'A':>4} {'B':>4} {'MAC':>7} {'f_A [Hz]':>11} {'f_B [Hz]':>11} {'df [%]':>8}"
+        )
+        lines = [head, "-" * len(head)]
+        err = self.freq_error_pct
+        for k in range(self.n_pairs):
+            lines.append(
+                f"{k:>3} {int(self.index_a[k]):>4} {int(self.index_b[k]):>4} "
+                f"{self.values[k]:>7.4f} {self.freq_a[k]:>11.4f} {self.freq_b[k]:>11.4f} "
+                f"{err[k]:>8.2f}"
+            )
+        if self.n_pairs:
+            lines.append(
+                f"mean MAC = {float(np.mean(self.values)):.4f}, "
+                f"frequency scale factor = {self.scale_factor:.5f}"
+            )
+        if self.unpaired_a.size:
+            lines.append(f"unpaired A: {self.unpaired_a.tolist()}")
+        if self.unpaired_b.size:
+            lines.append(f"unpaired B: {self.unpaired_b.tolist()}")
+        return "\n".join(lines)
+
+
+def fmac(
+    phi_a: ArrayLike,
+    phi_b: ArrayLike,
+    freq_a: ArrayLike | None = None,
+    freq_b: ArrayLike | None = None,
+    *,
+    pairs: ArrayLike | None = None,
+    method: str = "greedy",
+    mac_threshold: float = 0.0,
+    freq_tol: float | None = None,
+    weights: Any = None,
+    mac: ArrayLike | None = None,
+) -> FMACResult:
+    """Frequency-scaled MAC: the MAC of each pair together with its frequencies.
+
+    A MAC matrix says which modes look alike but nothing about *where* they
+    sit; a frequency table says how far apart they are but nothing about
+    whether the compared modes are the same one.  The FMAC combines the two
+    (Fotsch & Ewins, IMAC XVIII, 2000): each correlated pair contributes the
+    point ``(f_a, f_b, mac)``, so a systematic frequency bias shows up as a
+    line tilted away from the diagonal — reported here as
+    :attr:`FMACResult.scale_factor` — while a single bad pair shows up as one
+    outlier, and a poorly correlated pair as a low MAC.
+
+    Parameters
+    ----------
+    phi_a, phi_b:
+        Mode shapes ``(n_dof, n_mode)`` on a common DOF set (use
+        :func:`~femtools.correlation.dofmap.align_modes` first), or modal
+        results carrying them and their frequencies.
+    freq_a, freq_b:
+        Frequencies [Hz] of the two mode sets; taken from the mode objects
+        when they carry them.
+    pairs:
+        Explicit pairing: a sequence of ``(index_a, index_b)`` tuples or a
+        :class:`~femtools.correlation.pairing.PairingResult`.  By default the
+        modes are paired by :func:`~femtools.correlation.pairing.pair_modes`.
+    method, mac_threshold, freq_tol:
+        Forwarded to :func:`~femtools.correlation.pairing.pair_modes` when
+        ``pairs`` is not given.
+    weights:
+        Optional MAC weighting (e.g. a mass matrix, giving the
+        cross-orthogonality based variant).
+    mac:
+        Pre-computed MAC matrix ``(n_a, n_b)``.
+
+    Returns
+    -------
+    FMACResult
+        The pairs with their MAC values and frequencies, plus the full MAC
+        matrix and the modes left unpaired.
+    """
+    # Local import: `pairing` imports this module, so the dependency can only
+    # run in this direction at call time.
+    from .pairing import PairingResult, pair_modes
+
+    mac_mat = mac_matrix(phi_a, phi_b, weights=weights) if mac is None else np.asarray(mac, float)
+    if mac_mat.ndim != 2:
+        raise ValueError(f"mac must be 2-D, got shape {mac_mat.shape}")
+    n_a, n_b = mac_mat.shape
+
+    fa = _fmac_freqs(phi_a, freq_a, n_a, "freq_a")
+    fb = _fmac_freqs(phi_b, freq_b, n_b, "freq_b")
+
+    if pairs is None:
+        paired = pair_modes(
+            phi_a,
+            phi_b,
+            fa,
+            fb,
+            method=method,
+            mac_threshold=mac_threshold,
+            freq_tol=freq_tol,
+            mac=mac_mat,
+        )
+        idx = paired.as_pairs()
+        used = paired.method
+        left_a = np.asarray(paired.unpaired_a, dtype=np.intp)
+        left_b = np.asarray(paired.unpaired_b, dtype=np.intp)
+    else:
+        raw: Any = pairs
+        if isinstance(raw, PairingResult):
+            raw = raw.as_pairs()
+        elif hasattr(raw, "as_pairs"):  # pragma: no cover - duck-typed pairing result
+            raw = raw.as_pairs()
+        else:
+            listed = list(raw)
+            raw = [(p.index_a, p.index_b) for p in listed] if _is_pair_objects(listed) else listed
+        idx = np.atleast_2d(np.asarray(raw, dtype=np.intp)).reshape(-1, 2)
+        if idx.size and (idx[:, 0].max() >= n_a or idx[:, 1].max() >= n_b):
+            raise ValueError("pairs index outside the MAC matrix")
+        used = "given"
+        left_a = np.setdiff1d(np.arange(n_a, dtype=np.intp), idx[:, 0])
+        left_b = np.setdiff1d(np.arange(n_b, dtype=np.intp), idx[:, 1])
+
+    ia, ib = idx[:, 0], idx[:, 1]
+    return FMACResult(
+        mac=mac_mat,
+        index_a=ia,
+        index_b=ib,
+        values=mac_mat[ia, ib],
+        freq_a=fa[ia],
+        freq_b=fb[ib],
+        unpaired_a=left_a,
+        unpaired_b=left_b,
+        method=used,
+    )
+
+
+def _fmac_freqs(phi: Any, freq: ArrayLike | None, n: int, name: str) -> NDArray[np.float64]:
+    """Frequencies of a mode set, from the argument or the mode object."""
+    if freq is None:
+        inherited = mode_frequencies(phi)
+        if inherited is None:
+            return np.full(n, np.nan)
+        freq = inherited
+    arr = np.asarray(freq, dtype=float).reshape(-1)
+    if arr.size != n:
+        raise ValueError(f"{name} has {arr.size} entries but there are {n} modes")
+    return arr
 
 
 def poc(

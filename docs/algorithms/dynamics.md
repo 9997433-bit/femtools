@@ -9,6 +9,8 @@ from femtools.dynamics.mba import modal_based_assembly
 from femtools.dynamics.craig_bampton import craig_bampton
 from femtools.dynamics.time_domain import time_history
 from femtools.dynamics.residuals import residual_vectors
+# Round-4 additions (REMAINING.md, owner R4-O2) — see §9:
+from femtools.dynamics.cms_free import rubin, macneal, FreeCMSResult
 ```
 
 Inputs/outputs are DOF tuples `(node_id, dof_code)` resolved through
@@ -232,6 +234,84 @@ response needs enough modes; offer static correction with residual vectors.
 | `direct_frf` | $O(n_f)$ × complex sparse LU($n$) |
 | `residual_vectors` | 1 LU + $n_{in}$ solves + small eig |
 | `craig_bampton` | 1 LU($K_{ii}$) + $n_b$ solves + ARPACK($m$) |
+| `rubin` / `macneal` (§9) | eig($m$ kept) + 1 LU($K$) + $n_b$ solves + dense $O(n_b^3)$ |
 | `modal_based_assembly` | $O((\sum m_c)^3)$ dense eig |
 | Newmark | 1 LU + $n_t$ back-subs |
 | Modal TH | $O(m\, n_t)$ |
+
+## 9. Free-interface CMS — MacNeal / Rubin (Round 4, owner R4-O2)
+
+Spec for `femtools.dynamics.cms_free`, frozen in `.agent_workspace/REMAINING.md`.
+Signature and conventions **mirror `craig_bampton`** (matrix-level, integer DOF indices,
+reduced coordinate order `[boundary..., modal...]` — `examples/cms_rubin.py` couples
+superelements assuming exactly this ordering):
+
+```python
+def rubin(K, M, boundary_dofs, n_modes=0, *, interior_dofs=None) -> FreeCMSResult
+def macneal(K, M, boundary_dofs, n_modes=0, *, interior_dofs=None) -> FreeCMSResult
+
+class FreeCMSResult:        # CraigBamptonResult-like
+    K: np.ndarray; M: np.ndarray   # (n_b + m) square, order [boundary, modal]
+    T: np.ndarray                  # (ndof, n_b + m) in the original DOF ordering
+    boundary_dofs: np.ndarray
+    free_freq_hz: np.ndarray       # kept free-interface (elastic) mode frequencies
+```
+
+### 9.1 Residual-flexibility basis
+
+The component is analyzed with the interface **free** (its own supports, if any, stay
+applied). Keep the $m$ lowest free-interface modes $(\Lambda, \Phi)$, mass-normalized,
+and correct the truncation with the residual flexibility restricted to the boundary
+columns $b$:
+
+$$G_{res} = K^{-1} - \Phi \Lambda^{-1} \Phi^\top,\qquad G_b = G_{res}[:, b].$$
+
+The raw basis $u = \Phi q + G_b f_b$ uses interface *forces* as coordinates; components
+couple on interface *displacements*, so eliminate $f_b$ via
+$u_b = \Phi_b q + G_{bb} f_b$:
+
+$$u = \underbrace{G_b G_{bb}^{-1}}_{T_b}\, u_b
+ + \underbrace{\left(\Phi - G_b G_{bb}^{-1} \Phi_b\right)}_{T_q}\, q,\qquad
+T = [\,T_b\ \ T_q\,].$$
+
+- **Rubin**: full Galerkin projection $K_{red} = T^\top K T$, $M_{red} = T^\top M T$ —
+  the residual attachment shapes carry their (second-order) inertia.
+- **MacNeal**: same $T$ but the residual coordinates are massless. In $(f_b, q)$
+  coordinates $\hat M = \mathrm{diag}(0, I)$; transforming with
+  $W = \left[\begin{smallmatrix} G_{bb}^{-1} & -G_{bb}^{-1}\Phi_b \\ 0 & I \end{smallmatrix}\right]$
+  gives $M_{red} = W^\top \hat M W$, whose **interface block is singular**. Consumers must
+  solve the coupled pencil with QZ (`scipy.linalg.eig`) and discard the infinite
+  eigenvalues — plain `eigh` raises on the non-SPD mass. Rubin's $M_{red}$ is SPD.
+
+Free–free components (rigid modes present): $K^{-1}$ does not exist — use inertia-relief
+residual flexibility, $G = P^\top K_c^{-1} P$ with the rigid-body force projector
+$P = I - M R (R^\top M R)^{-1} R^\top$ and a temporarily constrained $K_c$, and keep the
+rigid modes in $\Phi$ (they belong to $\Lambda^{-1}$ only through the elastic partition).
+The acceptance demo deliberately uses two *supported* components (fixed–fixed beam split
+at midspan) so this path is optional for the first landing; raise `NotImplementedError`
+rather than returning garbage if it is deferred.
+
+### 9.2 Coupling recipe and measured accuracy
+
+Primal assembly on shared boundary DOFs: stack $[u_b, q_A, q_B]$, add each component's
+reduced blocks at $[u_b, q_A]$ resp. $[u_b, q_B]$ (see `couple()` in
+`examples/cms_rubin.py`). Measured on the fixed–fixed 20×BEAM2 beam split at midspan
+(8 kept modes + 6 interface DOFs per component, first 4 coupled modes vs the unsplit
+model): max relative frequency error **1.9e-7 (Rubin)**, **7.7e-5 (MacNeal)**,
+7.7e-5–2.9e-5 for the Craig–Bampton baseline through the same harness. Rubin beating CB
+at equal mode count is the expected textbook ranking; MacNeal trades a little accuracy
+for the sparser massless-residual model. Acceptance (case 18) uses generous headroom:
+Rubin < 1 %, MacNeal < 3 % on the first four coupled modes. A sharper component-level
+invariant (pinned by `tests/test_round4_cms.py`): the kept free-interface modes lie in
+$\mathrm{span}(T)$, so the Rubin-reduced component reproduces their eigenvalues to
+~1e-8 relative — exactness of the *retained* modes, the free-interface analogue of the
+CB all-modes check.
+
+Pitfalls: truncation rule is the same 1.5–2× band as CB, but free-interface component
+modes converge to coupled modes *slower* than fixed-interface ones when the interface is
+stiff — residual flexibility is what closes the gap, never ship the method without it
+(plain mode-displacement coupling is 10–100× worse); $G_{bb}$ inherits the conditioning
+of the master selection (all-rotation interfaces on fine meshes are nearly singular);
+mixing Rubin and MacNeal components in one assembly is fine (the harness only assumes
+boundary-first ordering); test-derived $\Phi$ that is not mass-normalized corrupts
+$\Lambda^{-1}$ quadratically.

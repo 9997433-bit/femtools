@@ -35,7 +35,7 @@ Layer 0  core         FE/test relational database: nodes, elements, materials, p
                       SPCs, loads, sets, coordinate systems, units, test geometry, channels
 Layer 1  io           UNV, Nastran BDF, project persistence (.ftproj), driver plug-ins
 Layer 2  fea          element library, DOF management, sparse K/M/C assembly,
-                      static solver, eigensolver (ARPACK), reduction (Guyan/IRS/SEREP: planned R3+)
+                      static solver, eigensolver (ARPACK), reduction (Guyan/IRS/SEREP: Round 4 in flight)
 Layer 3  dynamics     modal & direct FRF, harmonic response, time integration,
                       Craig–Bampton CMS, modal-based assembly, residual vectors
 Layer 4  correlation  MAC/CoMAC/POC, cross-orthogonality, FRF correlation, mode pairing
@@ -131,7 +131,7 @@ code never branches on data origin.
      audit them; silent zero-pivot factorization failures are not acceptable.
 * **Constraint elimination.** SPCs are applied by row/column elimination (slicing the CSR
   matrix to the active set), not by penalty terms, so eigenvalues are not polluted by penalty
-  artifacts. MPCs/RBEs (planned R3+) will be applied by null-space transformation `u = T q`
+  artifacts. MPCs/RBEs (planned R5+) will be applied by null-space transformation `u = T q`
   with `K_r = Tᵀ K T`, keeping symmetry.
 
 ## 6. Sparse assembly
@@ -172,8 +172,9 @@ ever formed by the framework (dense paths are allowed inside tests and for n < ~
   Dense `scipy.linalg.eigh` is the fallback when `n_modes ≥ n_active - 1` (ARPACK limit).
   Returned modes are **mass-normalized** (`Φᵀ M Φ = I` to 1e-8, enforced by post-scaling and
   verified), frequencies in Hz ascending. Eigenvalues are `ω² [rad²/s²]`.
-* **Reduction (planned R3+):** Guyan, IRS, SEREP as explicit transformation-matrix builders
-  reusable by pretest (test-DOF reduction) and correlation (shape expansion).
+* **Reduction (Round 4 in flight — `fea.reduction`, `docs/PRODUCT_MAP.md` R4-wip):** Guyan,
+  IRS, SEREP as explicit transformation-matrix builders reusable by pretest (test-DOF
+  reduction) and correlation (shape expansion).
 
 ## 8. Result objects
 
@@ -247,10 +248,14 @@ Policy:
    ```
 
    Drivers are discovered through the entry-point group `femtools.drivers`, so
-   `pip install femtools-nastran` suffices to add a solver. Planned drivers (all R3+):
-   Nastran OP2 results (BDF read/write is built-in since Round 1), ANSYS (cdb/rst),
-   Abaqus (inp/odb), LS-DYNA (k). Only the driver may depend on vendor formats; results
-   always land as `ModalResult`/`FRFResult`.
+   `pip install femtools-nastran` suffices to add a solver. Round 4 in flight
+   (`docs/PRODUCT_MAP.md` R4-wip): the `drivers.base.SolverDriver` protocol itself plus
+   built-in text-format readers in `femtools.io` — Nastran punch (`.pch`) results and the
+   ANSYS CDB NBLOCK/EBLOCK mesh subset (BDF read/write is built-in since Round 1). Closed
+   binary result dumps (Nastran OP2, ANSYS rst, Abaqus odb) are out of scope (N/A) — the
+   protocol is the extension point for third-party binary drivers; remaining text formats
+   (Abaqus inp, LS-DYNA k) are R5+ plug-ins. Only a driver may depend on vendor formats;
+   results always land as `ModalResult`/`FRFResult`.
 3. **Parameters for updating/optimization.** Updatable quantities implement a `Parameter`
    protocol (`get(model)`, `set(model, value)`, `bounds`); Round 1 ships E, rho, shell
    thickness, spring stiffness. New parameter types plug in without changes to the estimator.
