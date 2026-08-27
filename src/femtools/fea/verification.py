@@ -56,22 +56,29 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+import scipy.linalg as sla
 
 from .assemble import assemble_km
-from .eigen import solve_modes
+from .eigen import mass_normalize, solve_modes
 from .elements import ModelIndex, element_spec
 from .elements.solid import _hex_shape
 from .protocols import get_any, iter_records
 from .quadrature import gauss_3d
+from .reduction import guyan, irs, serep
 from .static import solve_static
 
 __all__ = [
     "DISTORTIONS",
+    "beam_cantilever",
+    "complete_spectrum_quality",
+    "guyan_condensation_error",
     "hex8_bending_ratio",
     "hex8_jacobian_spread",
     "hex8_patch_test_error",
     "hex8_rigid_body_frequencies",
     "hex_cantilever",
+    "reduction_frequency_errors",
+    "serep_slave_recovery",
     "timoshenko_tip_deflection",
 ]
 
@@ -315,6 +322,193 @@ def hex8_rigid_body_frequencies(
     options = {"hex8": formulation} if formulation else None
     result = solve_modes(model, n_modes=n_modes, options=options)
     return np.asarray(result.freq_hz, dtype=float)
+
+
+#: Section and material of :func:`beam_cantilever`; the same numbers the
+#: BEAM2 golden case in the test suite uses, so frequencies are comparable.
+BEAM_CANTILEVER: dict[str, float] = {
+    "E": 70.0e9,
+    "rho": 2700.0,
+    "L": 2.0,
+    "A": 8.0e-4,
+    "Iy": 3.0e-8,
+    "Iz": 6.0e-8,
+    "J": 9.0e-8,
+}
+
+
+def beam_cantilever(n_elements: int = 16) -> dict[str, Any]:
+    """BEAM2 cantilever with the section of :data:`BEAM_CANTILEVER`.
+
+    The reduction and complex-mode cases below all run on this model: it is
+    small enough for a dense reference solve, its spectrum spans eleven decades
+    (which is what makes the eigensolver accuracy question interesting) and its
+    six lowest frequencies are the ones the analytical golden case already
+    pins down.
+    """
+    d = BEAM_CANTILEVER
+    nodes = {
+        i + 1: {"xyz": (d["L"] * i / n_elements, 0.0, 0.0)} for i in range(int(n_elements) + 1)
+    }
+    elements = {
+        i + 1: {"type": "BEAM2", "property_id": 1, "nodes": (i + 1, i + 2)}
+        for i in range(int(n_elements))
+    }
+    return {
+        "nodes": nodes,
+        "elements": elements,
+        "materials": {1: {"E": d["E"], "nu": 0.3, "rho": d["rho"]}},
+        "properties": {
+            1: {
+                "type": "beam",
+                "material_id": 1,
+                "A": d["A"],
+                "Iy": d["Iy"],
+                "Iz": d["Iz"],
+                "J": d["J"],
+            }
+        },
+        "spcs": [{"node_id": 1, "dofs": (0, 1, 2, 3, 4, 5)}],
+    }
+
+
+def _cantilever_system(n_elements: int = 16, *, every: int = 2):
+    """``(Kff, Mff, master_positions)`` for the reduction cases.
+
+    The masters are the two lateral translations of every ``every``-th node,
+    i.e. the DOFs a shaker test would actually instrument.
+    """
+    model = beam_cantilever(n_elements)
+    asm = assemble_km(model)
+    position = {int(g): i for i, g in enumerate(asm.free_dof)}
+    master = [
+        position[asm.dof_map.index(nid, comp)]
+        for nid in range(2, int(n_elements) + 2, int(every))
+        for comp in (1, 2)
+        if asm.dof_map.index(nid, comp) in position
+    ]
+    return asm, asm.Kff.toarray(), asm.Mff.toarray(), np.array(master, dtype=int)
+
+
+def guyan_condensation_error(n_elements: int = 16, *, every: int = 2) -> float:
+    """``max|T^T K T - (K_mm - K_ms K_ss^-1 K_sm)| / max|Schur|``.
+
+    Zero to round-off by construction: this is the identity that says the Guyan
+    basis really is static condensation and not merely something close to it.
+    """
+    _asm, K, _M, master = _cantilever_system(n_elements, every=every)
+    result = guyan(K, master)
+    m, s = result.master, result.slave
+    schur = K[np.ix_(m, m)] - K[np.ix_(m, s)] @ np.linalg.solve(
+        K[np.ix_(s, s)], K[np.ix_(s, m)]
+    )
+    return float(np.max(np.abs(result.K_red - schur)) / np.max(np.abs(schur)))
+
+
+def reduction_frequency_errors(
+    n_elements: int = 16, *, every: int = 2, n_modes: int = 6
+) -> dict[str, float]:
+    """Worst relative frequency error of each reduction over the first modes.
+
+    Returns ``{"guyan": ..., "irs": ..., "serep": ...}``.  The ordering is the
+    point: Guyan over-predicts (it throws the slave inertia away), IRS recovers
+    most of that, and SEREP is exact because its basis is built from the modes
+    being compared against.
+    """
+    _asm, K, M, master = _cantilever_system(n_elements, every=every)
+    # One eigensolve for both the reference frequencies and the SEREP basis:
+    # two calls would differ in the last bits and put a 1e-10 floor under the
+    # SEREP row, which is exact to round-off.
+    lam, phi = sla.eigh(K, M)
+    exact = np.sqrt(np.clip(lam, 0.0, None)) / (2.0 * np.pi)
+    modes = phi[:, : int(n_modes)]
+
+    out: dict[str, float] = {}
+    for name, reduced in (
+        ("guyan", guyan(K, master, M)),
+        ("irs", irs(K, M, master)),
+        ("serep", serep(modes, master, K, M)),
+    ):
+        got, _ = reduced.reduced_modes()
+        k = min(int(n_modes), got.size)
+        out[name] = float(np.max(np.abs(got[:k] - exact[:k]) / exact[:k]))
+    return out
+
+
+def serep_slave_recovery(
+    n_elements: int = 16, *, every: int = 4, n_modes: int = 6
+) -> dict[str, float]:
+    """How well SEREP rebuilds the *unmeasured* DOFs from the measured ones.
+
+    Returns the relative error on the slave partition and the worst per-mode
+    MAC there.  With at least ``n_modes`` independent sensors the recovery is
+    exact, which is the property that separates SEREP from the static bases:
+    the same table reports what Guyan and IRS manage on the same sensor set.
+    """
+    _asm, K, M, master = _cantilever_system(n_elements, every=every)
+    modes = sla.eigh(K, M)[1][:, : int(n_modes)]
+    reduced = serep(modes, master, K, M)
+    slave = reduced.slave
+
+    recovered = reduced.T @ modes[reduced.master, :]
+    a, b = recovered[slave], modes[slave]
+    mac = np.array(
+        [
+            (a[:, j] @ b[:, j]) ** 2 / ((a[:, j] @ a[:, j]) * (b[:, j] @ b[:, j]))
+            for j in range(modes.shape[1])
+        ]
+    )
+    static = {
+        "guyan": guyan(K, master, M),
+        "irs": irs(K, M, master),
+    }
+    return {
+        "n_master": float(master.size),
+        "n_slave": float(slave.size),
+        "serep_slave_error": float(
+            np.linalg.norm(a - b) / np.linalg.norm(b)
+        ),
+        "serep_worst_mac": float(mac.min()),
+        "guyan_slave_error": float(
+            np.linalg.norm(static["guyan"].T @ modes[master] - modes) / np.linalg.norm(modes)
+        ),
+        "irs_slave_error": float(
+            np.linalg.norm(static["irs"].T @ modes[master] - modes) / np.linalg.norm(modes)
+        ),
+    }
+
+
+def complete_spectrum_quality(n_elements: int = 16) -> dict[str, float]:
+    """Backward error of a *complete* modal basis of the beam cantilever.
+
+    ``residual`` is ``max ||K phi - lambda M phi|| / ||K||``, ``orthogonality``
+    is ``max|Phi^T M Phi - I|`` and ``k_diagonality`` the largest off-diagonal
+    of ``Phi^T K Phi`` relative to its diagonal.  All three are at round-off
+    once the complete spectrum is taken through ``scipy.linalg.eigh`` instead
+    of shift-invert; the third is the one that decides whether a full modal
+    superposition reproduces a direct solve.
+    """
+    model = beam_cantilever(n_elements)
+    asm = assemble_km(model)
+    K = asm.Kff.toarray()
+    M = asm.Mff.toarray()
+    result = solve_modes(model, n_modes=K.shape[0], assembly=asm)
+    phi = mass_normalize(result.modes[asm.free_dof], asm.Mff)
+    lam = result.eigenvalues
+
+    kphi = phi.T @ K @ phi
+    diagonal = np.abs(np.diag(kphi)).max()
+    return {
+        "n_free": float(K.shape[0]),
+        "residual": float(
+            np.max(np.linalg.norm(K @ phi - (M @ phi) * lam, axis=0)) / np.linalg.norm(K, 2)
+        ),
+        "orthogonality": float(np.max(np.abs(phi.T @ M @ phi - np.eye(phi.shape[1])))),
+        "k_diagonality": float(
+            np.max(np.abs(kphi - np.diag(np.diag(kphi)))) / diagonal
+        ),
+        "condition": float(lam.max() / lam.min()),
+    }
 
 
 def hex8_jacobian_spread(model: Any) -> float:
