@@ -14,6 +14,8 @@ The frozen public API of ``docs/CONTRACT_API.md`` is re-exported at the top leve
 Symbols are resolved lazily (PEP 562): ``import femtools`` stays cheap and free of
 circular imports (``femtools.cli`` / ``femtools.gui`` import ``femtools`` themselves),
 while ``femtools.<name>`` triggers the import of only the subpackage that defines it.
+The exception hierarchy of ``femtools.core.errors`` (``FemtoolsError`` and subclasses,
+``docs/ARCHITECTURE.md`` §9) is re-exported the same way.
 
 Name-collision policy: where a class name exists in more than one subpackage, the
 top level exports the type produced by the contract entry points — ``ModalResult``
@@ -29,8 +31,19 @@ from typing import TYPE_CHECKING
 
 __version__ = "0.1.0"
 
-# Top-level name -> defining module (contract API of docs/CONTRACT_API.md).
+# Top-level name -> defining module (contract API of docs/CONTRACT_API.md,
+# plus the exception hierarchy promised at package root by docs/ARCHITECTURE.md §9).
 _EXPORTS: dict[str, str] = {
+    # error hierarchy
+    "FemtoolsError": "femtools.core.errors",
+    "ModelError": "femtools.core.errors",
+    "MeshError": "femtools.core.errors",
+    "UnitError": "femtools.core.errors",
+    "FileFormatError": "femtools.core.errors",
+    "AssemblyError": "femtools.core.errors",
+    "SolverError": "femtools.core.errors",
+    "ConvergenceError": "femtools.core.errors",
+    "CompatibilityError": "femtools.core.errors",
     # core database
     "FEModel": "femtools.core.model",
     "Node": "femtools.core.model",
@@ -142,6 +155,33 @@ def __dir__() -> list[str]:
 
 if TYPE_CHECKING:  # static-analysis view of the lazy exports above (PEP 484 re-exports)
     from femtools.core.coords import CoordSys as CoordSys
+    from femtools.core.errors import (
+        AssemblyError as AssemblyError,
+    )
+    from femtools.core.errors import (
+        CompatibilityError as CompatibilityError,
+    )
+    from femtools.core.errors import (
+        ConvergenceError as ConvergenceError,
+    )
+    from femtools.core.errors import (
+        FemtoolsError as FemtoolsError,
+    )
+    from femtools.core.errors import (
+        FileFormatError as FileFormatError,
+    )
+    from femtools.core.errors import (
+        MeshError as MeshError,
+    )
+    from femtools.core.errors import (
+        ModelError as ModelError,
+    )
+    from femtools.core.errors import (
+        SolverError as SolverError,
+    )
+    from femtools.core.errors import (
+        UnitError as UnitError,
+    )
     from femtools.core.model import (
         SPC as SPC,
     )

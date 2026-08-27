@@ -35,7 +35,7 @@ Layer 0  core         FE/test relational database: nodes, elements, materials, p
                       SPCs, loads, sets, coordinate systems, units, test geometry, channels
 Layer 1  io           UNV, Nastran BDF, project persistence (.ftproj), driver plug-ins
 Layer 2  fea          element library, DOF management, sparse K/M/C assembly,
-                      static solver, eigensolver (ARPACK), reduction (Guyan/IRS/SEREP: R2)
+                      static solver, eigensolver (ARPACK), reduction (Guyan/IRS/SEREP: planned R3+)
 Layer 3  dynamics     modal & direct FRF, harmonic response, time integration,
                       Craig–Bampton CMS, modal-based assembly, residual vectors
 Layer 4  correlation  MAC/CoMAC/POC, cross-orthogonality, FRF correlation, mode pairing
@@ -123,15 +123,16 @@ code never branches on data origin.
   active set; expansion to the full 6·n_nodes vector (zeros at constrained DOFs) is provided
   for export and animation.
 * **Active set construction.** Starting from the full set, the assembler removes:
-  1. DOFs constrained by SPCs (`mask=True` ⇒ fixed at zero; non-homogeneous SPCs are R2);
+  1. DOFs constrained by SPCs (`mask=True` ⇒ fixed at zero; non-homogeneous SPCs via
+     `solve_static(enforced=...)` since R2);
   2. DOFs with no stiffness and no mass contribution from any attached element
      (auto-SPC, e.g. rotational DOFs on a pure TRUSS/solid mesh, drilling rotation of
      flat shell patches). Auto-SPC decisions are recorded in `AssemblyResult` so users can
      audit them; silent zero-pivot factorization failures are not acceptable.
 * **Constraint elimination.** SPCs are applied by row/column elimination (slicing the CSR
   matrix to the active set), not by penalty terms, so eigenvalues are not polluted by penalty
-  artifacts. MPCs/RBEs (R2) will be applied by null-space transformation `u = T q` with
-  `K_r = Tᵀ K T`, keeping symmetry.
+  artifacts. MPCs/RBEs (planned R3+) will be applied by null-space transformation `u = T q`
+  with `K_r = Tᵀ K T`, keeping symmetry.
 
 ## 6. Sparse assembly
 
@@ -171,8 +172,8 @@ ever formed by the framework (dense paths are allowed inside tests and for n < ~
   Dense `scipy.linalg.eigh` is the fallback when `n_modes ≥ n_active - 1` (ARPACK limit).
   Returned modes are **mass-normalized** (`Φᵀ M Φ = I` to 1e-8, enforced by post-scaling and
   verified), frequencies in Hz ascending. Eigenvalues are `ω² [rad²/s²]`.
-* **Reduction (R2):** Guyan, IRS, SEREP as explicit transformation-matrix builders reusable by
-  pretest (test-DOF reduction) and correlation (shape expansion).
+* **Reduction (planned R3+):** Guyan, IRS, SEREP as explicit transformation-matrix builders
+  reusable by pretest (test-DOF reduction) and correlation (shape expansion).
 
 ## 8. Result objects
 
@@ -194,17 +195,24 @@ geometry mapping utilities produce the common-DOF selection matrices.
 
 ## 9. Error handling
 
-Exception hierarchy (all in `femtools.core.errors`, re-exported at package root):
+Exception hierarchy (all in `femtools.core.errors`, re-exported from `femtools.core` and —
+lazily, like every contract symbol — from the `femtools` top level):
 
 ```
 FemtoolsError(Exception)
-├── ModelError            # integrity: duplicate id, dangling reference, bad element arity
-├── FileFormatError       # unparseable UNV/BDF content; carries file, line, dataset/card
-├── AssemblyError         # degenerate geometry (zero-length bar, negative Jacobian), asymmetry
-├── SolverError           # singular factorization, ARPACK breakdown; carries suspect DOFs
-│   └── ConvergenceError  # iterative process exceeded max_iter / diverged; carries history
-└── CompatibilityError    # mismatched DOF sets / frequency grids between result objects
+├── ModelError(ValueError)       # integrity: duplicate id, dangling reference, bad arity
+│   └── MeshError                # geometry/topology-specific integrity failures
+├── UnitError(ValueError)        # unit-system conversion failures
+├── FileFormatError(ValueError)  # unparseable UNV/BDF content; carries file/line/dataset/card
+├── AssemblyError                # degenerate geometry (zero-length bar, negative Jacobian), asymmetry
+├── SolverError                  # singular factorization, ARPACK breakdown; carries suspect DOFs
+│   └── ConvergenceError         # iterative process exceeded max_iter / diverged; carries history
+└── CompatibilityError           # mismatched DOF sets / frequency grids between result objects
 ```
+
+`ModelError`, `UnitError` and `FileFormatError` also subclass `ValueError` so pre-hierarchy
+`except ValueError` call sites keep working; io subclasses (`BdfError`, `ProjectError`)
+re-parent onto `FileFormatError`.
 
 Policy:
 
@@ -239,9 +247,9 @@ Policy:
    ```
 
    Drivers are discovered through the entry-point group `femtools.drivers`, so
-   `pip install femtools-nastran` suffices to add a solver. Planned drivers: Nastran
-   (BDF read/write is built-in Round 1; OP2 results R2), ANSYS (cdb/rst, R2+), Abaqus
-   (inp/odb, R2+), LS-DYNA (k, R3). Only the driver may depend on vendor formats; results
+   `pip install femtools-nastran` suffices to add a solver. Planned drivers (all R3+):
+   Nastran OP2 results (BDF read/write is built-in since Round 1), ANSYS (cdb/rst),
+   Abaqus (inp/odb), LS-DYNA (k). Only the driver may depend on vendor formats; results
    always land as `ModalResult`/`FRFResult`.
 3. **Parameters for updating/optimization.** Updatable quantities implement a `Parameter`
    protocol (`get(model)`, `set(model, value)`, `bounds`); Round 1 ships E, rho, shell
@@ -264,5 +272,7 @@ Policy:
 
 Every layer exposes deterministic golden cases (axial bar, Euler cantilever, free-free beam,
 2-DOF spring-mass) used by `tests/` against the tolerance table in `docs/CONTRACT_API.md` and
-the acceptance philosophy in `docs/SOTA.md` §Acceptance. CI (`.github/workflows/ci.yml`) runs
-ruff and pytest on Python 3.11 for every push and pull request.
+the acceptance philosophy in `docs/SOTA.md` §9. CI (`.github/workflows/ci.yml`) runs, for
+every push and pull request on Python 3.11: blocking ruff, an import smoke test, a public-API
+resolution check over `femtools.__all__`, and strict pytest (an empty collection fails);
+mypy runs as an additional non-blocking step.
