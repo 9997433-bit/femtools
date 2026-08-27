@@ -5,8 +5,9 @@ Two findings from the round-5 audit of ``femtools.fea``:
 * ``solve_static(enforced=...)`` silently corrupted the whole displacement
   field when the driven DOF was one the assembler had left free;
 * a flat shell mesh whose normal is not a global axis keeps a fictitious
-  drilling mechanism, which now raises a warning instead of surfacing as an
-  unexplained seventh rigid body mode.
+  drilling mechanism when it is assembled in the basic frame.  Round 6 fixed
+  that with per-node rotational frames, so the case below reproduces it through
+  ``nodal_frames=False``; ``test_round6_o1.py`` owns the fixed behaviour.
 """
 
 from __future__ import annotations
@@ -116,13 +117,17 @@ def test_axis_aligned_flat_shell_has_no_drilling_mechanism(etype: str) -> None:
 
 @pytest.mark.parametrize("etype", ["QUAD4", "TRIA3"])
 def test_oblique_flat_shell_mechanism_is_reported(etype: str) -> None:
-    """The mechanism cannot be eliminated DOF-wise, so it must at least warn.
+    """Assembling in the basic frame keeps the mechanism, so it must warn.
 
-    Only the count of zero frequencies differs: the elastic spectrum of the
-    tilted plate is the aligned one to round-off, which is what makes the extra
-    mode identifiable as fictitious rather than as a modelling error.
+    This is the round-5 diagnosis, still reproducible on demand through
+    ``nodal_frames=False``: without per-node rotational frames the drilling
+    rotations of a tilted plate cannot be eliminated one DOF at a time.  Only
+    the count of zero frequencies differs -- the elastic spectrum of the tilted
+    plate is the aligned one to round-off, which is what makes the extra mode
+    identifiable as fictitious rather than as a modelling error.  Round 6
+    removes it for good; see ``test_round6_o1.py``.
     """
-    gap = shell_drilling_orientation_gap(etype)
+    gap = shell_drilling_orientation_gap(etype, nodal_frames=False)
 
     assert gap["oblique_zero_modes"] == gap["aligned_zero_modes"] + 1.0
     assert gap["oblique_drilling_dof"] == 0.0

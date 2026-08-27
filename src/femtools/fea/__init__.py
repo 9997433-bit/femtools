@@ -25,6 +25,7 @@ from .elements import available_elements, element_info, element_matrices, elemen
 from .elements.solid import HEX8_FORMULATIONS, hex8_formulation
 from .loads import build_load_vector
 from .materials import MaterialData, material_from_record, plane_stress_D, solid_D
+from .nodal_frames import NodalFrames, averaged_shell_normals, shell_nodal_frames
 from .protocols import DOF_LABELS, ElementLike, ModelLike, NodeLike
 from .reduction import ReductionResult, guyan, irs, serep
 from .static import StaticResult, solve_static
@@ -39,11 +40,13 @@ __all__ = [
     "MaterialData",
     "ModalResult",
     "ModelLike",
+    "NodalFrames",
     "NodeLike",
     "ReductionResult",
     "StaticResult",
     "assemble_km",
     "available_elements",
+    "averaged_shell_normals",
     "build_load_vector",
     "element_info",
     "element_matrices",
@@ -55,6 +58,7 @@ __all__ = [
     "material_from_record",
     "plane_stress_D",
     "serep",
+    "shell_nodal_frames",
     "solid_D",
     "solve_complex_modes",
     "solve_modes",

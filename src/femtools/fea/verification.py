@@ -49,6 +49,19 @@ its ``distortion`` argument, so the claim is reproducible rather than folklore:
 1.0 for any parallelepiped however skewed; the trapezoidal cases above score
 1.26 and 1.60.  As a rule of thumb the incompatible modes are worth their cost
 up to a spread of roughly 1.1 and have lost most of their advantage past 1.5.
+
+Enhanced assumed strain is not the way out of that: ``hex8_eas_equivalence``
+builds the Simo-Rifai EAS-9 brick independently and shows it is the shipped
+incompatible-modes element to round-off on any hexahedron, trapezoids included.
+
+Shell orientation
+-----------------
+
+``shell_drilling_orientation_gap`` runs the same flat plate twice, once in a
+global plane and once tilted onto an oblique normal, and reports that the two
+now agree in every respect -- six rigid body modes, the same solved set and the
+same elastic frequencies.  Holding that for the tilted plate is what the
+per-node rotational frames of :mod:`femtools.fea.nodal_frames` are for.
 """
 
 from __future__ import annotations
@@ -61,8 +74,9 @@ import scipy.linalg as sla
 
 from .assemble import assemble_km
 from .eigen import mass_normalize, solve_modes
-from .elements import ModelIndex, element_spec
-from .elements.solid import _hex_shape
+from .elements import ModelIndex, element_matrices, element_spec
+from .elements.solid import _hex_shape, _strain_matrix
+from .materials import MaterialData, solid_D
 from .protocols import get_any, iter_records
 from .quadrature import gauss_3d
 from .reduction import guyan, irs, serep
@@ -74,6 +88,7 @@ __all__ = [
     "complete_spectrum_quality",
     "guyan_condensation_error",
     "hex8_bending_ratio",
+    "hex8_eas_equivalence",
     "hex8_jacobian_spread",
     "hex8_patch_test_error",
     "hex8_rigid_body_frequencies",
@@ -582,30 +597,43 @@ _OBLIQUE = np.linalg.qr(
 
 
 def shell_drilling_orientation_gap(
-    etype: str = "QUAD4", *, nx: int = 3, ny: int = 3, n_modes: int = 9
+    etype: str = "QUAD4",
+    *,
+    nx: int = 3,
+    ny: int = 3,
+    n_modes: int = 9,
+    nodal_frames: bool = True,
 ) -> dict[str, float]:
-    """How the free-free spectrum of one flat plate depends on its orientation.
+    """Does the free-free spectrum of one flat plate depend on its orientation?
 
-    A flat shell has no genuine stiffness about its own normal, so ``TRIA3`` and
-    ``QUAD4`` add a rank deficient drilling penalty and the assembler drops the
-    drilling DOFs that receive nothing else.  Dropping them is only possible
-    while the normal *is* a global axis; for any other orientation the drilling
-    direction is a mix of ``rx``, ``ry`` and ``rz``, nothing can be dropped, and
-    the mesh keeps a zero-energy drilling mechanism that reads as a seventh
-    rigid body mode.  ``assemble_km`` warns when it detects that, and this
-    function is the reproduction behind the warning.
+    It must not, and the interesting part is that making it not depend on the
+    orientation takes work.  A flat shell has no genuine stiffness about its own
+    normal, so ``TRIA3`` and ``QUAD4`` add a rank deficient drilling penalty and
+    the assembler drops the drilling DOFs that receive nothing else.  Dropping
+    one *global* rotation is only possible while the normal is a global axis;
+    for any other orientation the drilling direction is a mix of ``rx``, ``ry``
+    and ``rz``, and a mesh assembled in the basic frame keeps a zero-energy
+    drilling mechanism that reads as a seventh rigid body mode.  The assembler
+    avoids that by solving the rotations of each shell node in a triad built on
+    its averaged normal (:mod:`femtools.fea.nodal_frames`), so the drilling
+    rotation is one degree of freedom again.
 
-    Returns the number of (near) zero frequencies and the first elastic
-    frequency for the axis-aligned and the rotated copy of the same plate.  The
-    elastic frequencies agree to round-off -- only the count of zeros differs,
-    which is what makes the extra mode diagnosable rather than merely wrong.
+    Returns, for the axis-aligned and the rotated copy of the same plate, the
+    number of (near) zero frequencies, the first elastic frequency, the size of
+    the solved set, how many drilling DOFs were removed, how many nodes needed
+    a local triad and whether ``assemble_km`` warned.  Everything except
+    ``*_frame_nodes`` now agrees between the two, which is the acceptance
+    statement: same plate, same spectrum, six rigid body modes either way.
+
+    Pass ``nodal_frames=False`` to reproduce the pre-frame behaviour -- seven
+    zero frequencies and a warning on the oblique plate.
     """
     out: dict[str, float] = {}
     for label, rotation in (("aligned", None), ("oblique", _OBLIQUE)):
         model = shell_plate(nx, ny, etype=etype, rotation=rotation)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            asm = assemble_km(model)
+            asm = assemble_km(model, nodal_frames=nodal_frames)
         result = solve_modes(model, n_modes=n_modes, assembly=asm)
         freq = np.asarray(result.freq_hz, dtype=float)
         elastic = freq[freq > 1.0e-6 * max(freq.max(), 1.0)]
@@ -613,8 +641,202 @@ def shell_drilling_orientation_gap(
         out[f"{label}_first_elastic_hz"] = float(elastic[0]) if elastic.size else float("nan")
         out[f"{label}_free_dof"] = float(asm.n_free)
         out[f"{label}_drilling_dof"] = float(asm.drilling_dof.size)
+        out[f"{label}_frame_nodes"] = float(len(asm.framed_nodes))
         out[f"{label}_warned"] = float(len(caught))
     return out
+
+
+#: Natural-strain interpolation of the nine parameter Simo-Rifai enhancement,
+#: rows in the Voigt order ``(11, 22, 33, 12, 23, 31)``: one linear term per
+#: normal strain and the two "missing" linear terms per shear strain.  This is
+#: the smallest set that satisfies ``\int_\square M d\xi = 0`` (the patch test
+#: condition) while spanning the bending modes the trilinear field lacks.
+_EAS9_TERMS: tuple[tuple[int, int], ...] = (
+    (0, 0),
+    (1, 1),
+    (2, 2),
+    (3, 0),
+    (3, 1),
+    (4, 1),
+    (4, 2),
+    (5, 0),
+    (5, 2),
+)
+
+
+def _eas9_interpolation(natural: np.ndarray) -> np.ndarray:
+    M = np.zeros((6, len(_EAS9_TERMS)))
+    for column, (row, coordinate) in enumerate(_EAS9_TERMS):
+        M[row, column] = natural[coordinate]
+    return M
+
+
+def _natural_strain_transform(J0: np.ndarray) -> np.ndarray:  # noqa: N803
+    """The 6x6 ``T0`` with ``E_natural = T0 @ eps_cartesian`` for the Voigt order above.
+
+    ``E_ab = dx_i/dxi_a * eps_ij * dx_j/dxi_b`` written out with engineering
+    shear strains, i.e. ``T0`` is built from products of the Jacobian entries at
+    the element centre.  Simo and Rifai map the enhancement the other way, so
+    the element uses its inverse.
+    """
+    j = np.asarray(J0, dtype=float)
+
+    def row(a: int, b: int) -> list[float]:
+        shear = 1.0 if a == b else 2.0
+        return [
+            shear * j[a, 0] * j[b, 0],
+            shear * j[a, 1] * j[b, 1],
+            shear * j[a, 2] * j[b, 2],
+            j[a, 0] * j[b, 1] + j[a, 1] * j[b, 0] if a != b else j[a, 0] * j[a, 1],
+            j[a, 1] * j[b, 2] + j[a, 2] * j[b, 1] if a != b else j[a, 1] * j[a, 2],
+            j[a, 0] * j[b, 2] + j[a, 2] * j[b, 0] if a != b else j[a, 0] * j[a, 2],
+        ]
+
+    return np.array([row(0, 0), row(1, 1), row(2, 2), row(0, 1), row(1, 2), row(0, 2)])
+
+
+def hex8_eas9_stiffness(xyz: np.ndarray, E: float = 1.0e7, nu: float = 0.3) -> np.ndarray:
+    """Reference Simo-Rifai enhanced assumed strain (EAS-9) brick stiffness.
+
+    An independent 24x24 implementation of
+
+    .. math:: \\tilde\\varepsilon(\\xi) = \\frac{\\det J_0}{\\det J(\\xi)}\\,
+              T_0^{-1} M(\\xi)\\, \\alpha
+
+    (Simo & Rifai 1990, *A class of mixed assumed strain methods*, IJNME 29;
+    the hexahedral extension of Simo & Armero 1992 / Andelfinger & Ramm 1993),
+    with the nine amplitudes ``alpha`` statically condensed out.  It exists to
+    be *compared* with the shipped element rather than to be used: see
+    :func:`hex8_eas_equivalence`.
+    """
+    xyz = np.asarray(xyz, dtype=float)[:8]
+    D = solid_D(MaterialData(E=float(E), nu=float(nu)))
+    points, weights = gauss_3d(2)
+
+    _, dn0 = _hex_shape(0.0, 0.0, 0.0)
+    J0 = dn0.T @ xyz
+    det0 = float(np.linalg.det(J0))
+    T0_inv = np.linalg.inv(_natural_strain_transform(J0))
+
+    n_alpha = len(_EAS9_TERMS)
+    k = np.zeros((24, 24))
+    k_ua = np.zeros((24, n_alpha))
+    k_aa = np.zeros((n_alpha, n_alpha))
+    for point, weight in zip(points, weights, strict=True):
+        _, dn = _hex_shape(*point)
+        J = dn.T @ xyz
+        det = float(np.linalg.det(J))
+        B = _strain_matrix(np.linalg.solve(J, dn.T).T)
+        G = (det0 / det) * (T0_inv @ _eas9_interpolation(np.asarray(point, dtype=float)))
+        scale = weight * abs(det)
+        DB = D @ B
+        DG = D @ G
+        k += scale * (B.T @ DB)
+        k_ua += scale * (B.T @ DG)
+        k_aa += scale * (G.T @ DG)
+    return k - k_ua @ np.linalg.solve(k_aa, k_ua.T)
+
+
+def hex8_eas_equivalence(*, seed: int = 3, trials: int = 4, distortion: float = 0.25) -> dict:
+    """Is the shipped incompatible-modes brick the Simo-Rifai EAS-9 element?
+
+    It is, exactly -- which is the reason femtools does not carry an EAS option
+    alongside the default.  The two derivations look nothing alike (one adds
+    nine internal *displacement* amplitudes and corrects their gradients by
+    ``det J0 / det J``, the other adds nine *strain* amplitudes mapped through
+    the natural-strain transform of the element centre), but they condense to
+    the same 24x24 matrix on any hexahedron.  The equivalence is also the
+    reason EAS is not a cure for the trapezoidal distortion loss documented in
+    the module docstring: the distorted element it would replace is itself.
+
+    Returns the worst relative difference over ``trials`` randomly distorted
+    bricks plus the three named shapes, and -- as the control that keeps the
+    comparison honest -- the same figure for the *transposed* natural-strain
+    convention, which is a genuinely different element.
+    """
+    rng = np.random.default_rng(int(seed))
+    unit = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 1.0, 1.0],
+            [0.0, 1.0, 1.0],
+        ]
+    )
+    shapes = [unit.copy()]
+    skewed = unit.copy()
+    skewed[:, 0] += 0.4 * skewed[:, 2]
+    shapes.append(skewed)
+    trapezoid = unit.copy()
+    trapezoid[:, 0] += 0.3 * (trapezoid[:, 2] - 0.5) * (2.0 * trapezoid[:, 0] - 1.0)
+    shapes.append(trapezoid)
+    shapes += [unit + distortion * rng.uniform(-1.0, 1.0, (8, 3)) for _ in range(int(trials))]
+
+    worst = 0.0
+    worst_control = 0.0
+    zero_modes = 0
+    for xyz in shapes:
+        model = _model(
+            {i + 1: {"xyz": tuple(xyz[i])} for i in range(8)},
+            {1: {"type": "HEX8", "property_id": 1, "nodes": tuple(range(1, 9))}},
+            1.0e7,
+            0.3,
+            1.0,
+        )
+        shipped = np.asarray(element_matrices(model, 1, model["elements"][1]).k, dtype=float)
+        reference = hex8_eas9_stiffness(xyz)
+        scale = float(np.max(np.abs(shipped)))
+        worst = max(worst, float(np.max(np.abs(reference - shipped))) / scale)
+
+        eigenvalues = np.linalg.eigvalsh(0.5 * (reference + reference.T))
+        zero_modes = max(
+            zero_modes, int(np.count_nonzero(np.abs(eigenvalues) < 1.0e-8 * eigenvalues.max()))
+        )
+
+        control = _hex8_eas9_transposed(xyz)
+        worst_control = max(worst_control, float(np.max(np.abs(control - shipped))) / scale)
+
+    return {
+        "n_shapes": float(len(shapes)),
+        "worst_relative_difference": worst,
+        "worst_relative_difference_transposed": worst_control,
+        "eas9_zero_modes": float(zero_modes),
+    }
+
+
+def _hex8_eas9_transposed(xyz: np.ndarray) -> np.ndarray:
+    """EAS-9 built with ``T0^-T`` instead of ``T0^-1``: a different element.
+
+    Only here so :func:`hex8_eas_equivalence` can show that its agreement is an
+    algebraic identity and not an insensitivity of the comparison.
+    """
+    xyz = np.asarray(xyz, dtype=float)[:8]
+    D = solid_D(MaterialData(E=1.0e7, nu=0.3))
+    points, weights = gauss_3d(2)
+    _, dn0 = _hex_shape(0.0, 0.0, 0.0)
+    J0 = dn0.T @ xyz
+    det0 = float(np.linalg.det(J0))
+    T0_inv_t = np.linalg.inv(_natural_strain_transform(J0)).T
+
+    n_alpha = len(_EAS9_TERMS)
+    k = np.zeros((24, 24))
+    k_ua = np.zeros((24, n_alpha))
+    k_aa = np.zeros((n_alpha, n_alpha))
+    for point, weight in zip(points, weights, strict=True):
+        _, dn = _hex_shape(*point)
+        J = dn.T @ xyz
+        det = float(np.linalg.det(J))
+        B = _strain_matrix(np.linalg.solve(J, dn.T).T)
+        G = (det0 / det) * (T0_inv_t @ _eas9_interpolation(np.asarray(point, dtype=float)))
+        scale = weight * abs(det)
+        k += scale * (B.T @ D @ B)
+        k_ua += scale * (B.T @ D @ G)
+        k_aa += scale * (G.T @ D @ G)
+    return k - k_ua @ np.linalg.solve(k_aa, k_ua.T)
 
 
 def hex8_jacobian_spread(model: Any) -> float:
