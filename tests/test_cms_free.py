@@ -267,6 +267,60 @@ def test_elastic_interface_tie_softens_the_assembly() -> None:
     assert np.allclose(stiff[:6], rigid[:6], rtol=1e-4)
 
 
+def test_rubin_basis_fixes_the_truncated_frf_of_a_beam(
+    cantilever: tuple[object, dict[str, float]],
+) -> None:
+    """On an FE model: the same six modes, plus residual flexibility, against direct.
+
+    Truncation shows up in an FRF as a missing static compliance, which is exactly what
+    the residual mode restores — so the modal-vs-direct error of ``docs/CONTRACT_API.md``
+    collapses without retaining a single extra normal mode.
+    """
+    from femtools.dynamics.frf import direct_frf, modal_frf, retained_band_lines
+    from femtools.fea.assemble import assemble_km
+
+    model, data = cantilever
+    assembly = assemble_km(model)
+    tip_dof = int(
+        np.flatnonzero(
+            assembly.free_dof == assembly.dof_map.index(int(data["n_elements"]) + 1, 2)
+        )[0]
+    )
+
+    cms = rubin(assembly.Kff, assembly.Mff, boundary_dofs=[tip_dof], n_modes=6)
+    truncated = ModalModel(
+        freq_hz=cms.free_freq_hz,
+        modes=cms.normal_modes,
+        eigenvalues=(2.0 * np.pi * cms.free_freq_hz) ** 2,
+    )
+    f = retained_band_lines(truncated, 300)
+    damping = {"beta": 2.0 * 0.02 / (2.0 * np.pi * float(cms.free_freq_hz[-1]))}
+
+    reference = direct_frf(assembly.Kff, assembly.Mff, [tip_dof], [tip_dof], f, damping).H
+
+    def error(basis: ModalModel) -> float:
+        H = modal_frf(basis, [tip_dof], [tip_dof], f, damping).H
+        return float(np.linalg.norm(H - reference) / np.linalg.norm(reference))
+
+    assert cms.n_residual == 1
+    assert error(cms.solve_modes()) < 0.1 * error(truncated)
+    assert error(cms.solve_modes()) < 1.0e-3
+
+
+def test_sparse_matrices_give_the_same_reduction() -> None:
+    import scipy.sparse as sp
+
+    reference = _full_frequencies()
+    (Ka, Ma), (Kb, Mb) = _components()
+    a = rubin(sp.csr_matrix(Ka), sp.csr_matrix(Ma), boundary_dofs=[CUT - 1], n_modes=6)
+    b = rubin(sp.csr_matrix(Kb), sp.csr_matrix(Mb), boundary_dofs=[0], n_modes=6)
+    assert a.meta["sparse"] and b.meta["sparse"]
+    assert b.meta["n_rigid"] == 1  # shift-invert below zero found the free-free mode
+    got = free_interface_assembly([a, b], [(0, CUT - 1, 1, 0)]).freq_hz
+    assert np.allclose(got[:8], _assembled("rubin", 6)[:8], rtol=1e-8)
+    assert np.max(np.abs(got[:8] - reference[:8]) / reference[:8]) < 1e-3
+
+
 def test_assembly_reports_the_same_motion_on_both_sides_of_the_tie() -> None:
     (Ka, Ma), (Kb, Mb) = _components()
     a = rubin(Ka, Ma, boundary_dofs=[CUT - 1], n_modes=6)

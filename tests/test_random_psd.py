@@ -154,6 +154,35 @@ def test_statistics_of_a_narrow_band_response() -> None:
     assert (below / result.rms[0]) ** 2 < 0.05
 
 
+@pytest.mark.slow
+def test_predicted_rms_matches_a_simulated_time_history() -> None:
+    """Wiener-Khinchin end to end: simulate the process and measure its RMS.
+
+    A 300 s record of a 5 %-damped SDOF driven by discrete white noise gives roughly
+    2*(2 zeta f_n)*T independent cycles, so the sampled RMS carries a couple of percent
+    of statistical scatter around the spectral prediction — nothing that hides a factor
+    of two in the PSD, the frequency-axis convention or the integration.
+    """
+    from femtools.dynamics.time_domain import time_history
+
+    zeta = 0.05
+    fs, duration = 1000.0, 300.0
+    n_steps = int(fs * duration)
+    rng = np.random.default_rng(20240827)
+    # A flat one-sided PSD S0 up to Nyquist means a sample variance of S0 * fs / 2.
+    force = rng.normal(0.0, np.sqrt(S0 * fs / 2.0), n_steps)
+
+    modal = _sdof()
+    history = time_history(modal, force, 1.0 / fs, zeta, force_dofs=[0], outputs=[0])
+    settled = history.displacement[0, int(5.0 * fs) :]
+    sampled = float(np.sqrt(np.mean(settled**2)))
+
+    resonance = np.linspace(0.8 * FN_HZ, 1.2 * FN_HZ, 8001)
+    f = np.unique(np.concatenate([np.linspace(0.0, fs / 2.0, 20001), resonance]))
+    predicted = float(psd_response(modal, S0, f, zeta).rms[0])
+    assert sampled == pytest.approx(predicted, rel=0.05)
+
+
 def test_an_existing_frf_can_be_reused() -> None:
     f = np.linspace(1.0, 200.0, 501)
     modal = _two_dof()
