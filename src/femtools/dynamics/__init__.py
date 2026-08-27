@@ -6,8 +6,10 @@ Public entry points (see ``docs/CONTRACT_API.md``)::
     from femtools.dynamics.harmonic import harmonic_response
     from femtools.dynamics.mba import modal_based_assembly
     from femtools.dynamics.craig_bampton import craig_bampton
+    from femtools.dynamics.cms_free import rubin, macneal, free_interface_assembly
     from femtools.dynamics.time_domain import time_history
     from femtools.dynamics.residuals import residual_vectors
+    from femtools.dynamics.random import psd_response
     from femtools.dynamics.frf import verify_modal_vs_direct, retained_band
 
 ``verify_modal_vs_direct`` is the modal-vs-direct acceptance check; on a truncated basis
@@ -26,6 +28,14 @@ branches, so the package still runs on nothing but numpy/scipy.
 
 from __future__ import annotations
 
+from .cms_free import (
+    FreeCMSComponent,
+    FreeCMSResult,
+    FreeInterfaceAssembly,
+    free_interface_assembly,
+    macneal,
+    rubin,
+)
 from .craig_bampton import CraigBamptonResult, craig_bampton
 from .damping import (
     CombinedDamping,
@@ -59,6 +69,7 @@ from .mba import (
     structural_dynamic_modification,
 )
 from .modal import ModalModel, as_modal
+from .random import PSDResult, miles_rms, psd_response
 from .residuals import ResidualVectorResult, residual_vectors
 from .synthetic import SyntheticTest, synthetic_frf, synthetic_time_response
 from .system import SystemMatrices, as_system
@@ -70,6 +81,9 @@ __all__ = [
     "CraigBamptonResult",
     "DampingModel",
     "FRFResult",
+    "FreeCMSComponent",
+    "FreeCMSResult",
+    "FreeInterfaceAssembly",
     "HarmonicResult",
     "MassModification",
     "ModalComponent",
@@ -77,6 +91,7 @@ __all__ = [
     "ModalModel",
     "ModificationResult",
     "NoDamping",
+    "PSDResult",
     "RayleighDamping",
     "ResidualVectorResult",
     "SpringModification",
@@ -90,13 +105,18 @@ __all__ = [
     "as_system",
     "craig_bampton",
     "direct_frf",
+    "free_interface_assembly",
     "frf_based_assembly",
     "harmonic_response",
+    "macneal",
+    "miles_rms",
     "modal_based_assembly",
     "modal_frf",
+    "psd_response",
     "rayleigh_coefficients",
     "residual_vectors",
     "retained_band",
+    "rubin",
     "retained_band_lines",
     "retained_fmax_hz",
     "structural_dynamic_modification",
