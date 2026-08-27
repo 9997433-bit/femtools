@@ -106,7 +106,7 @@ MAC</textarea>
       <h2>Load model file</h2>
       <form class="loader" id="loadform">
         <input id="modelpath" type="text" spellcheck="false"
-               placeholder="/path/to/model.ftproj | .json | .unv | .bdf">
+               placeholder="/path/to/model.ftproj | .json | .unv | .bdf | .inp | .k">
         <button type="submit">Load</button>
       </form>
       <p class="hint">Path on the machine running this server; stored results

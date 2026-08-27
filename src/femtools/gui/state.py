@@ -77,7 +77,7 @@ class GuiState:
         return {"results": out}
 
     def load_model(self, path: str) -> dict:
-        """Load a model file (.ftproj / .json / .unv / .bdf) into the session.
+        """Load a model file (.ftproj/.json/.unv/.bdf/.inp/.k) into the session.
 
         The file lives on the machine running the server (the GUI is a
         local tool), so a plain path is enough — no upload needed.
@@ -148,17 +148,19 @@ class GuiState:
         from femtools import viz
 
         with self._lock:
+            # pin matplotlib: PNG bytes are produced via fig.savefig below,
+            # regardless of any process-wide viz.set_default_backend switch
             if kind == "mesh":
                 if self.model is None:
                     raise GuiApiError("no model loaded")
-                fig = viz.plot_mesh(self.model)
+                fig = viz.plot_mesh(self.model, backend="matplotlib")
             elif kind == "mac":
                 result = self.engine.results.get(name)
                 if result is None:
                     raise GuiApiError(
                         f"no result named {name!r}; run the MAC command first"
                     )
-                fig = viz.plot_mac(result, title=f"MAC ({name})")
+                fig = viz.plot_mac(result, title=f"MAC ({name})", backend="matplotlib")
             elif kind == "mode":
                 if self.model is None:
                     raise GuiApiError("no model loaded")
@@ -168,7 +170,8 @@ class GuiState:
                         modal = result
                 if modal is None:
                     raise GuiApiError("no modal result; run SOLVE MODES first")
-                fig = viz.plot_mode(self.model, modal, index=index)
+                fig = viz.plot_mode(self.model, modal, index=index,
+                                    backend="matplotlib")
             else:
                 raise GuiApiError(f"unknown plot kind {kind!r}")
             buf = io.BytesIO()

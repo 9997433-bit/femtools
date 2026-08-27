@@ -142,7 +142,10 @@ def _heatmap_base64(
     except ImportError:
         return None
     try:
-        fig = plot_mac(mac, labels_a=labels_a, labels_b=labels_b, title=title)
+        # pin matplotlib: the embed needs fig.savefig PNG bytes even if the
+        # process-wide default backend was switched to plotly
+        fig = plot_mac(mac, labels_a=labels_a, labels_b=labels_b, title=title,
+                       backend="matplotlib")
         buf = io.BytesIO()
         fig.savefig(buf, format="png", dpi=130, bbox_inches="tight")
         import matplotlib.pyplot as plt

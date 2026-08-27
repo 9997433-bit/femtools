@@ -1,10 +1,21 @@
-"""Matplotlib plotting for femtools models and results.
+"""Plotting for femtools models and results (matplotlib, optional plotly).
 
 The functions here are deliberately duck-typed so they work with the
 contract objects (``FEModel``, ``ModalResult``, ``FRFResult``) without a
 hard import dependency on the sibling packages.  Everything runs
 headless: when no display is available the Agg backend is selected
 before pyplot is imported.
+
+Backends
+--------
+matplotlib is the default and the only required backend.  When the
+optional ``plotly`` package is installed, every plot function also
+accepts ``backend="plotly"`` and returns a
+:class:`plotly.graph_objects.Figure` instead of a matplotlib Figure
+(``outfile=`` then writes standalone ``.html``, or a static image via
+the optional ``kaleido`` package).  The process-wide default can be
+switched with :func:`set_default_backend`; plotly is never imported
+unless a plotly plot is actually requested.
 """
 
 from __future__ import annotations
@@ -14,7 +25,100 @@ from typing import Any
 
 import numpy as np
 
-__all__ = ["plot_mesh", "plot_mac", "plot_frf", "plot_mode"]
+__all__ = [
+    "plot_mesh",
+    "plot_mac",
+    "plot_frf",
+    "plot_mode",
+    "plotly_available",
+    "get_default_backend",
+    "set_default_backend",
+]
+
+_BACKENDS = ("matplotlib", "plotly")
+_default_backend = "matplotlib"
+
+
+def plotly_available() -> bool:
+    """True when the optional plotly package can be imported."""
+    try:
+        import plotly  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def get_default_backend() -> str:
+    """Name of the backend used when ``backend=`` is not given."""
+    return _default_backend
+
+
+def set_default_backend(backend: str) -> str:
+    """Set the process-wide plotting backend; returns the previous one.
+
+    ``"matplotlib"`` (the shipped default) or ``"plotly"`` (requires the
+    optional plotly package; raises ImportError when it is missing).
+    """
+    global _default_backend
+    name = _canonical_backend(backend)
+    if name == "plotly" and not plotly_available():
+        raise ImportError(
+            "the plotly backend needs the optional 'plotly' package "
+            "(pip install plotly); matplotlib remains the default backend"
+        )
+    previous = _default_backend
+    _default_backend = name
+    return previous
+
+
+def _canonical_backend(backend: str | None) -> str:
+    name = (_default_backend if backend is None else str(backend)).strip().lower()
+    if name not in _BACKENDS:
+        raise ValueError(
+            f"unknown plotting backend {backend!r}; use one of {', '.join(_BACKENDS)}")
+    return name
+
+
+def _use_plotly(backend: str | None, ax: Any) -> bool:
+    """Resolve the backend choice for one plot call."""
+    if _canonical_backend(backend) != "plotly":
+        return False
+    if ax is not None:
+        raise ValueError("ax= is a matplotlib Axes and cannot be combined with "
+                         "backend='plotly'")
+    return True
+
+
+def _plotly_go():
+    """Import plotly.graph_objects with a clear error when it is missing."""
+    try:
+        import plotly.graph_objects as go
+    except ImportError as exc:
+        raise ImportError(
+            "this plot was requested with backend='plotly' but the optional "
+            "'plotly' package is not installed (pip install plotly); "
+            "matplotlib is the default backend and needs no extra install"
+        ) from exc
+    return go
+
+
+def _finish_plotly(fig: Any, outfile: str | None) -> Any:
+    """Write a plotly figure to .html (or a static image via kaleido)."""
+    if outfile:
+        from pathlib import Path
+
+        if Path(outfile).suffix.lower() in (".html", ".htm"):
+            fig.write_html(outfile, include_plotlyjs="cdn")
+        else:
+            try:
+                fig.write_image(outfile)
+            except Exception as exc:
+                raise RuntimeError(
+                    f"static image export to {outfile!r} needs the optional "
+                    "'kaleido' package (pip install kaleido); alternatively "
+                    "save the plotly figure to a .html file"
+                ) from exc
+    return fig
 
 # edge tables per Round-1 element type (indices into the element node list)
 _EDGE_TABLE: dict[str, tuple[tuple[int, int], ...]] = {
@@ -126,12 +230,18 @@ def plot_mesh(
     node_color: str = "black",
     title: str | None = None,
     outfile: str | None = None,
+    backend: str | None = None,
 ):
     """Plot the undeformed wireframe of an FE model.
 
     Planar (XY) models are drawn in 2D, everything else in 3D.
-    Returns the matplotlib Figure.
+    Returns the matplotlib Figure (or a plotly Figure with
+    ``backend="plotly"``).
     """
+    if _use_plotly(backend, ax):
+        return _plotly_mesh(model, show_node_ids=show_node_ids,
+                            show_element_ids=show_element_ids, color=color,
+                            node_color=node_color, title=title, outfile=outfile)
     plt = _plt()
     coords = _node_coords(model)
     xyz = np.asarray(list(coords.values())) if coords else np.zeros((0, 3))
@@ -187,13 +297,19 @@ def plot_mac(
     cmap: str = "viridis",
     title: str = "MAC",
     outfile: str | None = None,
+    backend: str | None = None,
 ):
     """Plot a MAC (or any correlation) matrix as an annotated heatmap.
 
     ``mac[i, j]`` is drawn at row *i* (set A), column *j* (set B).
     Values are annotated when the matrix is 15x15 or smaller (override
-    with ``annotate=``). Returns the matplotlib Figure.
+    with ``annotate=``). Returns the matplotlib Figure (or a plotly
+    Figure with ``backend="plotly"``).
     """
+    if _use_plotly(backend, ax):
+        return _plotly_mac(mac, labels_a=labels_a, labels_b=labels_b,
+                           annotate=annotate, cmap=cmap, title=title,
+                           outfile=outfile)
     plt = _plt()
     m = np.asarray(mac, dtype=float)
     if m.ndim != 2:
@@ -245,6 +361,29 @@ def _extract_frf(frf: Any, freq: Any):
     return np.asarray(freq, dtype=float), H
 
 
+def _frf_curve(frf: Any, output: int, input_: int, freq: Any) -> tuple[Any, Any]:
+    """Select one FRF curve ``(f, h)`` out of a duck-typed FRF object."""
+    f, H = _extract_frf(frf, freq)
+    if H.ndim == 3:
+        h = H[output, input_, :]
+    elif H.ndim == 2:  # (n_curves, n_freq) — take requested output row
+        h = H[output, :]
+    else:
+        h = H
+    h = np.asarray(h).reshape(-1)
+    if h.shape[0] != f.shape[0]:
+        raise ValueError(f"FRF length {h.shape[0]} != frequency length {f.shape[0]}")
+    return f, h
+
+
+def _frf_kind(kind: str) -> tuple[bool, bool]:
+    want_mag = kind in ("bode", "mag", "magnitude")
+    want_phase = kind in ("bode", "phase")
+    if not (want_mag or want_phase):
+        raise ValueError(f"kind must be 'bode', 'mag' or 'phase', got {kind!r}")
+    return want_mag, want_phase
+
+
 def plot_frf(
     frf: Any,
     output: int = 0,
@@ -257,6 +396,7 @@ def plot_frf(
     label: str | None = None,
     title: str | None = None,
     outfile: str | None = None,
+    backend: str | None = None,
 ):
     """Plot one FRF curve (magnitude, or magnitude + phase Bode pair).
 
@@ -264,24 +404,14 @@ def plot_frf(
     n_freq)`` plus a frequency vector) or a raw complex array combined
     with ``freq=``.  ``kind`` is ``"bode"`` (default), ``"mag"`` or
     ``"phase"``.  Set ``db=True`` for a dB magnitude axis.  Returns the
-    matplotlib Figure.
+    matplotlib Figure (or a plotly Figure with ``backend="plotly"``).
     """
+    if _use_plotly(backend, ax):
+        return _plotly_frf(frf, output, input, freq=freq, kind=kind, db=db,
+                           label=label, title=title, outfile=outfile)
     plt = _plt()
-    f, H = _extract_frf(frf, freq)
-    if H.ndim == 3:
-        h = H[output, input, :]
-    elif H.ndim == 2:  # (n_curves, n_freq) — take requested output row
-        h = H[output, :]
-    else:
-        h = H
-    h = np.asarray(h).reshape(-1)
-    if h.shape[0] != f.shape[0]:
-        raise ValueError(f"FRF length {h.shape[0]} != frequency length {f.shape[0]}")
-
-    want_mag = kind in ("bode", "mag", "magnitude")
-    want_phase = kind in ("bode", "phase")
-    if not (want_mag or want_phase):
-        raise ValueError(f"kind must be 'bode', 'mag' or 'phase', got {kind!r}")
+    f, h = _frf_curve(frf, output, input, freq)
+    want_mag, want_phase = _frf_kind(kind)
 
     if ax is None:
         n_rows = 2 if (want_mag and want_phase) else 1
@@ -408,38 +538,11 @@ def _draw_rotations(ax, points: list, rotations: list, *, three_d: bool,
         ax.legend(loc="best", fontsize=8)
 
 
-def plot_mode(
-    model: Any,
-    modal: Any,
-    index: int = 0,
-    ax: Any = None,
-    *,
-    scale: float | None = None,
-    dof_map: Any = None,
-    show_undeformed: bool = True,
-    show_rotations: bool = False,
-    rotation_scale: float | None = None,
-    color: str = "tab:red",
-    title: str | None = None,
-    outfile: str | None = None,
-):
-    """Plot a deformed mode shape over the undeformed wireframe.
-
-    ``modal`` is a ``ModalResult`` (``modes`` array ``(ndof, n_modes)``,
-    optional ``freq_hz`` and ``dof_map``) or a raw mode matrix/vector.
-    The displacement scale defaults to 10% of the model bounding-box
-    diagonal at unit maximum displacement.
-
-    With ``show_rotations=True`` the rotational DOF components (rx, ry,
-    rz) are drawn at the deformed nodes: quiver arrows of the rotation
-    pseudo-vector in 3D; in 2D, arrows for the in-plane part plus circle
-    markers sized by ``|theta_z|`` (solid = CCW, dashed = CW).
-    ``rotation_scale`` sets the length of the largest arrow in model
-    units (default: 8% of the bounding-box diagonal).
-
-    Returns the matplotlib Figure.
-    """
-    plt = _plt()
+def _mode_geometry(
+    model: Any, modal: Any, index: int, scale: float | None, dof_map: Any,
+) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray], dict[int, np.ndarray],
+           np.ndarray, float, float]:
+    """Shared mode-shape geometry: ``(coords, disp6, deformed, xyz, bbox, scale)``."""
     coords = _node_coords(model)
 
     phi_all = getattr(modal, "modes", getattr(modal, "phi", modal))
@@ -459,6 +562,60 @@ def plot_mode(
         scale = 0.1 * bbox / dmax if dmax > 0 else 1.0
 
     deformed = {nid: coords[nid] + scale * disp[nid] for nid in coords}
+    return coords, disp6, deformed, xyz, bbox, float(scale)
+
+
+def _mode_default_title(modal: Any, index: int) -> str:
+    freq_hz = getattr(modal, "freq_hz", None)
+    if freq_hz is not None and index < len(np.atleast_1d(freq_hz)):
+        return f"mode {index + 1} — {float(np.atleast_1d(freq_hz)[index]):.4g} Hz"
+    return f"mode {index + 1}"
+
+
+def plot_mode(
+    model: Any,
+    modal: Any,
+    index: int = 0,
+    ax: Any = None,
+    *,
+    scale: float | None = None,
+    dof_map: Any = None,
+    show_undeformed: bool = True,
+    show_rotations: bool = False,
+    rotation_scale: float | None = None,
+    color: str = "tab:red",
+    title: str | None = None,
+    outfile: str | None = None,
+    backend: str | None = None,
+):
+    """Plot a deformed mode shape over the undeformed wireframe.
+
+    ``modal`` is a ``ModalResult`` (``modes`` array ``(ndof, n_modes)``,
+    optional ``freq_hz`` and ``dof_map``) or a raw mode matrix/vector.
+    The displacement scale defaults to 10% of the model bounding-box
+    diagonal at unit maximum displacement.
+
+    With ``show_rotations=True`` the rotational DOF components (rx, ry,
+    rz) are drawn at the deformed nodes: quiver arrows of the rotation
+    pseudo-vector in 3D; in 2D, arrows for the in-plane part plus circle
+    markers sized by ``|theta_z|`` (solid = CCW, dashed = CW).
+    ``rotation_scale`` sets the length of the largest arrow in model
+    units (default: 8% of the bounding-box diagonal).  Rotation glyphs
+    are matplotlib-only.
+
+    Returns the matplotlib Figure (or a plotly Figure with
+    ``backend="plotly"``).
+    """
+    if _use_plotly(backend, ax):
+        if show_rotations:
+            raise ValueError("show_rotations glyphs are matplotlib-only; "
+                             "drop backend='plotly' or show_rotations=True")
+        return _plotly_mode(model, modal, index, scale=scale, dof_map=dof_map,
+                            show_undeformed=show_undeformed, color=color,
+                            title=title, outfile=outfile)
+    plt = _plt()
+    coords, disp6, deformed, xyz, bbox, scale = _mode_geometry(
+        model, modal, index, scale, dof_map)
     all_pts = np.vstack([xyz, np.asarray(list(deformed.values()))]) if coords else xyz
     three_d = not _is_planar(all_pts)
 
@@ -495,10 +652,255 @@ def plot_mode(
         ax.set_aspect("equal", adjustable="datalim")
 
     if title is None:
-        freq_hz = getattr(modal, "freq_hz", None)
-        if freq_hz is not None and index < len(np.atleast_1d(freq_hz)):
-            title = f"mode {index + 1} — {float(np.atleast_1d(freq_hz)[index]):.4g} Hz"
-        else:
-            title = f"mode {index + 1}"
+        title = _mode_default_title(modal, index)
     ax.set_title(f"{title}  (scale={scale:.3g})")
     return _finish(fig, outfile)
+
+
+# ----------------------------------------------------------------------
+# plotly backend (optional; imported only when a plotly plot is requested)
+# ----------------------------------------------------------------------
+# matplotlib color spellings used by the femtools defaults, mapped to hex
+_PLOTLY_COLORS = {
+    "tab:blue": "#1f77b4", "tab:orange": "#ff7f0e", "tab:green": "#2ca02c",
+    "tab:red": "#d62728", "tab:purple": "#9467bd", "tab:brown": "#8c564b",
+    "tab:pink": "#e377c2", "tab:gray": "#7f7f7f", "tab:grey": "#7f7f7f",
+    "tab:olive": "#bcbd22", "tab:cyan": "#17becf",
+}
+
+
+def _plotly_color(color: str) -> str:
+    """Translate matplotlib color spellings plotly does not know."""
+    c = str(color)
+    if c in _PLOTLY_COLORS:
+        return _PLOTLY_COLORS[c]
+    try:  # matplotlib grey-level strings like "0.7"
+        level = float(c)
+    except ValueError:
+        return c
+    v = int(round(255 * min(max(level, 0.0), 1.0)))
+    return f"rgb({v},{v},{v})"
+
+
+def _polyline_xyz(segments: list) -> tuple[list, list, list]:
+    """Concatenate segments into None-gapped x/y/z polyline arrays."""
+    xs: list = []
+    ys: list = []
+    zs: list = []
+    for p, q in segments:
+        xs += [float(p[0]), float(q[0]), None]
+        ys += [float(p[1]), float(q[1]), None]
+        zs += [float(p[2]), float(q[2]), None]
+    return xs, ys, zs
+
+
+def _plotly_wireframe(go, fig, segments, points, *, three_d: bool, color: str,
+                      width: float, name: str, opacity: float = 1.0) -> None:
+    """Add one wireframe (lines + point-element markers) to a plotly figure."""
+    color = _plotly_color(color)
+    xs, ys, zs = _polyline_xyz(segments)
+    if xs:
+        if three_d:
+            fig.add_trace(go.Scatter3d(x=xs, y=ys, z=zs, mode="lines", name=name,
+                                       line={"color": color, "width": width},
+                                       opacity=opacity))
+        else:
+            fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name=name,
+                                     line={"color": color, "width": width},
+                                     opacity=opacity))
+    if points:
+        pts = np.asarray(points, dtype=float)
+        marker = {"color": color, "symbol": "square", "size": 6}
+        if three_d:
+            fig.add_trace(go.Scatter3d(x=pts[:, 0], y=pts[:, 1], z=pts[:, 2],
+                                       mode="markers", marker=marker,
+                                       name=f"{name} (point elements)",
+                                       opacity=opacity))
+        else:
+            fig.add_trace(go.Scatter(x=pts[:, 0], y=pts[:, 1], mode="markers",
+                                     marker=marker,
+                                     name=f"{name} (point elements)",
+                                     opacity=opacity))
+
+
+def _plotly_frame_layout(fig, *, three_d: bool, title: str) -> None:
+    """Common axis labels / equal-aspect layout for mesh and mode plots."""
+    if three_d:
+        fig.update_layout(scene={"xaxis_title": "x", "yaxis_title": "y",
+                                 "zaxis_title": "z", "aspectmode": "data"})
+    else:
+        fig.update_xaxes(title_text="x")
+        fig.update_yaxes(title_text="y", scaleanchor="x", scaleratio=1)
+    fig.update_layout(title=title, showlegend=False)
+
+
+def _plotly_mesh(
+    model: Any,
+    *,
+    show_node_ids: bool = False,
+    show_element_ids: bool = False,
+    color: str = "tab:blue",
+    node_color: str = "black",
+    title: str | None = None,
+    outfile: str | None = None,
+):
+    go = _plotly_go()
+    coords = _node_coords(model)
+    xyz = np.asarray(list(coords.values())) if coords else np.zeros((0, 3))
+    three_d = not _is_planar(xyz)
+
+    fig = go.Figure()
+    segments, points = _segments(model, coords)
+    _plotly_wireframe(go, fig, segments, points, three_d=three_d, color=color,
+                      width=3.0, name="mesh")
+
+    if coords:
+        node_ids = list(coords)
+        mode = "markers+text" if show_node_ids else "markers"
+        text = [str(nid) for nid in node_ids] if show_node_ids else None
+        marker = {"color": _plotly_color(node_color), "size": 3 if three_d else 5}
+        kwargs = {"mode": mode, "marker": marker, "name": "nodes",
+                  "text": text, "textposition": "top center"}
+        if three_d:
+            fig.add_trace(go.Scatter3d(x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2], **kwargs))
+        else:
+            fig.add_trace(go.Scatter(x=xyz[:, 0], y=xyz[:, 1], **kwargs))
+
+    if show_element_ids:
+        cx, cy, cz, labels = [], [], [], []
+        for _etype, nodes, eid in _element_edges(model):
+            pts = [coords[n] for n in nodes if n in coords]
+            if not pts:
+                continue
+            c = np.mean(pts, axis=0)
+            cx.append(float(c[0]))
+            cy.append(float(c[1]))
+            cz.append(float(c[2]))
+            labels.append(str(eid))
+        if labels:
+            kwargs = {"mode": "text", "text": labels, "name": "element ids",
+                      "textfont": {"color": _plotly_color(color)}}
+            if three_d:
+                fig.add_trace(go.Scatter3d(x=cx, y=cy, z=cz, **kwargs))
+            else:
+                fig.add_trace(go.Scatter(x=cx, y=cy, **kwargs))
+
+    _plotly_frame_layout(fig, three_d=three_d,
+                         title=title or f"{getattr(model, 'name', 'model')}: "
+                                        f"{len(coords)} nodes, "
+                                        f"{len(model.elements)} elements")
+    return _finish_plotly(fig, outfile)
+
+
+def _plotly_mac(
+    mac: Any,
+    *,
+    labels_a: list[str] | None = None,
+    labels_b: list[str] | None = None,
+    annotate: bool | None = None,
+    cmap: str = "viridis",
+    title: str = "MAC",
+    outfile: str | None = None,
+):
+    go = _plotly_go()
+    m = np.asarray(mac, dtype=float)
+    if m.ndim != 2:
+        raise ValueError(f"MAC matrix must be 2-D, got shape {m.shape}")
+    n_a, n_b = m.shape
+    x = labels_b or [str(j + 1) for j in range(n_b)]
+    y = labels_a or [str(i + 1) for i in range(n_a)]
+    if annotate is None:
+        annotate = max(n_a, n_b) <= 15
+
+    heatmap = go.Heatmap(
+        z=m, x=x, y=y, zmin=0.0, zmax=1.0, colorscale=cmap,
+        colorbar={"title": "MAC"},
+        text=[[f"{v:.2f}" for v in row] for row in m] if annotate else None,
+        texttemplate="%{text}" if annotate else None,
+    )
+    fig = go.Figure(data=heatmap)
+    fig.update_xaxes(title_text="set B mode", type="category")
+    # match matplotlib's origin="upper": mode 1 of set A on the top row
+    fig.update_yaxes(title_text="set A mode", type="category", autorange="reversed")
+    fig.update_layout(title=title)
+    return _finish_plotly(fig, outfile)
+
+
+def _plotly_frf(
+    frf: Any,
+    output: int = 0,
+    input_: int = 0,
+    *,
+    freq: Any = None,
+    kind: str = "bode",
+    db: bool = False,
+    label: str | None = None,
+    title: str | None = None,
+    outfile: str | None = None,
+):
+    go = _plotly_go()
+    from plotly.subplots import make_subplots
+
+    f, h = _frf_curve(frf, output, input_, freq)
+    want_mag, want_phase = _frf_kind(kind)
+    curve_label = label or f"H[{output},{input_}]"
+
+    n_rows = 2 if (want_mag and want_phase) else 1
+    fig = make_subplots(rows=n_rows, cols=1, shared_xaxes=True,
+                        row_heights=[0.67, 0.33] if n_rows == 2 else None,
+                        vertical_spacing=0.06)
+    row = 1
+    if want_mag:
+        mag = np.abs(h)
+        if db:
+            with np.errstate(divide="ignore"):
+                y_mag = 20.0 * np.log10(mag)
+            fig.add_trace(go.Scatter(x=f, y=y_mag, name=curve_label,
+                                     mode="lines"), row=row, col=1)
+            fig.update_yaxes(title_text="|H| [dB]", row=row, col=1)
+        else:
+            fig.add_trace(go.Scatter(x=f, y=np.where(mag > 0, mag, np.nan),
+                                     name=curve_label, mode="lines"), row=row, col=1)
+            fig.update_yaxes(title_text="|H|", type="log", row=row, col=1)
+        row += 1
+    if want_phase:
+        fig.add_trace(go.Scatter(x=f, y=np.degrees(np.unwrap(np.angle(h))),
+                                 name=f"{curve_label} phase", mode="lines"),
+                      row=row, col=1)
+        fig.update_yaxes(title_text="phase [deg]", row=row, col=1)
+    fig.update_xaxes(title_text="frequency [Hz]", row=n_rows, col=1)
+    fig.update_layout(title=title or "Frequency response function")
+    return _finish_plotly(fig, outfile)
+
+
+def _plotly_mode(
+    model: Any,
+    modal: Any,
+    index: int = 0,
+    *,
+    scale: float | None = None,
+    dof_map: Any = None,
+    show_undeformed: bool = True,
+    color: str = "tab:red",
+    title: str | None = None,
+    outfile: str | None = None,
+):
+    go = _plotly_go()
+    coords, _disp6, deformed, xyz, _bbox, scale = _mode_geometry(
+        model, modal, index, scale, dof_map)
+    all_pts = np.vstack([xyz, np.asarray(list(deformed.values()))]) if coords else xyz
+    three_d = not _is_planar(all_pts)
+
+    fig = go.Figure()
+    if show_undeformed:
+        seg0, pts0 = _segments(model, coords)
+        _plotly_wireframe(go, fig, seg0, pts0, three_d=three_d, color="0.7",
+                          width=2.0, name="undeformed", opacity=0.8)
+    seg1, pts1 = _segments(model, deformed)
+    _plotly_wireframe(go, fig, seg1, pts1, three_d=three_d, color=color,
+                      width=3.5, name="deformed")
+
+    if title is None:
+        title = _mode_default_title(modal, index)
+    _plotly_frame_layout(fig, three_d=three_d, title=f"{title}  (scale={scale:.3g})")
+    return _finish_plotly(fig, outfile)

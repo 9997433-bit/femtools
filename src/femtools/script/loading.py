@@ -51,7 +51,18 @@ from typing import Any
 
 __all__ = ["LoadedModel", "load_model_file", "model_from_json_dict", "SUPPORTED_SUFFIXES"]
 
-SUPPORTED_SUFFIXES = (".ftproj", ".json", ".unv", ".uff", ".bdf", ".nas", ".dat")
+SUPPORTED_SUFFIXES = (".ftproj", ".json", ".unv", ".uff", ".bdf", ".nas", ".dat",
+                      ".inp", ".k", ".key")
+
+
+def _unwrap_model(data: Any) -> Any:
+    """Unwrap a reader result to a bare ``FEModel`` (duck-typed).
+
+    The INP/K translators are contracted to map into ``FEModel``; should
+    a build return a container instead, its ``.model`` attribute wins.
+    """
+    inner = getattr(data, "model", None)
+    return data if inner is None else inner
 
 
 @dataclass
@@ -168,6 +179,18 @@ def load_model_file(path: str | Path) -> LoadedModel:
         from femtools.io.bdf import read_bdf
 
         return LoadedModel(model=read_bdf(str(p)), format="bdf", path=str(p))
+
+    if suffix == ".inp":
+        from femtools.io.inp import read_inp
+
+        return LoadedModel(model=_unwrap_model(read_inp(str(p))),
+                           format="inp", path=str(p))
+
+    if suffix in (".k", ".key"):
+        from femtools.io.kfile import read_k
+
+        return LoadedModel(model=_unwrap_model(read_k(str(p))),
+                           format="k", path=str(p))
 
     raise ValueError(
         f"unsupported model file {p} "

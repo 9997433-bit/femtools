@@ -170,10 +170,15 @@ by the CLI and the GUI:
 
 ```python
 from femtools.script import load_model_file
-loaded = load_model_file("beam.ftproj")   # or .json / .unv / .bdf
+loaded = load_model_file("beam.ftproj")   # or .json / .unv / .bdf / .inp / .k
 loaded.model      # bare FEModel (Project/UnvData containers unwrapped)
 loaded.results    # named results stored with the file, if any
 ```
+
+Abaqus `.inp` and LS-DYNA `.k`/`.key` decks dispatch to the optional
+`femtools.io.inp` / `femtools.io.kfile` text translators; when a build
+ships without them the loader raises `ImportError` (CLI exit code 3)
+instead of failing at import time.
 
 `.json` models use a plain-JSON schema built on the public
 `FEModel.add_*` API (`nodes`, `materials`, `properties`, `elements`,

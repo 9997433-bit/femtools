@@ -1,9 +1,9 @@
 """femtools command-line interface.
 
 Typer application exposed as the ``femtools`` console script
-(``femtools.cli:app``).  Subcommands: ``solve-modes``, ``mac``,
-``report-mac``, ``frf``, ``reduce``, ``estimate-frf``, ``update``,
-``pretest``, ``script``, ``gui``.
+(``femtools.cli:app``).  Subcommands: ``solve-modes``, ``read-mesh``,
+``mac``, ``report-mac``, ``frf``, ``reduce``, ``estimate-frf``,
+``update``, ``pretest``, ``script``, ``gui``.
 
 Sibling packages (``femtools.core``, ``femtools.fea``, ...) are imported
 lazily inside each command; if one is missing the command prints a clear
@@ -45,11 +45,12 @@ def _missing(feature: str, exc: ImportError) -> typer.Exit:
 
 
 def _load_model(path: Path) -> Any:
-    """Load a model file (.ftproj / .json / .unv / .bdf|.nas|.dat) as an FEModel.
+    """Load a model file as an FEModel (dispatch on suffix).
 
-    Container formats (``.ftproj`` projects, ``.unv`` bundles) are
-    unwrapped to the bare model so every downstream solver call receives
-    an ``FEModel``.
+    Accepts ``.ftproj`` / ``.json`` / ``.unv`` / ``.bdf|.nas|.dat`` /
+    ``.inp`` / ``.k|.key``.  Container formats (``.ftproj`` projects,
+    ``.unv`` bundles) are unwrapped to the bare model so every
+    downstream solver call receives an ``FEModel``.
     """
     from femtools.script.loading import load_model_file
 
@@ -153,8 +154,73 @@ def solve_modes_cmd(
     if plot is not None:
         from femtools.viz import plot_mode
 
+        n_solved = int(np.asarray(modal.modes).shape[1])
+        if mode_index >= n_solved:
+            err_console.print(
+                f"[red]error:[/red] --mode-index {mode_index} is out of range: "
+                f"only {n_solved} modes were solved (0..{n_solved - 1})")
+            raise typer.Exit(code=2)
         plot_mode(model, modal, index=mode_index, outfile=str(plot))
         console.print(f"saved mode plot to [bold]{plot}[/bold]")
+
+
+# ----------------------------------------------------------------------
+# read-mesh
+# ----------------------------------------------------------------------
+@app.command("read-mesh")
+def read_mesh_cmd(
+    mesh_file: Annotated[Path, typer.Argument(
+        exists=True, readable=True,
+        help="Mesh/model file: .inp (Abaqus), .k/.key (LS-DYNA), .unv/.uff, "
+             ".bdf/.nas/.dat (Nastran), .ftproj, .json.")],
+    output: Annotated[Path | None, typer.Option(
+        "--output", "-o", help="Save the loaded model as a .ftproj project.")] = None,
+    plot: Annotated[Path | None, typer.Option(
+        "--plot", help="Save a wireframe plot of the mesh (PNG).")] = None,
+) -> None:
+    """Load a mesh/model file by suffix and print a model summary."""
+    from collections import Counter
+
+    from femtools.script.loading import load_model_file
+
+    try:
+        loaded = load_model_file(mesh_file)
+    except ImportError as exc:
+        raise _missing(f"reading {mesh_file.suffix!r} files", exc) from exc
+    except ValueError as exc:
+        err_console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+    model = loaded.model
+
+    table = Table(title=f"{mesh_file.name} ({loaded.format})")
+    table.add_column("entity", justify="left")
+    table.add_column("count", justify="right")
+    table.add_row("nodes", str(len(getattr(model, "nodes", {}))))
+    elements = getattr(model, "elements", {})
+    table.add_row("elements", str(len(elements)))
+    type_counts = Counter(str(getattr(e, "type", "?")).upper() for e in elements.values())
+    for etype, n in sorted(type_counts.items()):
+        table.add_row(f"  {etype}", str(n))
+    table.add_row("materials", str(len(getattr(model, "materials", {}))))
+    table.add_row("properties", str(len(getattr(model, "properties", {}))))
+    table.add_row("SPCs", str(len(getattr(model, "spcs", []))))
+    console.print(table)
+    console.print(f"model name: [bold]{getattr(model, 'name', '?')}[/bold]")
+    if loaded.results:
+        console.print(f"stored results: {', '.join(sorted(loaded.results))}")
+
+    if output is not None:
+        try:
+            from femtools.io.project import save_project
+        except ImportError as exc:
+            raise _missing("saving projects", exc) from exc
+        save_project(model, str(output))
+        console.print(f"saved model to [bold]{output}[/bold]")
+    if plot is not None:
+        from femtools.viz import plot_mesh
+
+        plot_mesh(model, outfile=str(plot))
+        console.print(f"saved mesh plot to [bold]{plot}[/bold]")
 
 
 # ----------------------------------------------------------------------
@@ -195,9 +261,14 @@ def mac_cmd(
     for i in range(mac.shape[0]):
         table.add_row(str(i + 1), *(f"{mac[i, j]:.3f}" for j in range(mac.shape[1])))
     console.print(table)
-    off_diag = float(np.max(mac - np.diag(np.diag(mac)))) if mac.size > 1 else 0.0
-    console.print(f"diag min={float(np.min(np.diag(mac))):.6f}  "
-                  f"off-diag max={off_diag:.6f}")
+    if mac.size and mac.shape[0] == mac.shape[1]:
+        diag = np.diag(mac)
+        off_diag = float(np.max(mac - np.diag(diag))) if mac.size > 1 else 0.0
+        console.print(f"diag min={float(np.min(diag)):.6f}  "
+                      f"off-diag max={off_diag:.6f}")
+    elif mac.size:
+        console.print(f"best-match min={float(np.min(np.max(mac, axis=1))):.6f}  "
+                      f"overall max={float(np.max(mac)):.6f}")
 
     if output is not None:
         if output.suffix.lower() == ".csv":
@@ -961,7 +1032,12 @@ def update_cmd(
         from femtools.updating.updater import update_model
     except ImportError as exc:
         raise _missing("model updating", exc) from exc
-    result = update_model(model, **config)
+    try:
+        result = update_model(model, **config)
+    except (TypeError, ValueError) as exc:
+        # bad keys/values in the user's JSON config surface here
+        err_console.print(f"[red]error:[/red] invalid update configuration: {exc}")
+        raise typer.Exit(code=2) from exc
 
     table = Table(title="updating result")
     table.add_column("field")
