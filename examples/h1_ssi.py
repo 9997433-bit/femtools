@@ -14,9 +14,11 @@ are fed to covariance-driven stochastic subspace identification, which must
 recover the three modal frequencies, damping ratios, and shapes.
 
 Uses the Round-4 kernels `femtools.mpe.frf_estimation` and `femtools.mpe.ssi`
-(owner R4-O4, frozen in .agent_workspace/REMAINING.md); this example fails
-with ImportError until they land. See docs/algorithms/mpe_rbpe.md sections
-5-6 and docs/ACCEPTANCE.md (cases 19-20).
+(owner R4-O4, merged). `ssi_cov` sweeps model orders up to `order` and keeps
+the poles that stabilise across orders, so it is called with headroom
+(order=20 for 6 physical states) plus `n_modes`/`f_range` to select the three
+physical poles. See docs/algorithms/mpe_rbpe.md sections 5-6 and
+docs/ACCEPTANCE.md (cases 19-20).
 """
 
 from __future__ import annotations
@@ -161,7 +163,7 @@ def main() -> int:
     # --- part 2: output-only SSI-cov ----------------------------------------
     sim = synthetic_response(f_n, ZETA, mode_shapes=phi, fs=FS,
                              duration=600.0, seed=11, noise=0.02)
-    ident = ssi_cov(sim.data, fs=FS, order=6)
+    ident = ssi_cov(sim.data, fs=FS, order=20, n_modes=3, f_range=BAND)
     fid = np.asarray(ident.freq_hz, dtype=float)
     zid = np.asarray(ident.damping, dtype=float)
     shapes = getattr(ident, "mode_shapes", None)
