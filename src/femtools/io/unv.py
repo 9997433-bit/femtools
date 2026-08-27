@@ -343,7 +343,9 @@ def _read_2412(body: list[str], model: FEModel, notes: list[str]) -> None:
             raise ValueError(f"element {eid}: expected {n_nodes} nodes, got {len(conn)}")
         etype = _FE_TO_FEMTOOLS.get(fe_id)
         if etype is None:
-            notes.append(f"dataset 2412: skipped element {eid} with unsupported FE descriptor {fe_id}")
+            notes.append(
+                f"dataset 2412: skipped element {eid} with unsupported FE descriptor {fe_id}"
+            )
             continue
         # grounded spring/damper descriptors connect a single node
         if fe_id in (138, 139, 142):
@@ -455,7 +457,10 @@ def _read_55(body: list[str], notes: list[str]) -> _ModeShape55 | None:
     )
 
 
-_REC6_COLS = [(0, 5), (5, 15), (15, 20), (20, 30), (31, 41), (41, 51), (51, 55), (56, 66), (66, 76), (76, 80)]
+_REC6_COLS = [
+    (0, 5), (5, 15), (15, 20), (20, 30), (31, 41),
+    (41, 51), (51, 55), (56, 66), (66, 76), (76, 80),
+]
 
 
 def _read_58(body: list[str], notes: list[str]) -> UnvFunction:
@@ -608,7 +613,9 @@ def _assemble_frf(functions: list[UnvFunction], notes: list[str]) -> FRFResult |
             "output x input pairs present); missing entries are zero"
         )
     kind = _FRF_KIND_BY_SPEC.get(usable[0].ordinate_num_spec, "receptance")
-    return FRFResult(freq_hz=x0, h_complex=h, inputs=tuple(inputs), outputs=tuple(outputs), kind=kind)
+    return FRFResult(
+        freq_hz=x0, h_complex=h, inputs=tuple(inputs), outputs=tuple(outputs), kind=kind
+    )
 
 
 # -- public read --------------------------------------------------------------

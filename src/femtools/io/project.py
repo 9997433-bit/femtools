@@ -189,13 +189,21 @@ def _model_from_parts(meta: dict[str, Any], arrays: dict[str, np.ndarray]) -> FE
         )
         model.elements[el.id] = el
     for s in meta.get("spcs", ()):
-        model.spcs.append(
-            SPC(node_id=s["node_id"], mask=tuple(s["mask"]), value=s.get("value", 0.0), sid=s.get("sid", 1))
+        spc = SPC(
+            node_id=s["node_id"],
+            mask=tuple(s["mask"]),
+            value=s.get("value", 0.0),
+            sid=s.get("sid", 1),
         )
+        model.spcs.append(spc)
     for ld in meta.get("loads", ()):
-        model.loads.append(
-            Load(sid=ld.get("sid", 1), node_id=ld["node_id"], force=ld.get("force"), moment=ld.get("moment"))
+        load = Load(
+            sid=ld.get("sid", 1),
+            node_id=ld["node_id"],
+            force=ld.get("force"),
+            moment=ld.get("moment"),
         )
+        model.loads.append(load)
     for s in meta.get("sets", ()):
         cls = NodeSet if s.get("kind", "node") == "node" else ElementSet
         model.sets[s["name"]] = cls(s["name"], frozenset(int(i) for i in s["ids"]))
@@ -242,7 +250,9 @@ def _result_to_parts(res: AnyResult) -> tuple[str, dict[str, np.ndarray], dict[s
     raise ProjectError(f"unsupported result type {type(res).__name__}")
 
 
-def _result_from_parts(kind: str, arrays: dict[str, np.ndarray], extra: dict[str, Any]) -> AnyResult:
+def _result_from_parts(
+    kind: str, arrays: dict[str, np.ndarray], extra: dict[str, Any]
+) -> AnyResult:
     dof_index = _array_to_pairs(arrays["dof_index"]) if "dof_index" in arrays else None
     if kind == "modal":
         return ModalResult(
@@ -297,7 +307,7 @@ def save_project(
         "format": FORMAT_NAME,
         "version": FORMAT_VERSION,
         "femtools_version": __version__,
-        "created": _dt.datetime.now(_dt.timezone.utc).isoformat(timespec="seconds"),
+        "created": _dt.datetime.now(_dt.UTC).isoformat(timespec="seconds"),
         "metadata": metadata or {},
         "results": {},
     }

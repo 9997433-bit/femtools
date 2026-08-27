@@ -393,7 +393,9 @@ class DOFSet:
                 raise ModelError(f"DOFSet {name!r}: local dof {dof} outside 0..5")
 
     @classmethod
-    def from_nodes(cls, name: str, node_ids: Iterable[int], dofs: Iterable[int] = (0, 1, 2)) -> DOFSet:
+    def from_nodes(
+        cls, name: str, node_ids: Iterable[int], dofs: Iterable[int] = (0, 1, 2)
+    ) -> DOFSet:
         """Cartesian product of node ids and local dofs (default translations)."""
         dofs_t = tuple(int(d) for d in dofs)
         return cls(name, [(n, d) for n in node_ids for d in dofs_t])

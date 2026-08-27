@@ -103,7 +103,9 @@ class ModalResult:
         if self.eigenvalues.shape != (n,):
             raise ValueError(f"eigenvalues shape {self.eigenvalues.shape} != ({n},)")
         if self.modes.shape[1] != n:
-            raise ValueError(f"modes has {self.modes.shape[1]} columns, expected {n} (one per mode)")
+            raise ValueError(
+                f"modes has {self.modes.shape[1]} columns, expected {n} (one per mode)"
+            )
         if self.generalized_mass.shape != (n,):
             raise ValueError(f"generalized_mass shape {self.generalized_mass.shape} != ({n},)")
         if self.damping is not None and self.damping.shape != (n,):

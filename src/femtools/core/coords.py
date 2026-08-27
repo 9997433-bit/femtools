@@ -62,12 +62,16 @@ class CoordSys:
 
     def __post_init__(self) -> None:
         if self.type not in _VALID_TYPES:
-            raise ValueError(f"invalid coordinate system type {self.type!r}; expected {_VALID_TYPES}")
+            raise ValueError(
+                f"invalid coordinate system type {self.type!r}; expected {_VALID_TYPES}"
+            )
         self.origin = np.asarray(self.origin, dtype=float).reshape(3)
         self.rotation = np.asarray(self.rotation, dtype=float).reshape(3, 3)
         err = float(np.abs(self.rotation.T @ self.rotation - np.eye(3)).max())
         if err > 1e-8:
-            raise ValueError(f"rotation matrix of CoordSys {self.id} is not orthonormal (err={err:.2e})")
+            raise ValueError(
+                f"rotation matrix of CoordSys {self.id} is not orthonormal (err={err:.2e})"
+            )
 
     # -- constructors ----------------------------------------------------
     @classmethod
@@ -93,7 +97,9 @@ class CoordSys:
         ex /= n
         ey = np.cross(ez, ex)
         rot = np.column_stack([ex, ey, ez])
-        return cls(id=id, type=type, origin=np.asarray(origin, dtype=float).reshape(3), rotation=rot)
+        return cls(
+            id=id, type=type, origin=np.asarray(origin, dtype=float).reshape(3), rotation=rot
+        )
 
     @classmethod
     def from_points(
@@ -152,7 +158,8 @@ class CoordSys:
             x, y, z = local_cart[:, 0], local_cart[:, 1], local_cart[:, 2]
             r = np.sqrt(x * x + y * y + z * z)
             with np.errstate(invalid="ignore", divide="ignore"):
-                theta = np.rad2deg(np.arccos(np.clip(np.divide(z, np.where(r == 0.0, 1.0, r)), -1.0, 1.0)))
+                cos_t = np.clip(np.divide(z, np.where(r == 0.0, 1.0, r)), -1.0, 1.0)
+                theta = np.rad2deg(np.arccos(cos_t))
             theta = np.where(r == 0.0, 0.0, theta)
             phi = np.rad2deg(np.arctan2(y, x))
             out = np.column_stack([r, theta, phi])
@@ -198,7 +205,9 @@ class CoordSys:
             local_basis = np.column_stack([e_r, e_t, e_p])
         return self.rotation @ local_basis
 
-    def transform_vector_to_global(self, v_local: ArrayLike, at: ArrayLike = (0.0, 0.0, 0.0)) -> NDArray[np.float64]:
+    def transform_vector_to_global(
+        self, v_local: ArrayLike, at: ArrayLike = (0.0, 0.0, 0.0)
+    ) -> NDArray[np.float64]:
         """Vector components in this system's physical basis -> global components.
 
         ``at`` is the global point where the vector is attached (relevant for
@@ -207,7 +216,9 @@ class CoordSys:
         v = np.asarray(v_local, dtype=float).reshape(3)
         return self.basis_at(at) @ v
 
-    def transform_vector_to_local(self, v_global: ArrayLike, at: ArrayLike = (0.0, 0.0, 0.0)) -> NDArray[np.float64]:
+    def transform_vector_to_local(
+        self, v_global: ArrayLike, at: ArrayLike = (0.0, 0.0, 0.0)
+    ) -> NDArray[np.float64]:
         """Global vector components -> components in this system's physical basis at ``at``."""
         v = np.asarray(v_global, dtype=float).reshape(3)
         return self.basis_at(at).T @ v

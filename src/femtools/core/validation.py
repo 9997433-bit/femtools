@@ -94,7 +94,14 @@ class ValidationReport:
         head = f"ValidationReport: {len(self.errors)} error(s), {len(self.warnings)} warning(s)"
         return "\n".join([head, *(str(i) for i in self.issues)])
 
-    def _add(self, severity: str, code: str, message: str, entity: str = "", entity_id: int | None = None) -> None:
+    def _add(
+        self,
+        severity: str,
+        code: str,
+        message: str,
+        entity: str = "",
+        entity_id: int | None = None,
+    ) -> None:
         self.issues.append(ValidationIssue(severity, code, message, entity, entity_id))
 
 
@@ -161,7 +168,9 @@ def quad4_warp(xyz: NDArray[np.float64]) -> float:
 # -- main entry ---------------------------------------------------------------
 
 
-def _check_element_geometry(model: FEModel, el: Element, rep: ValidationReport, length_tol: float) -> None:
+def _check_element_geometry(
+    model: FEModel, el: Element, rep: ValidationReport, length_tol: float
+) -> None:
     xyz = np.array([model.nodes[n].xyz for n in el.nodes], dtype=float)
     if el.type in ("BAR2", "BEAM2", "TRUSS2D", "SPRING", "DAMPER") and el.n_nodes == 2:
         if float(np.linalg.norm(xyz[1] - xyz[0])) <= length_tol and el.type in (
@@ -169,7 +178,9 @@ def _check_element_geometry(model: FEModel, el: Element, rep: ValidationReport, 
             "BEAM2",
             "TRUSS2D",
         ):
-            rep._add("error", "E_ZERO", f"{el.type} element has (near) zero length", "element", el.id)
+            rep._add(
+                "error", "E_ZERO", f"{el.type} element has (near) zero length", "element", el.id
+            )
     elif el.type == "TRIA3":
         if tria3_area(xyz) <= length_tol**2:
             rep._add("error", "E_ZERO", "TRIA3 element has (near) zero area", "element", el.id)
@@ -202,7 +213,8 @@ def _check_element_geometry(model: FEModel, el: Element, rep: ValidationReport, 
             rep._add(
                 "error",
                 "E_INVERT",
-                f"HEX8 element has non-positive Jacobian at center ({det:.3e}); inverted or collapsed",
+                f"HEX8 element has non-positive Jacobian at center ({det:.3e}); "
+                "inverted or collapsed",
                 "element",
                 el.id,
             )
@@ -285,9 +297,11 @@ def validate_model(model: FEModel, length_tol: float = 1e-12) -> ValidationRepor
 
     for spc in model.spcs:
         if spc.node_id not in model.nodes:
-            rep._add("warning", "W_SPC", f"SPC references undefined node {spc.node_id}", "spc", spc.node_id)
+            msg = f"SPC references undefined node {spc.node_id}"
+            rep._add("warning", "W_SPC", msg, "spc", spc.node_id)
     for load in model.loads:
         if load.node_id not in model.nodes:
-            rep._add("warning", "W_SPC", f"load references undefined node {load.node_id}", "load", load.node_id)
+            msg = f"load references undefined node {load.node_id}"
+            rep._add("warning", "W_SPC", msg, "load", load.node_id)
 
     return rep

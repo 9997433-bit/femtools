@@ -46,7 +46,7 @@ from pathlib import Path
 import numpy as np
 
 from ..core.coords import CoordSys
-from ..core.model import FEModel, comps_to_mask, mask_to_comps
+from ..core.model import FEModel, comps_to_mask
 
 __all__ = ["read_bdf", "write_bdf", "BdfError"]
 
@@ -99,7 +99,9 @@ def _logical_cards(text: str) -> list[list[str]]:
         if upper.startswith("ENDDATA"):
             break
         if upper.startswith("INCLUDE"):
-            warnings.warn("read_bdf: INCLUDE statements are not followed", UserWarning, stacklevel=3)
+            warnings.warn(
+                "read_bdf: INCLUDE statements are not followed", UserWarning, stacklevel=3
+            )
             continue
         head, data = _split_line(line)
         if head == "" or head.startswith("+") or head.startswith("*"):
@@ -203,7 +205,8 @@ def read_bdf(path: str | Path) -> FEModel:
             a = [_f(c, i, 0.0) for i in (3, 4, 5)]
             b = [_f(c, i, 0.0) for i in (6, 7, 8)]
             cc = [_f(c, i, 0.0) for i in (9, 10, 11)]
-            model.add_coord_system(CoordSys.from_points(cid, a, b, cc, type=cstype))  # type: ignore[arg-type]
+            cs = CoordSys.from_points(cid, a, b, cc, type=cstype)  # type: ignore[arg-type]
+            model.add_coord_system(cs)
 
     # -- grids ----------------------------------------------------------------
     pending_ps: list[tuple[int, str]] = []
@@ -229,7 +232,9 @@ def read_bdf(path: str | Path) -> FEModel:
         # Nastran completion rules for the E/G/NU triplet
         if nu is None and e is not None and g is not None and g != 0.0:
             nu = e / (2.0 * g) - 1.0
-        model.add_material(id=mid, type="isotropic", E=e, G=g, nu=nu, rho=rho, alpha=alpha, damping=ge)
+        model.add_material(
+            id=mid, type="isotropic", E=e, G=g, nu=nu, rho=rho, alpha=alpha, damping=ge
+        )
 
     # -- properties ---------------------------------------------------------------
     for c in by_name.pop("PROD", []):
