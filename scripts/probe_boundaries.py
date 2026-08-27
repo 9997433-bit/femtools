@@ -11,6 +11,7 @@ import json
 import sys
 from collections.abc import Callable
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import numpy as np
@@ -182,6 +183,193 @@ def probe_h1() -> dict[str, Any]:
     }
 
 
+def probe_read_inp() -> dict[str, Any]:
+    from femtools.io.inp import read_inp
+
+    deck = """\
+*HEADING
+femtools boundary probe
+*NODE, NSET=ALLNODES
+1, 0, 0, 0
+2, 1, 0, 0
+3, 1, 1, 0
+4, 0, 1, 0
+5, 0, 0, 1
+6, 1, 0, 1
+7, 1, 1, 1
+8, 0, 1, 1
+*ELEMENT, TYPE=C3D8, ELSET=SOLID
+1, 1, 2, 3, 4, 5, 6, 7, 8
+*MATERIAL, NAME=STEEL
+*ELASTIC
+210000000000, 0.3
+*DENSITY
+7850
+*SOLID SECTION, ELSET=SOLID, MATERIAL=STEEL
+*BOUNDARY
+1, 1, 3
+"""
+    with TemporaryDirectory(prefix="femtools-inp-probe-") as tmp:
+        path = Path(tmp) / "cube.inp"
+        path.write_text(deck, encoding="utf-8")
+        loaded = read_inp(path)
+
+    model = getattr(loaded, "model", loaded)
+    if sorted(model.nodes) != list(range(1, 9)) or sorted(model.elements) != [1]:
+        raise AssertionError("INP C3D8 deck did not produce eight nodes and one element")
+    xyz = np.asarray(model.nodes[8].xyz, dtype=float)
+    if not np.array_equal(xyz, np.array([0.0, 1.0, 1.0])):
+        raise AssertionError(f"INP node 8 coordinates were parsed as {xyz}")
+    element = model.elements[1]
+    if tuple(element.nodes) != tuple(range(1, 9)):
+        raise AssertionError(f"INP C3D8 connectivity was parsed as {element.nodes}")
+    if str(element.type).upper() != "HEX8":
+        raise AssertionError(f"INP C3D8 was mapped to {element.type!r}, not HEX8")
+    return {
+        "nodes": len(model.nodes),
+        "elements": len(model.elements),
+        "materials": len(model.materials),
+        "properties": len(model.properties),
+    }
+
+
+def probe_read_k() -> dict[str, Any]:
+    from femtools.io.kfile import read_k
+
+    deck = """\
+*KEYWORD
+*PART
+solid cube
+1, 1, 1, 0, 0, 0, 0, 0
+*SECTION_SOLID
+1, 1
+*MAT_ELASTIC
+1, 7850, 210000000000, 0.3
+*NODE
+1, 0, 0, 0
+2, 1, 0, 0
+3, 1, 1, 0
+4, 0, 1, 0
+5, 0, 0, 1
+6, 1, 0, 1
+7, 1, 1, 1
+8, 0, 1, 1
+*ELEMENT_SOLID
+1, 1, 1, 2, 3, 4, 5, 6, 7, 8
+*BOUNDARY_SPC_NODE
+1, 0, 1, 1, 1, 0, 0, 0
+*END
+"""
+    with TemporaryDirectory(prefix="femtools-k-probe-") as tmp:
+        path = Path(tmp) / "cube.k"
+        path.write_text(deck, encoding="utf-8")
+        loaded = read_k(path)
+
+    model = getattr(loaded, "model", loaded)
+    if sorted(model.nodes) != list(range(1, 9)) or sorted(model.elements) != [1]:
+        raise AssertionError("K ELEMENT_SOLID deck did not produce eight nodes and one element")
+    xyz = np.asarray(model.nodes[7].xyz, dtype=float)
+    if not np.array_equal(xyz, np.array([1.0, 1.0, 1.0])):
+        raise AssertionError(f"K node 7 coordinates were parsed as {xyz}")
+    element = model.elements[1]
+    if tuple(element.nodes) != tuple(range(1, 9)):
+        raise AssertionError(f"K ELEMENT_SOLID connectivity was parsed as {element.nodes}")
+    if str(element.type).upper() != "HEX8":
+        raise AssertionError(f"K ELEMENT_SOLID was mapped to {element.type!r}, not HEX8")
+    return {
+        "nodes": len(model.nodes),
+        "elements": len(model.elements),
+        "materials": len(model.materials),
+        "properties": len(model.properties),
+    }
+
+
+def probe_nmd() -> dict[str, Any]:
+    from femtools.correlation.mac import nmd
+
+    reference = np.array([1.0, 0.0])
+    same = float(np.asarray(nmd(reference, reference)).squeeze())
+    orthogonal = float(np.asarray(nmd(reference, np.array([0.0, 1.0]))).squeeze())
+    diagonal = float(np.asarray(nmd(reference, np.array([1.0, 1.0]))).squeeze())
+    expected = np.array([0.0, 1.0, np.sqrt(0.5)])
+    actual = np.array([same, orthogonal, diagonal])
+    error = float(np.max(np.abs(actual - expected)))
+    if error > 1.0e-12:
+        raise AssertionError(f"NMD sqrt(1-MAC) error is {error:.3e}")
+    return {"values": actual.tolist(), "max_formula_error": error}
+
+
+def probe_ssi_data() -> dict[str, Any]:
+    from femtools.mpe.ssi import ssi_data
+
+    fs = 64.0
+    target_hz = 5.0
+    damping = 0.03
+    time = np.arange(256, dtype=float) / fs
+    omega = 2.0 * np.pi * target_hz
+    omega_d = omega * np.sqrt(1.0 - damping**2)
+    decay = np.exp(-damping * omega * time)
+    data = np.vstack((decay * np.sin(omega_d * time), decay * np.cos(omega_d * time)))
+    result = ssi_data(
+        data,
+        fs=fs,
+        order=2,
+        block_rows=8,
+        stabilization=False,
+        n_modes=1,
+        f_range=(1.0, 12.0),
+        max_damping=0.2,
+    )
+    frequencies = np.asarray(result.freq_hz, dtype=float).reshape(-1)
+    dampings = np.asarray(result.damping, dtype=float).reshape(-1)
+    if frequencies.size != 1 or dampings.size != 1:
+        raise AssertionError(
+            f"SSI-DATA returned {frequencies.size} frequencies and {dampings.size} damping values"
+        )
+    frequency_error = float(abs(frequencies[0] - target_hz) / target_hz)
+    damping_error = float(abs(dampings[0] - damping))
+    if not np.all(np.isfinite(frequencies)) or frequency_error > 0.02:
+        raise AssertionError(f"SSI-DATA frequency error is {frequency_error:.3%}")
+    if not np.all(np.isfinite(dampings)) or damping_error > 0.02:
+        raise AssertionError(f"SSI-DATA damping error is {damping_error:.3e}")
+    return {
+        "frequency_hz": float(frequencies[0]),
+        "damping": float(dampings[0]),
+        "relative_frequency_error": frequency_error,
+    }
+
+
+def probe_parameter_covariance() -> dict[str, Any]:
+    from femtools.updating.uq import parameter_covariance
+
+    jacobian = np.diag([2.0, 4.0])
+    residual_covariance = np.diag([4.0, 9.0])
+    result = parameter_covariance(jacobian, residual_covariance)
+    covariance = np.asarray(getattr(result, "covariance", result), dtype=float)
+    expected = np.diag([1.0, 9.0 / 16.0])
+    error = float(np.max(np.abs(covariance - expected)))
+    if covariance.shape != (2, 2) or error > 1.0e-12:
+        raise AssertionError(f"first-order parameter covariance error is {error:.3e}")
+    return {"diagonal": np.diag(covariance).tolist(), "max_formula_error": error}
+
+
+def probe_modal_strain_energy() -> dict[str, Any]:
+    from femtools.dynamics.energy import modal_strain_energy
+
+    modes = np.eye(2)
+    stiffness = np.diag([2.0, 8.0])
+    result = np.asarray(modal_strain_energy(modes, stiffness), dtype=float).squeeze()
+    half_quadratic = np.array([1.0, 4.0])
+    full_quadratic = 2.0 * half_quadratic
+    half_error = float(np.max(np.abs(result - half_quadratic)))
+    full_error = float(np.max(np.abs(result - full_quadratic)))
+    error = min(half_error, full_error)
+    if result.shape != (2,) or not np.all(np.isfinite(result)) or error > 1.0e-12:
+        raise AssertionError(f"modal strain-energy quadratic-form error is {error:.3e}")
+    convention = "half-quadratic" if half_error <= full_error else "full-quadratic"
+    return {"energy": result.tolist(), "convention": convention}
+
+
 PROBES: tuple[tuple[str, Callable[[], dict[str, Any]]], ...] = (
     ("core_model", probe_core_model),
     ("mac", probe_mac),
@@ -190,6 +378,12 @@ PROBES: tuple[tuple[str, Callable[[], dict[str, Any]]], ...] = (
     ("mock_unv", probe_mock_unv),
     ("guyan", probe_guyan),
     ("h1", probe_h1),
+    ("read_inp", probe_read_inp),
+    ("read_k", probe_read_k),
+    ("nmd", probe_nmd),
+    ("ssi_data", probe_ssi_data),
+    ("parameter_covariance", probe_parameter_covariance),
+    ("modal_strain_energy", probe_modal_strain_energy),
 )
 
 
