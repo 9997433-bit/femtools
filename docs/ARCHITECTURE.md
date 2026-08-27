@@ -34,8 +34,8 @@ never below it. `core` imports only numpy/scipy/pydantic.
 Layer 0  core         FE/test relational database: nodes, elements, materials, properties,
                       SPCs, loads, sets, coordinate systems, units, test geometry, channels
 Layer 1  io           UNV, Nastran BDF, project persistence (.ftproj), driver plug-ins
-Layer 2  fea          element library, DOF management, sparse K/M/C assembly,
-                      static solver, eigensolver (ARPACK), reduction (Guyan/IRS/SEREP: Round 4 in flight)
+Layer 2  fea          element library, DOF management, sparse K/M/C assembly, static solver,
+                      eigensolver (ARPACK), complex modes, reduction (Guyan/IRS/SEREP)
 Layer 3  dynamics     modal & direct FRF, harmonic response, time integration,
                       Craig–Bampton CMS, modal-based assembly, residual vectors
 Layer 4  correlation  MAC/CoMAC/POC, cross-orthogonality, FRF correlation, mode pairing
@@ -172,9 +172,10 @@ ever formed by the framework (dense paths are allowed inside tests and for n < ~
   Dense `scipy.linalg.eigh` is the fallback when `n_modes ≥ n_active - 1` (ARPACK limit).
   Returned modes are **mass-normalized** (`Φᵀ M Φ = I` to 1e-8, enforced by post-scaling and
   verified), frequencies in Hz ascending. Eigenvalues are `ω² [rad²/s²]`.
-* **Reduction (Round 4 in flight — `fea.reduction`, `docs/PRODUCT_MAP.md` R4-wip):** Guyan,
-  IRS, SEREP as explicit transformation-matrix builders reusable by pretest (test-DOF
-  reduction) and correlation (shape expansion).
+* **Reduction (merged Round 4 — `fea.reduction`, `docs/PRODUCT_MAP.md` R4):** Guyan, IRS,
+  SEREP as explicit transformation-matrix builders (`ReductionResult` carries `T` with
+  `K_r = TᵀKT`, `M_r = TᵀMT`) reused by pretest (test-DOF reduction) and correlation
+  (shape expansion via `correlation.expansion.expand_guyan` / `expand_serep`).
 
 ## 8. Result objects
 
@@ -236,26 +237,29 @@ Policy:
    register a formulation object (kernel functions + DOF signature + arity) without touching
    the assembler.
 2. **FE solver drivers.** Vendor interfaces beyond the built-in UNV/BDF translators implement
-   a `SolverDriver` protocol:
+   the `drivers.base.SolverDriver` protocol (merged Round 4, `docs/PRODUCT_MAP.md` R4 —
+   a runtime-checkable PEP 544 `Protocol`, so conformance is structural: any object with
+   the right members qualifies, no registration or subclassing required):
 
    ```python
+   @runtime_checkable
    class SolverDriver(Protocol):
-       name: str                                   # "nastran", "ansys", "abaqus"
-       def import_model(self, path: Path) -> FEModel: ...
-       def export_model(self, model: FEModel, path: Path) -> None: ...
-       def import_modes(self, path: Path) -> ModalResult: ...      # op2 / rst / odb
-       def run(self, model: FEModel, analysis: AnalysisSpec) -> ResultBundle: ...  # optional
+       name: str                              # "nastran-punch", "ansys-cdb", ...
+       def is_available(self) -> bool: ...    # executable/license probe, never raises
+       def write_input(self, model: FEModel, workdir: str | Path) -> Path: ...
+       def run(self, input_file: str | Path, timeout: float | None = None) -> Path: ...
+       def read_modal(self, result_file: str | Path) -> ModalResult: ...
    ```
 
-   Drivers are discovered through the entry-point group `femtools.drivers`, so
-   `pip install femtools-nastran` suffices to add a solver. Round 4 in flight
-   (`docs/PRODUCT_MAP.md` R4-wip): the `drivers.base.SolverDriver` protocol itself plus
-   built-in text-format readers in `femtools.io` — Nastran punch (`.pch`) results and the
-   ANSYS CDB NBLOCK/EBLOCK mesh subset (BDF read/write is built-in since Round 1). Closed
-   binary result dumps (Nastran OP2, ANSYS rst, Abaqus odb) are out of scope (N/A) — the
-   protocol is the extension point for third-party binary drivers; remaining text formats
-   (Abaqus inp, LS-DYNA k) are R5+ plug-ins. Only a driver may depend on vendor formats;
-   results always land as `ModalResult`/`FRFResult`.
+   femtools ships the contract only — no vendor drivers and no proprietary binary
+   parsers. Adapters are built on the text translators of `femtools.io`, which since
+   Round 4 include Nastran punch (`.pch`) results (`read_pch`/`write_pch`) and the
+   ANSYS CDB NBLOCK/EBLOCK mesh subset (`read_cdb`) alongside the Round-1 BDF/UNV
+   read/write. Closed binary result dumps (Nastran OP2, ANSYS rst, Abaqus odb) are out
+   of scope (N/A) — the protocol is the extension point for third-party binary drivers;
+   remaining text formats (Abaqus inp, LS-DYNA k) are R5+ plug-ins. Only a driver may
+   depend on vendor formats; results always land as `ModalResult`/`FRFResult`, and a
+   failed external run raises `SolverError`.
 3. **Parameters for updating/optimization.** Updatable quantities implement a `Parameter`
    protocol (`get(model)`, `set(model, value)`, `bounds`); Round 1 ships E, rho, shell
    thickness, spring stiffness. New parameter types plug in without changes to the estimator.
