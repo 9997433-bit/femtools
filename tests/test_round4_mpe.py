@@ -69,6 +69,7 @@ def test_h1_h2_recover_a_noise_free_linear_filter() -> None:
     use = (frequency >= 2.0) & (frequency <= 100.0)
     np.testing.assert_allclose(h1[use], expected[use], rtol=2.0e-2, atol=2.0e-3)
     np.testing.assert_allclose(h2[use], expected[use], rtol=2.0e-2, atol=2.0e-3)
+    np.testing.assert_allclose(h1[use] / h2[use], gamma2[use], rtol=1.0e-12, atol=1.0e-12)
     assert np.min(gamma2[use]) > 0.995
 
 

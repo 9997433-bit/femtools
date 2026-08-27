@@ -7,10 +7,39 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pytest
 
 from femtools.io import bdf as bdf_module
+from femtools.io import cdb as cdb_module
 from femtools.io import project as project_module
 from femtools.io import unv as unv_module
+
+
+def _cdb_ints(*values: int) -> str:
+    return "".join(f"{value:9d}" for value in values)
+
+
+def _cdb_node(node_id: int, xyz: tuple[float, float, float]) -> str:
+    integers = _cdb_ints(node_id, 0, 0)
+    reals = "".join(f"{value:21.13E}" for value in (*xyz, 0.0, 0.0, 0.0))
+    return integers + reals
+
+
+def _write_cdb(
+    tmp_path: Path,
+    name: str,
+    records: list[str],
+    nodes: dict[int, tuple[float, float, float]],
+) -> Path:
+    node_block = [
+        "NBLOCK,6,SOLID",
+        "(3i9,6e21.13e3)",
+        *(_cdb_node(node_id, xyz) for node_id, xyz in nodes.items()),
+        _cdb_ints(-1),
+    ]
+    path = tmp_path / name
+    path.write_text("\n".join([*records, *node_block, "FINISH", ""]), encoding="utf-8")
+    return path
 
 
 def _assert_basic_model_equal(
@@ -93,3 +122,118 @@ def test_unv_roundtrip_preserves_node_dataset(
 
     # Round 1 UNV explicitly contracts node datasets; element dataset 2412 is not included.
     _assert_basic_model_equal(model, loaded, elements=False)
+
+
+def test_cdb_etblock_alphanumeric_format_maps_element_type(tmp_path: Path) -> None:
+    keyopts = "".join(f"{value:>9}" for value in [*(["0"] * 18), "KEYOPT"])
+    path = _write_cdb(
+        tmp_path,
+        "etblock.cdb",
+        [
+            "ETBLOCK,1",
+            "(2i9,19a9)",
+            _cdb_ints(7, 180) + keyopts,
+            _cdb_ints(-1),
+            "MP,EX,3,2.1E11",
+            "R,4,0.125",
+            "EBLOCK,19",
+            "(19i9)",
+            _cdb_ints(101, 7, 4, 3, 0, 1, 2),
+            _cdb_ints(-1),
+        ],
+        {1: (0.0, 0.0, 0.0), 2: (1.0, 0.0, 0.0)},
+    )
+
+    model = cdb_module.read_cdb(path)
+
+    element = model.elements[101]
+    assert element.type == "BAR2"
+    assert element.nodes == (1, 2)
+    assert model.properties[element.property_id].attrs["ansys_type"] == 180
+
+
+def test_cdb_compact_eblock_inherits_current_attributes(tmp_path: Path) -> None:
+    path = _write_cdb(
+        tmp_path,
+        "compact.cdb",
+        [
+            "ET,4,SOLID185",
+            "MP,EX,6,7.0E10",
+            "TYPE,4",
+            "MAT,6",
+            "REAL,7",
+            "SECNUM,9",
+            "EBLOCK,19,COMPACT",
+            "(19i9)",
+            _cdb_ints(321, *range(11, 19)),
+            _cdb_ints(-1),
+        ],
+        {node_id: (float(node_id), 0.0, 0.0) for node_id in range(11, 19)},
+    )
+
+    model = cdb_module.read_cdb(path)
+
+    element = model.elements[321]
+    prop = model.properties[element.property_id]
+    assert element.type == "HEX8"
+    assert element.nodes == tuple(range(11, 19))
+    assert prop.material_id == 6
+    assert prop.attrs == {"ansys_type": 185, "ansys_real": 7, "ansys_secnum": 9}
+
+
+def test_cdb_rmore_starts_at_real_constant_seven(tmp_path: Path) -> None:
+    path = _write_cdb(
+        tmp_path,
+        "rmore.cdb",
+        [
+            "ET,1,BEAM4",
+            "MP,EX,2,2.1E11",
+            "R,7,0.25,2.0E-4,3.0E-4",
+            "RMORE,99.0,4.0E-4",
+            "TYPE,1",
+            "MAT,2",
+            "REAL,7",
+            "EBLOCK,19,COMPACT",
+            "(19i9)",
+            _cdb_ints(42, 1, 2),
+            _cdb_ints(-1),
+        ],
+        {1: (0.0, 0.0, 0.0), 2: (2.0, 0.0, 0.0)},
+    )
+
+    model = cdb_module.read_cdb(path)
+
+    prop = model.properties[model.elements[42].property_id]
+    assert prop.A == pytest.approx(0.25)
+    assert prop.Iz == pytest.approx(2.0e-4)
+    assert prop.Iy == pytest.approx(3.0e-4)
+    assert prop.J == pytest.approx(4.0e-4)
+
+
+def test_cdb_beam3_uses_area_and_izz_not_height(tmp_path: Path) -> None:
+    path = _write_cdb(
+        tmp_path,
+        "beam3.cdb",
+        [
+            "ET,1,BEAM3",
+            "MP,EX,2,2.1E11",
+            "R,3,0.02,8.0E-6,0.5",
+            "TYPE,1",
+            "MAT,2",
+            "REAL,3",
+            "EBLOCK,19,COMPACT",
+            "(19i9)",
+            _cdb_ints(17, 1, 2),
+            _cdb_ints(-1),
+        ],
+        {1: (0.0, 0.0, 0.0), 2: (1.0, 0.0, 0.0)},
+    )
+
+    with pytest.warns(UserWarning, match="BEAM3 real set"):
+        model = cdb_module.read_cdb(path)
+
+    prop = model.properties[model.elements[17].property_id]
+    assert prop.A == pytest.approx(0.02)
+    assert prop.Iz == pytest.approx(8.0e-6)
+    assert prop.Iy == pytest.approx(8.0e-6)
+    assert prop.J == pytest.approx(1.6e-5)
