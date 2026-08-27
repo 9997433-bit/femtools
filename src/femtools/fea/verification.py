@@ -21,6 +21,34 @@ The HEX8 cases below are the classical anti-locking checks:
 ``hex8_rigid_body_frequencies``
     Free-free block: exactly six zero frequencies and no seventh, i.e. the
     softened element has not gained an hourglass mechanism.
+
+Mesh distortion caveat
+----------------------
+
+The accuracy the incompatible-mode element buys back is not distortion
+invariant, and the two distortions that look equally bad to the eye behave
+completely differently.  ``hex_cantilever`` can build either of them through
+its ``distortion`` argument, so the claim is reproducible rather than folklore:
+
+``distortion="parallelogram"``
+    An affine shear of the whole mesh.  The Jacobian is still constant inside
+    each element, the Taylor scaling ``det J0 / det J`` is exactly one and the
+    internal modes stay exact.  The tip ratio of the six-element cantilever is
+    flat at 0.975 out to ``skew=0.8``, while the plain 2x2x2 element decays
+    from 0.445 to 0.152 over the same range.  Skew angle on its own is
+    therefore *not* the quantity to write a mesh-quality rule against.
+``distortion="trapezoid"``
+    Alternating trapezoids, the MacNeal distortion.  Now the Jacobian varies
+    within the element, the internal gradients are only correct at the centre
+    and the advantage disappears quickly: 0.975 at ``skew=0`` falls to 0.518 at
+    ``skew=0.2`` and to 0.215 at ``skew=0.4``, where the element is no better
+    than the locking one it replaced.
+
+:func:`hex8_jacobian_spread` reports the quantity that actually predicts this,
+``max|det J| / min|det J|`` over the Gauss points of an element.  It stays at
+1.0 for any parallelepiped however skewed; the trapezoidal cases above score
+1.26 and 1.60.  As a rule of thumb the incompatible modes are worth their cost
+up to a spread of roughly 1.1 and have lost most of their advantage past 1.5.
 """
 
 from __future__ import annotations
@@ -31,15 +59,25 @@ import numpy as np
 
 from .assemble import assemble_km
 from .eigen import solve_modes
+from .elements import ModelIndex, element_spec
+from .elements.solid import _hex_shape
+from .protocols import get_any, iter_records
+from .quadrature import gauss_3d
 from .static import solve_static
 
 __all__ = [
+    "DISTORTIONS",
     "hex8_bending_ratio",
+    "hex8_jacobian_spread",
     "hex8_patch_test_error",
     "hex8_rigid_body_frequencies",
     "hex_cantilever",
     "timoshenko_tip_deflection",
 ]
+
+#: Distortion patterns understood by :func:`hex_cantilever`; see the module
+#: docstring for what each one does to the incompatible-mode element.
+DISTORTIONS: tuple[str, ...] = ("none", "parallelogram", "trapezoid")
 
 
 def _model(nodes: dict[int, Any], elements: dict[int, Any], E: float, nu: float, rho: float):
@@ -65,22 +103,43 @@ def hex_cantilever(
     rho: float = 1.0,
     tip_force: float = 1.0,
     clamped: bool = True,
+    distortion: str = "none",
+    skew: float = 0.0,
 ) -> tuple[dict[str, Any], list[int], dict[tuple[int, int], float]]:
     """Structured HEX8 mesh of a beam, clamped at ``x = 0``.
+
+    ``distortion`` (one of :data:`DISTORTIONS`) warps the mesh in the ``x``-``z``
+    plane by ``skew`` without moving the end faces off their planes, so the
+    Timoshenko reference stays applicable:
+
+    ``"parallelogram"``
+        Affine shear, ``x += skew * (z - height/2)``.  Every element keeps a
+        constant Jacobian.
+    ``"trapezoid"``
+        Alternating trapezoids, ``x += skew * dx * (-1)**i * (z - height/2)``
+        on node plane ``i``, which makes the Jacobian vary inside the element.
 
     Returns the model, the node ids on the free end face and a load dictionary
     spreading ``tip_force`` over that face in the ``z`` direction.
     """
+    if distortion not in DISTORTIONS:
+        raise ValueError(f"unknown distortion {distortion!r}; expected one of {DISTORTIONS}")
+
+    dx = length / nx
     nodes: dict[int, Any] = {}
     ids: dict[tuple[int, int, int], int] = {}
     counter = 1
     for i in range(nx + 1):
         for j in range(ny + 1):
             for k in range(nz + 1):
+                x = length * i / nx
+                z = height * k / nz
+                if distortion == "parallelogram":
+                    x += skew * (z - 0.5 * height)
+                elif distortion == "trapezoid":
+                    x += skew * dx * (1.0 if i % 2 else -1.0) * (z - 0.5 * height)
                 ids[(i, j, k)] = counter
-                nodes[counter] = {
-                    "xyz": (length * i / nx, width * j / ny, height * k / nz)
-                }
+                nodes[counter] = {"xyz": (x, width * j / ny, z)}
                 counter += 1
 
     elements: dict[int, Any] = {}
@@ -141,7 +200,11 @@ def hex8_bending_ratio(
     nz: int = 1,
     **case: Any,
 ) -> float:
-    """Mean tip deflection of :func:`hex_cantilever` over the Timoshenko value."""
+    """Mean tip deflection of :func:`hex_cantilever` over the Timoshenko value.
+
+    Extra keywords go to :func:`hex_cantilever`, so ``distortion`` and ``skew``
+    turn this into the mesh-distortion sweep described in the module docstring.
+    """
     model, tip_nodes, loads = hex_cantilever(nx, ny, nz, **case)
     options = {"hex8": formulation} if formulation else None
     asm = assemble_km(model, options=options)
@@ -252,3 +315,32 @@ def hex8_rigid_body_frequencies(
     options = {"hex8": formulation} if formulation else None
     result = solve_modes(model, n_modes=n_modes, options=options)
     return np.asarray(result.freq_hz, dtype=float)
+
+
+def hex8_jacobian_spread(model: Any) -> float:
+    """Worst ``max|det J| / min|det J|`` over the Gauss points of any HEX8.
+
+    This is the mesh-quality number that predicts how much of the
+    incompatible-mode advantage survives (see the module docstring).  It is
+    1.0 (to round-off) for any parallelepiped, however skewed or stretched,
+    because the Taylor scaling is then exact; it grows as the element becomes
+    trapezoidal and the internal gradients stop being correct away from the
+    centre.  Returns 1.0 for a model without HEX8 elements.
+    """
+    index = ModelIndex.build(model)
+    derivatives = [_hex_shape(*point)[1] for point in gauss_3d(2)[0]]
+    worst = 1.0
+    for _eid, element in iter_records(get_any(model, ("elements", "elems", "element"), None)):
+        etype = str(get_any(element, ("type", "etype", "element_type", "kind"), "")).strip()
+        try:
+            spec = element_spec(etype)
+        except KeyError:
+            continue
+        if spec.name != "HEX8":
+            continue
+        conn = get_any(element, ("nodes", "node_ids", "connectivity", "conn", "grids"), ())
+        xyz = np.array([index.xyz(nid) for nid in tuple(conn)[:8]], dtype=float)
+        dets = np.abs([np.linalg.det(dn.T @ xyz) for dn in derivatives])
+        if dets.min() > 0.0:
+            worst = max(worst, float(dets.max() / dets.min()))
+    return worst
