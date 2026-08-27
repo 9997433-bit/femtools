@@ -42,6 +42,7 @@ from .responses import (
     modal_response_function,
     pair_by_mac,
 )
+from .selection import ParameterSelection, parameter_correlation, select_parameters
 from .sensitivity import (
     SensitivityResult,
     analytic_frequency_sensitivity,
@@ -60,6 +61,10 @@ __all__ = [
     "analytic_frequency_sensitivity",
     "eigenvector_sensitivity",
     "relative_sensitivity",
+    # parameter selection
+    "select_parameters",
+    "ParameterSelection",
+    "parameter_correlation",
     # updating
     "update_model",
     "UpdateResult",
