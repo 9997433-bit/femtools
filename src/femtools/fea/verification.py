@@ -53,6 +53,7 @@ up to a spread of roughly 1.1 and have lost most of their advantage past 1.5.
 
 from __future__ import annotations
 
+import warnings
 from typing import Any
 
 import numpy as np
@@ -79,6 +80,8 @@ __all__ = [
     "hex_cantilever",
     "reduction_frequency_errors",
     "serep_slave_recovery",
+    "shell_plate",
+    "shell_drilling_orientation_gap",
     "timoshenko_tip_deflection",
 ]
 
@@ -509,6 +512,109 @@ def complete_spectrum_quality(n_elements: int = 16) -> dict[str, float]:
         ),
         "condition": float(lam.max() / lam.min()),
     }
+
+
+def shell_plate(
+    nx: int = 3,
+    ny: int = 3,
+    *,
+    etype: str = "QUAD4",
+    side: float = 1.0,
+    thickness: float = 0.01,
+    E: float = 70.0e9,
+    nu: float = 0.3,
+    rho: float = 2700.0,
+    rotation: np.ndarray | None = None,
+    clamped_edge: bool = False,
+) -> dict[str, Any]:
+    """Flat square shell mesh, in the global x-y plane unless *rotation* says otherwise.
+
+    ``rotation`` is a ``(3, 3)`` orthogonal matrix applied to every node, which
+    turns the same structure into a mesh whose normal is no longer a global
+    axis -- the configuration :func:`shell_drilling_orientation_gap` measures.
+    ``etype`` is ``"QUAD4"`` or ``"TRIA3"`` (each cell split into two triangles).
+    """
+    ids: dict[tuple[int, int], int] = {}
+    nodes: dict[int, Any] = {}
+    counter = 1
+    R = None if rotation is None else np.asarray(rotation, dtype=float)
+    for i in range(nx + 1):
+        for j in range(ny + 1):
+            point = np.array([side * i / nx, side * j / ny, 0.0])
+            if R is not None:
+                point = R @ point
+            ids[(i, j)] = counter
+            nodes[counter] = {"xyz": tuple(point)}
+            counter += 1
+
+    elements: dict[int, Any] = {}
+    eid = 1
+    for i in range(nx):
+        for j in range(ny):
+            n1, n2, n3, n4 = ids[(i, j)], ids[(i + 1, j)], ids[(i + 1, j + 1)], ids[(i, j + 1)]
+            if str(etype).upper() == "TRIA3":
+                for conn in ((n1, n2, n3), (n1, n3, n4)):
+                    elements[eid] = {"type": "TRIA3", "property_id": 1, "nodes": conn}
+                    eid += 1
+            else:
+                elements[eid] = {"type": "QUAD4", "property_id": 1, "nodes": (n1, n2, n3, n4)}
+                eid += 1
+
+    spcs: list[Any] = []
+    if clamped_edge:
+        spcs = [
+            {"node_id": ids[(0, j)], "dofs": (0, 1, 2, 3, 4, 5)} for j in range(ny + 1)
+        ]
+    return {
+        "nodes": nodes,
+        "elements": elements,
+        "materials": {1: {"E": E, "nu": nu, "rho": rho}},
+        "properties": {1: {"type": "shell", "material_id": 1, "t": thickness}},
+        "spcs": spcs,
+    }
+
+
+#: Rotation used by :func:`shell_drilling_orientation_gap`: a plate normal that
+#: is deliberately not parallel to any global axis.
+_OBLIQUE = np.linalg.qr(
+    np.array([[0.8, 0.3, -0.5], [-0.2, 0.9, 0.4], [0.6, -0.1, 0.7]])
+)[0]
+
+
+def shell_drilling_orientation_gap(
+    etype: str = "QUAD4", *, nx: int = 3, ny: int = 3, n_modes: int = 9
+) -> dict[str, float]:
+    """How the free-free spectrum of one flat plate depends on its orientation.
+
+    A flat shell has no genuine stiffness about its own normal, so ``TRIA3`` and
+    ``QUAD4`` add a rank deficient drilling penalty and the assembler drops the
+    drilling DOFs that receive nothing else.  Dropping them is only possible
+    while the normal *is* a global axis; for any other orientation the drilling
+    direction is a mix of ``rx``, ``ry`` and ``rz``, nothing can be dropped, and
+    the mesh keeps a zero-energy drilling mechanism that reads as a seventh
+    rigid body mode.  ``assemble_km`` warns when it detects that, and this
+    function is the reproduction behind the warning.
+
+    Returns the number of (near) zero frequencies and the first elastic
+    frequency for the axis-aligned and the rotated copy of the same plate.  The
+    elastic frequencies agree to round-off -- only the count of zeros differs,
+    which is what makes the extra mode diagnosable rather than merely wrong.
+    """
+    out: dict[str, float] = {}
+    for label, rotation in (("aligned", None), ("oblique", _OBLIQUE)):
+        model = shell_plate(nx, ny, etype=etype, rotation=rotation)
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            asm = assemble_km(model)
+        result = solve_modes(model, n_modes=n_modes, assembly=asm)
+        freq = np.asarray(result.freq_hz, dtype=float)
+        elastic = freq[freq > 1.0e-6 * max(freq.max(), 1.0)]
+        out[f"{label}_zero_modes"] = float(freq.size - elastic.size)
+        out[f"{label}_first_elastic_hz"] = float(elastic[0]) if elastic.size else float("nan")
+        out[f"{label}_free_dof"] = float(asm.n_free)
+        out[f"{label}_drilling_dof"] = float(asm.drilling_dof.size)
+        out[f"{label}_warned"] = float(len(caught))
+    return out
 
 
 def hex8_jacobian_spread(model: Any) -> float:

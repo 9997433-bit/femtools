@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from typing import Any
@@ -150,6 +151,54 @@ def _row_norms(matrix: sp.csr_matrix) -> np.ndarray:
     return np.asarray(abs(matrix).sum(axis=1)).ravel()
 
 
+def _retained_drilling_mechanism(
+    K: sp.csr_matrix,  # noqa: N803
+    K_drill: sp.csr_matrix,  # noqa: N803
+    free_mask: np.ndarray,
+    dofs_per_node: int,
+    k_scale: float,
+) -> bool:
+    """Is a fictitious drilling rotation still a zero-energy mode of the free set?
+
+    The drilling penalty is rank deficient on purpose: rotating a whole element
+    about its own normal has to stay free, or the rigid body modes would be
+    lost.  On a *flat* mesh those per-element null spaces line up into one
+    global mechanism, which is what the elimination above exists to remove --
+    but eliminating works only while the shell normal *is* a global axis.  For
+    any other orientation the drilling direction is a combination of ``rx``,
+    ``ry`` and ``rz``, no whole DOF can be dropped without taking a genuine
+    bending rotation with it, and the mechanism survives as a phantom seventh
+    rigid body mode.
+
+    Rebuild that candidate mechanism -- every drilling node rotating by the
+    common normal -- and measure its strain energy, so the case is reported
+    instead of being returned as a zero frequency.  A folded or curved shell
+    has no common normal, the candidate is not a null vector and the test stays
+    quiet.
+    """
+    if dofs_per_node < 6:
+        return False
+    rotations = np.arange(K.shape[0]).reshape(-1, dofs_per_node)[:, 3:6]
+    weight = np.abs(K_drill.diagonal())[rotations].sum(axis=1)
+    if not weight.any():
+        return False
+
+    # Every nodal block of the penalty is a multiple of ``n n^T``, so the
+    # dominant eigenvector of the busiest one is the drilling direction.
+    lead = rotations[int(np.argmax(weight))]
+    block = K_drill[lead, :][:, lead].toarray()
+    normal = np.linalg.eigh(0.5 * (block + block.T))[1][:, -1]
+
+    v = np.zeros(K.shape[0])
+    active = rotations[weight > 0.0]
+    v[active.ravel()] = np.tile(normal, active.shape[0])
+    v[~free_mask] = 0.0
+    norm = float(v @ v)
+    if norm == 0.0:
+        return False
+    return abs(float(v @ (K @ v))) <= 1.0e-12 * k_scale * norm
+
+
 def assemble_km(
     model: Any,
     *,
@@ -231,8 +280,6 @@ def assemble_km(
                 skipped[eid] = str(exc)
                 continue
             if on_unknown == "warn":
-                import warnings
-
                 warnings.warn(str(exc), RuntimeWarning, stacklevel=2)
                 skipped[eid] = str(exc)
                 continue
@@ -309,6 +356,20 @@ def assemble_km(
         drill_mask &= ~spc_mask & ~null_mask
 
     free_mask = ~(spc_mask | null_mask | drill_mask)
+    if (
+        suppress_drilling
+        and K_drill.nnz
+        and _retained_drilling_mechanism(K, K_drill, free_mask, dofs_per_node, k_scale)
+    ):
+        warnings.warn(
+            "this flat shell mesh keeps a fictitious drilling mechanism: its normal is "
+            "not a global axis, so the drilling rotations cannot be removed one DOF at a "
+            "time and the assembly carries a spurious zero-energy mode (it surfaces as an "
+            "extra zero frequency alongside the six rigid body modes). Model the mesh in a "
+            "plane spanned by two global axes, or constrain one drilling rotation.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return AssemblyResult(
         K=K,
         M=M,
