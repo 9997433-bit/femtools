@@ -266,19 +266,27 @@ poles exactly as §1/§3: conjugate pairs, $\mathrm{Re}\,\lambda < 0$, $\zeta$ w
 run a stabilization sweep over orders when requested.
 
 ```python
-ssi_cov(data, fs, *, order=8, n_modes=None, n_block_rows=None, ...) -> ModalParameterResult
-# data (n_ch, n_samples); order = pole PAIRS (state dimension 2*order), matching
-# lsce's convention; n_modes optionally trims to the dominant modes (lsce has the
-# same kwarg and tests/test_round4_mpe.py passes it); n_block_rows i defaults to
-# max(20, 4*order) and must satisfy i >= 2*order/n_ch; i/fs should span ~half a
-# period of the lowest mode.
+ssi_cov(data, fs, *, order=None, n_modes=None, block_rows=None, orders=None,
+        f_range=None, stabilization=True, weighting="none", ref_channels=None,
+        ...) -> ModalParameterResult
+# data (n_ch, n_samples); order = STATE dimension (2x the number of mode pairs;
+# NOTE: differs from lsce, whose order counts pole pairs), default 2*n_modes + 10;
+# with stabilization=True (default) the identification sweeps orders 2..order and
+# keeps the poles that stabilize, so give order 2-3x headroom over the physical
+# state count; n_modes trims to the most persistent/dominant modes and f_range
+# gates the acceptance band; block_rows i defaults to max(10, ceil(2*order/n_ref))
+# and must satisfy i*n_ref >= order; i/fs should span ~half a period of the lowest
+# mode.
 ```
 
 Returns the shared `mpe.common.ModalParameterResult` (ascending `freq_hz`, `damping`,
-`mode_shapes (n_ch, n_modes)`). Measured reference (3-mode chain, 600 s at 64 Hz, 2 %
-output noise, `order=6`): frequency errors ≤ 0.04 %, damping errors ≤ 9 %, MAC vs truth
-≥ 0.9997, two spurious poles cleanly rejected by the ζ-window + nearest-frequency match
-(acceptance case 20 allows 2 % / 50 %).
+`mode_shapes (n_ch, n_modes)`). Measured against the merged kernel (3-mode chain, 600 s
+at 64 Hz, 2 % output noise, `order=20, n_modes=3, f_range=(1, 12)` in
+`examples/h1_ssi.py`): frequency errors ≤ 0.10 %, damping errors ≤ 11 %, MAC vs truth
+≥ 0.9998, spurious poles rejected by the stabilization sweep + ζ-window +
+nearest-frequency match (acceptance case 20 allows 2 % / 50 %). The bare-minimum
+`order=6` is a trap: it leaves the sweep only orders {2, 4, 6} and the clustering
+returns a single stabilized pole.
 
 Pitfalls: shapes are **unscaled** (no mass normalization without known inputs — same
 caveat as FDD §2); overspecify the order 2–3× and rely on stabilization, exactly like

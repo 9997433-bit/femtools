@@ -5,15 +5,15 @@ checks against. Tests live in `tests/` (owner R1-G1/R2-G1); recommended test ids
 failures map back here. Conventions: $c = \sqrt{E/\rho}$ (bar wave speed), $f = \omega/2\pi$,
 all modes mass-normalized ($\Phi^\top M \Phi = I$).
 
-## Measured status (merged tree, 2026-08-27)
+## Measured status (merged tree, 2026-08-27, Round-5 re-run)
 
-Verified by running the five Round-1–3 examples (5/5 PASS, re-confirmed 2026-08-27) and
-`pytest tests/` against the merged `cursor/femtools-sota-d551` tree (21 passed, 3 perf
-skips). The three Round-4 examples (`guyan_serep.py`, `cms_rubin.py`, `h1_ssi.py`) are
-written against the frozen-but-unlanded R4 kernels and are expected to fail with
-`ModuleNotFoundError` until those merge — see the Round-4 block below. Checked = measured
-passing with the quoted numbers; unchecked = not yet exercised by a test or example on
-this tree.
+Verified by running all eight `examples/*.py` (8/8 PASS) and `pytest tests/` (65 passed,
+3 perf skips) against the merged `cursor/femtools-remaining-d551` tree with the real
+Round-4 kernels landed. The three Round-4 examples (`guyan_serep.py`, `cms_rubin.py`,
+`h1_ssi.py`) now run against `femtools.fea.reduction`, `femtools.dynamics.cms_free`,
+`femtools.mpe.frf_estimation` and `femtools.mpe.ssi` — see the Round-4 block below.
+Checked = measured passing with the quoted numbers; unchecked = not yet exercised by a
+test or example on this tree.
 
 - [x] **1a** axial bar, 2-node discrete — `tests/test_golden_fea.py::test_two_node_axial_bar_frequency` green
 - [ ] **1b** axial bar N-element dispersion — no test/example yet
@@ -54,16 +54,23 @@ this tree.
       **0.9855** with the default incompatible modes (tol > 0.95) vs **0.6428** with `"full"`;
       distorted patch test **5.0e-16** (tol 1e-10); free–free block exactly 6 rigid-body modes
 
-Round-4 cases (17–20, added 2026-08-27): the examples exist and their scaffolding was
-dry-run against throwaway reference implementations of the frozen APIs (measured numbers
-quoted in §9), but the real kernels (R4-O1/O2/O4) have not landed on this tree yet, so
-`examples/guyan_serep.py`, `examples/cms_rubin.py` and `examples/h1_ssi.py` currently exit
-with `ModuleNotFoundError` — expected until the sibling branches merge.
+Round-4 cases (17–20): measured 2026-08-27 by running the three Round-4 examples against
+the real merged kernels (R4-O1/O2/O4). The numbers below supersede the dry-run figures
+that were previously quoted from throwaway reference implementations.
 
-- [ ] **17** Guyan/IRS/SEREP — `examples/guyan_serep.py` written; awaiting `femtools.fea.reduction`
-- [ ] **18** free-interface CMS — `examples/cms_rubin.py` written; awaiting `femtools.dynamics.cms_free`
-- [ ] **19** H1/H2/coherence — `examples/h1_ssi.py` part 1; awaiting `femtools.mpe.frf_estimation`
-- [ ] **20** SSI-cov — `examples/h1_ssi.py` part 2; awaiting `femtools.mpe.ssi`
+- [x] **17** Guyan/IRS/SEREP — `examples/guyan_serep.py` PASS (6/6 checks): Guyan static
+      exactness **9.7e-13** (tol 1e-8); SEREP freq **2.3e-13** / shape recon **7.4e-16**
+      (tol 1e-6 / 1e-8); Guyan upper bound margin **+1.05e-2 Hz**, mean rel err Guyan
+      1.35e-2 → IRS **3.78e-4**
+- [x] **18** free-interface CMS — `examples/cms_rubin.py` PASS (3/3 checks): first 4
+      coupled modes vs unsplit reference, Rubin **1.85e-7** (tol 1e-2), MacNeal
+      **7.71e-5** (tol 3e-2), Craig–Bampton baseline **2.93e-5** (tol 1e-2)
+- [x] **19** H1/H2/coherence — `examples/h1_ssi.py` part 1 PASS: max |H1|/|H2| **0.9996**
+      (≤ 1), γ² identity dev **6.7e-16**, median coherence 0.961, H1 vs ZOH-exact FRF
+      median rel err **4.2 %** (tol 10 %), all three |H1| peaks within tolerance
+- [x] **20** SSI-cov — `examples/h1_ssi.py` part 2 PASS: 3/3 poles from the
+      stabilisation sweep (`order=20, n_modes=3`), rel f err ≤ **0.10 %** (tol 2 %),
+      rel ζ err ≤ **11 %** (tol 50 %), MAC ≥ **0.9998** (tol > 0.9)
 
 ## 0. Master table
 
@@ -275,9 +282,9 @@ ramp-invariant recurrence is exact for piecewise-linear loads.
 ## 9. Round-4 goldens (reduction, free-interface CMS, H1/H2, SSI-cov)
 
 Constructions live in the three Round-4 examples; every "measured" number below was
-obtained by dry-running them against straight-from-the-literature reference
-implementations of the frozen APIs (2026-08-27), so they are targets for the real
-kernels, not yet regression facts.
+obtained by running them against the real merged kernels on
+`cursor/femtools-remaining-d551` (2026-08-27), so they are regression facts for this
+tree.
 
 ### 9.1 Reduction (case 17, `examples/guyan_serep.py`)
 
@@ -296,13 +303,18 @@ compared on the 6 lowest (all-bending) modes; formulas in `fea.md` §9.
 ### 9.2 Free-interface CMS (case 18, `examples/cms_rubin.py`)
 
 Fixed–fixed 20×BEAM2 beam split at midspan into two 10-element supported components
-(A clamped at $x=0$, B at $x=L$), 8 kept free-interface modes + 6 interface DOFs each,
-coupled primally on the shared node and solved with QZ (MacNeal's interface mass block is
-singular — see `dynamics.md` §9.1). Reference: the unsplit model, which itself matches
-the analytic $\cosh\beta L\cos\beta L = 1$ roots (4.7300407449, 7.8532046241, …) to
-example precision. Measured max rel err on the first 4 coupled modes: Rubin **1.9e-7**
-(tol 1e-2), MacNeal **7.7e-5** (tol 3e-2), Craig–Bampton baseline 2.9e-5 through the
-same harness.
+(A clamped at $x=0$, B at $x=L$), 8 kept free-interface modes + 6 interface DOFs each.
+The `FreeCMSResult` generalized coordinates are [kept modes..., residual modes...] (no
+physical DOF among them), so Rubin/MacNeal components are coupled with
+`cms_free.free_interface_assembly`: rigid ties on the 6 shared *physical* interface
+DOFs, eliminated through the null space of the compatibility matrix, with MacNeal's
+massless residual block condensed statically (see `dynamics.md` §9.1). The
+Craig–Bampton baseline, whose reduced coordinates do start with the physical boundary
+DOFs, is assembled primally on the shared node and solved with QZ. Reference: the
+unsplit model, which itself matches the analytic $\cosh\beta L\cos\beta L = 1$ roots
+(4.7300407449, 7.8532046241, …) to example precision. Measured max rel err on the first
+4 coupled modes: Rubin **1.85e-7** (tol 1e-2), MacNeal **7.71e-5** (tol 3e-2),
+Craig–Bampton baseline **2.93e-5** (tol 1e-2).
 
 ### 9.3 H1/H2/coherence (case 19, `examples/h1_ssi.py` part 1)
 
@@ -310,7 +322,7 @@ same harness.
 ZOH-exact simulation at 64 Hz for 1200 s, seeded white-noise force at DOF 1, 10 % output
 noise; Welch `nperseg=8192` (17 averages, ≥ 17 lines across each half-power band).
 Identities pinned on the 1–12 Hz band: $\max |H_1|/|H_2| \le 1$ (measured 0.9996) and
-$\max|\gamma^2 - |H_1|/|H_2||$ ≤ 1e-8 nominal (measured 7.8e-16 — any visible deviation
+$\max|\gamma^2 - |H_1|/|H_2||$ ≤ 1e-8 nominal (measured 6.7e-16 — any visible deviation
 means inconsistent segmentation between the three estimators). Accuracy: median complex
 error vs the **ZOH-exact discrete FRF** < 10 % (measured 4.2 %); vs the continuous
 receptance only magnitudes are comparable (half-sample delay — measured 3.0 % median
@@ -320,10 +332,14 @@ $\max(2\,df,\ 1.5\%)$ of the true frequency.
 ### 9.4 SSI-cov (case 20, `examples/h1_ssi.py` part 2)
 
 Output-only records from `femtools.mpe.synthetic.synthetic_response` (same chain shapes,
-600 s at 64 Hz, seed 11, 2 % noise), `ssi_cov(..., order=6)` → nearest-frequency match to
-truth. Gates: rel frequency error < 2 % (measured ≤ 4e-4), rel damping error < 50 %
-(measured ≤ 9 %), MAC > 0.9 when shapes are returned (measured ≥ 0.9997). Spurious poles
-(2 at order 6) must be tolerated by the matching, not fatal.
+600 s at 64 Hz, seed 11, 2 % noise), `ssi_cov(..., order=20, n_modes=3, f_range=(1, 12))`
+→ nearest-frequency match to truth. `ssi_cov` sweeps model orders up to `order` and keeps
+the poles that stabilise across orders, so `order` needs headroom above the 6 physical
+states (the bare-minimum `order=6` leaves too few sweep points and the stabilisation
+clustering returns a single pole). Gates: rel frequency error < 2 % (measured ≤ 1.0e-3),
+rel damping error < 50 % (measured ≤ 11 %), MAC > 0.9 when shapes are returned (measured
+≥ 0.9998). Spurious poles are rejected by the sweep and the `n_modes`/`f_range`
+selection, and the nearest-frequency matching tolerates any that remain.
 
 ## 10. Determinism requirements (all tests)
 
