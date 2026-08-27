@@ -158,6 +158,30 @@ def _m_orthonormalize(X: np.ndarray, M: sp.spmatrix) -> np.ndarray:
     return X @ (V[:, keep] / np.sqrt(w[keep]))
 
 
+def _augment(X: np.ndarray, Y: np.ndarray, M: sp.spmatrix, tol: float = 1.0e-8) -> np.ndarray:
+    """Extend the ``M``-orthonormal basis ``X`` with the new content of ``Y``.
+
+    A column of ``Y`` is only admitted when the part of it that is ``M``-
+    orthogonal to ``X`` is a non-negligible fraction of the column itself.
+    Without that test the round-off left over from an already converged
+    direction would be renormalised into a unit vector of pure noise.
+    """
+    if Y.size == 0:
+        return X
+    before = np.sqrt(np.abs(np.einsum("ij,ij->j", Y, M @ Y)))
+    # Two Gram-Schmidt passes: the shift-invert image is dominated by the
+    # lowest modes by nine decades, so one pass does not leave Y numerically
+    # M-orthogonal to X.
+    for _ in range(2):
+        Y = Y - X @ (X.T @ (M @ Y))
+    after = np.sqrt(np.abs(np.einsum("ij,ij->j", Y, M @ Y)))
+    keep = after > tol * np.maximum(before, np.finfo(float).tiny)
+    if not keep.any():
+        return X
+    new = _m_orthonormalize(Y[:, keep], M)
+    return np.hstack([X, new]) if new.shape[1] else X
+
+
 def _rayleigh_ritz_refine(
     K: sp.csr_matrix,
     M: sp.csr_matrix,
@@ -174,6 +198,13 @@ def _rayleigh_ritz_refine(
     enriching the ARPACK basis with a few inverse-iterated random vectors is a
     monotone improvement.  In practice this is what recovers the members of a
     repeated cluster (rigid body modes) that ARPACK occasionally drops.
+
+    Each sweep spans the *union* of the current basis and its shift-inverted
+    image rather than replacing one with the other.  Replacing would be fatal
+    for a free-free model: shift-invert maps the rigid body modes to
+    ``1 / |sigma|``, nine decades above the elastic spectrum, so after two or
+    three sweeps every column has converged onto the six rigid body modes and
+    the elastic modes are lost to the rank tolerance.
     """
     n = K.shape[0]
     if n_pad > 0:
@@ -182,19 +213,22 @@ def _rayleigh_ritz_refine(
         X = np.hstack([vecs, pad])
     else:
         X = vecs.copy()
-    X = _m_orthonormalize(X, M)
+    Z = _m_orthonormalize(X, M)
+    budget = int(min(n, max(2 * Z.shape[1], n_req + 8)))
     for _ in range(max(1, iterations)):
-        X = solve_shifted(M @ X)
-        X = _m_orthonormalize(X, M)
-        if X.shape[1] == 0:
+        if Z.shape[1] == 0 or Z.shape[1] >= budget:
             break
-        Kr = X.T @ (K @ X)
-        w, S = np.linalg.eigh(0.5 * (Kr + Kr.T))
-        X = X @ S
-    take = min(n_req, X.shape[1])
-    Kr = X.T @ (K @ X)
-    w = np.linalg.eigvalsh(0.5 * (Kr + Kr.T))
-    return w[:take], X[:, :take]
+        Z = _augment(Z, solve_shifted(M @ Z), M)
+    # The Ritz projection below assumes ``Z.T M Z == I``; re-orthonormalise so
+    # that a loss of orthogonality during the sweeps cannot manufacture Ritz
+    # values outside the spectrum of the pencil.
+    Z = _m_orthonormalize(Z, M)
+    if Z.shape[1] == 0:
+        return np.zeros(0), Z
+    Kr = Z.T @ (K @ Z)
+    w, S = np.linalg.eigh(0.5 * (Kr + Kr.T))
+    take = min(n_req, Z.shape[1])
+    return w[:take], (Z @ S)[:, :take]
 
 
 def _dense_shift_invert(
