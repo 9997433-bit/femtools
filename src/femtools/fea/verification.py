@@ -59,7 +59,9 @@ import numpy as np
 
 from .assemble import assemble_km
 from .eigen import solve_modes
+from .elements import ModelIndex, element_spec
 from .elements.solid import _hex_shape
+from .protocols import get_any, iter_records
 from .quadrature import gauss_3d
 from .static import solve_static
 
@@ -325,23 +327,19 @@ def hex8_jacobian_spread(model: Any) -> float:
     trapezoidal and the internal gradients stop being correct away from the
     centre.  Returns 1.0 for a model without HEX8 elements.
     """
-    points, _ = gauss_3d(2)
-    derivatives = [_hex_shape(*point)[1] for point in points]
-    nodes = model["nodes"] if isinstance(model, dict) else model.nodes
-    elements = model["elements"] if isinstance(model, dict) else model.elements
+    index = ModelIndex.build(model)
+    derivatives = [_hex_shape(*point)[1] for point in gauss_3d(2)[0]]
     worst = 1.0
-    for element in (elements.values() if hasattr(elements, "values") else elements):
-        etype = element["type"] if isinstance(element, dict) else element.type
-        if str(etype).strip().upper() not in {"HEX8", "CHEXA", "HEXA8", "HEX", "BRICK8"}:
+    for _eid, element in iter_records(get_any(model, ("elements", "elems", "element"), None)):
+        etype = str(get_any(element, ("type", "etype", "element_type", "kind"), "")).strip()
+        try:
+            spec = element_spec(etype)
+        except KeyError:
             continue
-        conn = element["nodes"] if isinstance(element, dict) else element.nodes
-        xyz = np.array(
-            [
-                nodes[nid]["xyz"] if isinstance(nodes[nid], dict) else nodes[nid].xyz
-                for nid in conn[:8]
-            ],
-            dtype=float,
-        )
+        if spec.name != "HEX8":
+            continue
+        conn = get_any(element, ("nodes", "node_ids", "connectivity", "conn", "grids"), ())
+        xyz = np.array([index.xyz(nid) for nid in tuple(conn)[:8]], dtype=float)
         dets = np.abs([np.linalg.det(dn.T @ xyz) for dn in derivatives])
         if dets.min() > 0.0:
             worst = max(worst, float(dets.max() / dets.min()))
