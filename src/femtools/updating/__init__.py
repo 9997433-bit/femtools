@@ -5,11 +5,19 @@ Public entry points (see ``docs/CONTRACT_API.md``)::
     from femtools.updating.sensitivity import sensitivity_matrix
     from femtools.updating.updater import update_model, UpdateResult
     from femtools.updating.force_id import identify_harmonic_forces
+    from femtools.updating.frf_updating import update_from_frf
+    from femtools.updating.selection import select_parameters
 """
 
 from __future__ import annotations
 
 from .force_id import ForceIdResult, identify_harmonic_forces, tikhonov_solve
+from .frf_updating import (
+    frf_residual,
+    frf_sample_function,
+    modal_frf_samples,
+    update_from_frf,
+)
 from .parameters import (
     Parameter,
     ParameterSet,
@@ -56,6 +64,11 @@ __all__ = [
     "update_model",
     "UpdateResult",
     "UpdateOptions",
+    # FRF-based updating
+    "update_from_frf",
+    "frf_sample_function",
+    "modal_frf_samples",
+    "frf_residual",
     # force identification
     "identify_harmonic_forces",
     "ForceIdResult",
