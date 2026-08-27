@@ -4,7 +4,10 @@ Supported cards (Round 1 subset):
 
 * geometry: ``GRID`` (CP/CD/PS honoured), ``CORD2R``, ``CORD2C``, ``CORD2S``
 * elements: ``CROD``, ``CBAR``, ``CBEAM``, ``CTRIA3``, ``CQUAD4``,
-  ``CTETRA`` (4-node), ``CHEXA`` (8-node), ``CONM2``, ``CELAS2``, ``CDAMP2``
+  ``CTETRA`` (4-node), ``CHEXA`` (8-node), ``CONM2``, ``CELAS2``, ``CDAMP2``.
+  10-node ``CTETRA`` / 20-node ``CHEXA`` are accepted with a ``UserWarning``
+  (one aggregated warning per card type, never an error): midside nodes are
+  dropped and the element degrades to its linear corner form.
 * properties: ``PROD``, ``PBAR``, ``PBEAM`` (first station), ``PSHELL``,
   ``PSOLID``
 * materials: ``MAT1``
@@ -46,13 +49,15 @@ from pathlib import Path
 import numpy as np
 
 from ..core.coords import CoordSys
+from ..core.errors import FileFormatError
 from ..core.model import FEModel, comps_to_mask
 
 __all__ = ["read_bdf", "write_bdf", "BdfError"]
 
 
-class BdfError(ValueError):
-    """Raised for malformed bulk data."""
+class BdfError(FileFormatError):
+    """Raised for malformed bulk data (a :class:`ValueError` via
+    :class:`~femtools.core.errors.FileFormatError`)."""
 
 
 # ---------------------------------------------------------------------------
@@ -318,16 +323,27 @@ def read_bdf(path: str | Path) -> FEModel:
             nodes=(_i(c, 3), _i(c, 4), _i(c, 5), _i(c, 6)),
             property_id=_i(c, 2),
         )
+    # Quadratic solids are accepted but degraded to their linear corner
+    # elements: this is a warning, never an error.  One aggregated note per
+    # card type (a real TET10/HEX20 mesh has thousands of such elements).
+    midside_drops: dict[str, list[int]] = {}
     for c in by_name.pop("CTETRA", []):
         nodes = [_i(c, j) for j in range(3, 13) if _s(c, j)]
         if len(nodes) > 4:
-            notes.append(f"CTETRA {_i(c, 1)}: midside nodes dropped (TET10 -> TET4)")
+            midside_drops.setdefault("CTETRA (TET10 -> TET4)", []).append(_i(c, 1))
         model.add_element(id=_i(c, 1), type="TET4", nodes=tuple(nodes[:4]), property_id=_i(c, 2))
     for c in by_name.pop("CHEXA", []):
         nodes = [_i(c, j) for j in range(3, 23) if _s(c, j)]
         if len(nodes) > 8:
-            notes.append(f"CHEXA {_i(c, 1)}: midside nodes dropped (HEX20 -> HEX8)")
+            midside_drops.setdefault("CHEXA (HEX20 -> HEX8)", []).append(_i(c, 1))
         model.add_element(id=_i(c, 1), type="HEX8", nodes=tuple(nodes[:8]), property_id=_i(c, 2))
+    for what, eids in midside_drops.items():
+        shown = ", ".join(map(str, eids[:5])) + (", ..." if len(eids) > 5 else "")
+        notes.append(
+            f"{what}: midside nodes dropped on {len(eids)} element(s) [{shown}]; "
+            "quadratic accuracy is lost and the midside grids remain as "
+            "unconnected nodes (harmless: the assembler eliminates unattached DOFs)"
+        )
 
     # -- lumped elements (values live on the card -> auto lumped properties) ---------
     auto_pid = (max(model.properties, default=0) // 1000 + 1) * 1000 + 1

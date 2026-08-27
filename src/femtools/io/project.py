@@ -31,6 +31,7 @@ import numpy as np
 
 from .. import __version__
 from ..core.coords import CoordSys
+from ..core.errors import FileFormatError
 from ..core.model import SPC, Element, FEModel, Load, Material, Node, Property
 from ..core.results import FRFResult, ModalResult, ODSResult, StaticResult
 from ..core.sets import ElementSet, NodeSet
@@ -44,8 +45,9 @@ FORMAT_VERSION = 1
 AnyResult = ModalResult | StaticResult | FRFResult | ODSResult
 
 
-class ProjectError(ValueError):
-    """Raised for unreadable or incompatible project files."""
+class ProjectError(FileFormatError):
+    """Raised for unreadable or incompatible project files (a
+    :class:`ValueError` via :class:`~femtools.core.errors.FileFormatError`)."""
 
 
 @dataclass
@@ -120,7 +122,12 @@ def _model_to_json(model: FEModel) -> dict[str, Any]:
             for mat in model.materials.values()
         ],
         "properties": [
-            {k: v for k, v in vars(prop).items() if v is not None or k in ("material_id",)}
+            {
+                k: v
+                for k, v in vars(prop).items()
+                # keep material_id even when None; drop an empty attrs bag
+                if (v is not None and (k != "attrs" or v)) or k == "material_id"
+            }
             for prop in model.properties.values()
         ],
         "spcs": [

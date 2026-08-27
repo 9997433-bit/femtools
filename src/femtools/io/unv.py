@@ -13,6 +13,7 @@ dataset  content                                               read/write
 82       display tracelines                                    r/w
 55       data at nodes -- normal (2) and complex (3) modes     r/w
 58       function at nodal DOF -- FRFs and general functions   r/w (ascii)
+30000    femtools material/property cards (private, JSON)      r/w
 =======  ====================================================  ==========
 
 Unknown datasets are skipped with a warning (never an error).  When a 164
@@ -22,6 +23,21 @@ tagged with SI units.  Mode shapes / FRF ordinates are *not* rescaled
 (their physical unit depends on the data characteristic); this is recorded
 as a warning when factors differ from 1.
 
+Material/property gap
+---------------------
+The classic UFF catalogue has no simple material/property cards for this
+model subset (datasets 1710/2437/... are I-DEAS database dumps far beyond
+Round-2 scope), so *standard* universal files carry geometry, connectivity
+and property *ids* only -- materials and section values are lost when a
+model is exchanged with third-party tools.  To keep femtools round trips
+lossless, :func:`write_unv` appends one **private dataset 30000** (dataset
+numbers 1..32767 are legal; unassigned numbers are skipped by conforming
+readers) holding the material and property tables as line-wrapped JSON
+behind a ``FEMTOOLSCARDS`` marker.  :func:`read_unv` restores it; every
+other UFF reader ignores it with at most an "unknown dataset" note.
+``read_unv(...).model`` is always a fully-formed :class:`FEModel` either
+way -- when dataset 30000 is absent the tables are simply empty.
+
 DOF conventions: UNV direction codes ``+-1..3`` (X, Y, Z translations) and
 ``+-4..6`` (rotations) map to femtools local DOFs ``0..5``.
 """
@@ -29,6 +45,7 @@ DOF conventions: UNV direction codes ``+-1..3`` (X, Y, Z translations) and
 from __future__ import annotations
 
 import datetime as _dt
+import json
 import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -37,7 +54,7 @@ from pathlib import Path
 import numpy as np
 from numpy.typing import NDArray
 
-from ..core.model import FEModel
+from ..core.model import FEModel, Material, Property
 from ..core.results import FRFResult, ModalResult
 from ..core.units import UnitSystem
 
@@ -89,6 +106,13 @@ _FEMTOOLS_TO_FE: dict[str, int] = {
 
 #: descriptors whose dataset-2412 record carries the extra 3I10 beam record
 _BEAM_LIKE: frozenset[int] = frozenset({11, 21, 22, 23, 24})
+
+#: femtools private dataset carrying material/property cards as JSON.
+#: 1..32767 is the legal dataset-number range; 30000 is far above every
+#: catalogued UFF dataset and conforming readers skip unknown numbers.
+_FEMTOOLS_CARDS_DS = 30000
+_FEMTOOLS_CARDS_MARKER = "FEMTOOLSCARDS"
+_FEMTOOLS_CARDS_VERSION = 1
 
 _DELIM = "    -1"
 
@@ -364,6 +388,45 @@ def _read_2412(body: list[str], model: FEModel, notes: list[str]) -> None:
         node = model.nodes.get(onode)
         if el is not None and node is not None and el.nodes[0] in model.nodes:
             el.orientation = node.xyz - model.nodes[el.nodes[0]].xyz
+
+
+def _json_scalar(obj):
+    if isinstance(obj, np.integer):
+        return int(obj)
+    if isinstance(obj, np.floating):
+        return float(obj)
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    raise TypeError(f"not JSON serializable: {type(obj)}")
+
+
+def _read_cards_30000(body: list[str], model: FEModel, notes: list[str]) -> None:
+    """Restore materials/properties from the femtools private dataset."""
+    head = body[0].split() if body else []
+    if not head or head[0] != _FEMTOOLS_CARDS_MARKER:
+        raise ValueError(
+            f"dataset {_FEMTOOLS_CARDS_DS} lacks the {_FEMTOOLS_CARDS_MARKER} marker"
+        )
+    version = int(head[1]) if len(head) > 1 else 1
+    if version > _FEMTOOLS_CARDS_VERSION:
+        notes.append(
+            f"dataset {_FEMTOOLS_CARDS_DS}: version {version} newer than supported "
+            f"{_FEMTOOLS_CARDS_VERSION}; material/property cards skipped"
+        )
+        return
+    payload = json.loads("".join(line.strip() for line in body[1:]))
+    for md in payload.get("materials", ()):
+        mat = Material(**md)
+        if mat.id in model.materials:
+            notes.append(f"dataset {_FEMTOOLS_CARDS_DS}: duplicate material {mat.id} ignored")
+        else:
+            model.materials[mat.id] = mat
+    for pd in payload.get("properties", ()):
+        prop = Property(**pd)
+        if prop.id in model.properties:
+            notes.append(f"dataset {_FEMTOOLS_CARDS_DS}: duplicate property {prop.id} ignored")
+        else:
+            model.properties[prop.id] = prop
 
 
 def _read_82(body: list[str]) -> Traceline:
@@ -653,6 +716,8 @@ def read_unv(path: str | Path) -> UnvData:
                 _read_nodes_2411(body, model)
             elif dsnum == 2412:
                 _read_2412(body, model, notes)
+            elif dsnum == _FEMTOOLS_CARDS_DS:
+                _read_cards_30000(body, model, notes)
             elif dsnum == 82:
                 tracelines.append(_read_82(body))
             elif dsnum == 55:
@@ -769,6 +834,36 @@ def _write_2412(model: FEModel) -> list[str]:
             body.append(_i10(0) + _i10(0) + _i10(0))
         for chunk in _chunk(el.nodes, 8):
             body.append("".join(_i10(n) for n in chunk))
+    return body
+
+
+def _write_cards_30000(model: FEModel) -> list[str]:
+    """Material/property tables as line-wrapped JSON (femtools private).
+
+    The JSON is compact (no separator whitespace) and literal spaces inside
+    string values are re-escaped as ``\\u0020``, so the payload contains no
+    space characters at all: it can be split at any 78-column boundary and
+    re-joined after readers strip trailing blanks.
+    """
+    payload = {
+        "materials": [
+            {k: v for k, v in vars(mat).items() if v is not None or k in ("E", "nu", "rho")}
+            for mat in model.materials.values()
+        ],
+        "properties": [
+            {
+                k: v
+                for k, v in vars(prop).items()
+                if (v is not None and (k != "attrs" or v)) or k == "material_id"
+            }
+            for prop in model.properties.values()
+        ],
+    }
+    text = json.dumps(
+        payload, separators=(",", ":"), sort_keys=True, default=_json_scalar
+    ).replace(" ", "\\u0020")
+    body = [f"{_FEMTOOLS_CARDS_MARKER} {_FEMTOOLS_CARDS_VERSION} JSON materials/properties"]
+    body.extend(text[i : i + 78] for i in range(0, len(text), 78))
     return body
 
 
@@ -896,6 +991,8 @@ def write_unv(
     Accepts ``write_unv(path, model=...)`` or ``write_unv(model, path)``.
 
     * ``model`` -> datasets 151/164 + nodes (2411 by default, or 15) + 2412
+      (+ private dataset 30000 with material/property cards when the model
+      has any -- see the module docstring; other readers skip it)
     * ``modal`` -> one dataset 55 per mode (normal or complex modes)
     * ``frf``   -> one dataset 58 per (output, input) pair
     * ``tracelines`` -> datasets 82
@@ -924,6 +1021,8 @@ def write_unv(
             _ds(lines, node_dataset, body)
         if model.elements:
             _ds(lines, 2412, _write_2412(model))
+        if model.materials or model.properties:
+            _ds(lines, _FEMTOOLS_CARDS_DS, _write_cards_30000(model))
 
     for tl in tracelines or ():
         _ds(lines, 82, _write_82(tl))

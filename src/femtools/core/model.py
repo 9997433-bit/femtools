@@ -25,12 +25,13 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from .coords import CoordSys
+from .errors import ModelError
 from .units import UnitSystem
 
 if TYPE_CHECKING:
@@ -85,10 +86,6 @@ _PROPERTY_NEEDS_MATERIAL: frozenset[str] = frozenset({"bar", "beam", "shell", "s
 _ELEMENT_NEEDS_PROPERTY: frozenset[str] = frozenset(
     {"BAR2", "BEAM2", "TRUSS2D", "QUAD4", "TRIA3", "HEX8", "TET4"}
 )
-
-
-class ModelError(ValueError):
-    """Raised for invalid model construction (duplicate ids, bad references, ...)."""
 
 
 def comps_to_mask(comps: int | str) -> tuple[bool, bool, bool, bool, bool, bool]:
@@ -261,6 +258,26 @@ _PROPERTY_REQUIRED: dict[str, tuple[str, ...]] = {
     "lumped": (),
 }
 
+#: Section fields settable through :meth:`FEModel.add_property` keywords.
+_PROPERTY_FIELDS: tuple[str, ...] = (
+    "A", "Iy", "Iz", "J", "kappa", "t", "m", "k", "c", "nsm", "name",
+)
+
+#: Canonical spelling for :meth:`FEModel.add_property` keyword aliases.
+#: Keys are lower-cased; every casing of a real field name maps to itself
+#: (``IY``/``iy`` -> ``Iy``, ``T`` -> ``t``, ...) plus a few common
+#: engineering/Nastran spellings.  Anything not listed here goes into
+#: :attr:`Property.attrs` verbatim.
+_PROPERTY_FIELD_ALIASES: dict[str, str] = {
+    **{f.lower(): f for f in _PROPERTY_FIELDS},
+    "area": "A",
+    "thickness": "t",
+    "iyy": "Iy",
+    "izz": "Iz",
+    "i1": "Iz",  # Nastran PBAR/PBEAM I1 = bending inertia in plane 1 (local z)
+    "i2": "Iy",  # Nastran PBAR/PBEAM I2 = bending inertia in plane 2 (local y)
+}
+
 
 @dataclass
 class Property:
@@ -277,6 +294,13 @@ class Property:
     lumped    ``m`` (mass), ``k`` (stiffness), ``c`` (viscous damping) --
               at least one; used by MASS/SPRING/DAMPER elements
     ========  ==========================================================
+
+    ``attrs`` is a free-form extra bag: any keyword passed to
+    :meth:`FEModel.add_property` that is not a recognised field lands here
+    unchanged.  The FEA kernel's duck-typed lookup
+    (:func:`femtools.fea.protocols.get_any`) searches ``attrs`` after real
+    attributes, so section quantities the dataclass does not model (e.g.
+    ``As_y``, ``EA``, ``I_ratio``) still reach the element formulations.
     """
 
     id: int
@@ -293,9 +317,11 @@ class Property:
     c: float | None = None
     nsm: float | None = None  # non-structural mass (per length / per area)
     name: str = ""
+    attrs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.id = int(self.id)
+        self.attrs = dict(self.attrs) if self.attrs else {}
         self.type = str(self.type).lower()
         if self.type not in PROPERTY_TYPES:
             raise ModelError(
@@ -524,13 +550,34 @@ class FEModel:
         type: str,
         material_id: int | None = None,
         check_refs: bool = True,
-        **fields: float | str,
+        **fields: Any,
     ) -> Property:
-        """Add a property (keyword fields per :class:`Property`)."""
+        """Add a property (keyword fields per :class:`Property`).
+
+        Keywords matching a :class:`Property` field are matched
+        **case-insensitively** and a few common spellings are canonicalised
+        (``IY``/``Iyy``/``I2`` -> ``Iy``, ``area`` -> ``A``,
+        ``thickness`` -> ``t``, ...).  Every other keyword is kept verbatim
+        in :attr:`Property.attrs`, where the FEA kernel's duck-typed lookup
+        still finds it -- unknown section data is never dropped.
+        """
         id = int(id)
         if id in self.properties:
             raise ModelError(f"duplicate property id {id}")
-        prop = Property(id=id, type=type, material_id=material_id, **fields)  # type: ignore[arg-type]
+        known: dict[str, Any] = {}
+        extra: dict[str, Any] = dict(fields.pop("attrs", None) or {})
+        for key, value in fields.items():
+            canon = _PROPERTY_FIELD_ALIASES.get(key.lower())
+            if canon is None:
+                extra[key] = value
+            elif canon not in known or known[canon] is None:
+                known[canon] = value
+            elif value is not None and value != known[canon]:
+                raise ModelError(
+                    f"property {id}: conflicting values for {canon!r} "
+                    f"({known[canon]!r} vs {key}={value!r})"
+                )
+        prop = Property(id=id, type=type, material_id=material_id, attrs=extra, **known)
         if check_refs and prop.material_id is not None and prop.material_id not in self.materials:
             raise ModelError(f"property {id}: undefined material {prop.material_id}")
         self.properties[id] = prop

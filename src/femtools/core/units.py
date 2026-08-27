@@ -23,6 +23,8 @@ from typing import TypeVar
 
 import numpy as np
 
+from .errors import UnitError
+
 __all__ = [
     "UnitError",
     "UnitSystem",
@@ -35,11 +37,6 @@ __all__ = [
 ]
 
 _T = TypeVar("_T", float, np.ndarray)
-
-
-class UnitError(ValueError):
-    """Raised for unknown unit names or inconsistent unit systems."""
-
 
 # Factors are "SI units per one named unit":  value_si = value * factor.
 _LENGTH_TO_M: dict[str, float] = {
