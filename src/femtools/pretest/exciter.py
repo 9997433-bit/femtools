@@ -454,7 +454,7 @@ DrivingPointResidues.normalized`).  Raw residues fall off as ``1/w``, so
         spacing = float(min_separation)
         if spacing < 0.0:
             raise ValueError("min_separation must be non-negative")
-        xyz = np.asarray(coords, dtype=float).reshape(n_cand, -1)
+        xyz = _coordinate_rows(coords, n_cand)
 
     def feasible(others: list[int]) -> NDArray[np.bool_]:
         """Candidates still selectable next to the ones in ``others``."""
@@ -572,6 +572,29 @@ def _as_residues(
         damping=np.zeros(n_mode),
         generalized_mass=np.ones(n_mode),
     )
+
+
+def _coordinate_rows(coords: ArrayLike, n_cand: int) -> NDArray[np.float64]:
+    """``(n_candidate, dim)`` drive-point coordinates, one row per candidate.
+
+    The row count is checked rather than reshaped into place.  Candidates are
+    DOFs, coordinates are nodal, so the natural mistake is to pass the
+    ``(n_node, 3)`` table of a model whose candidate set holds three DOFs per
+    node: its size then happens to be exactly ``3 n_node``, a blind reshape
+    turns it into ``(3 n_node, 1)`` — x, y and z interleaved down one column —
+    and ``min_separation`` is enforced on distances that do not exist.
+    """
+    arr = np.asarray(coords, dtype=float)
+    if arr.ndim == 1 and n_cand > 0 and arr.size % n_cand == 0:
+        arr = arr.reshape(n_cand, -1)
+    if arr.ndim != 2 or arr.shape[0] != n_cand:
+        raise ValueError(
+            f"coords must hold one row per candidate DOF: expected {n_cand} rows, "
+            f"got shape {arr.shape}"
+        )
+    if arr.shape[1] > 3:
+        raise ValueError(f"coords must be 1-D, 2-D or 3-D points, got {arr.shape[1]} columns")
+    return arr
 
 
 def _lookup_ids(ids: NDArray[Any], wanted: ArrayLike, name: str) -> NDArray[np.intp]:

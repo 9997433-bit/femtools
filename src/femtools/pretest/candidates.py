@@ -361,10 +361,27 @@ def _mode_columns(mode_index: ArrayLike | None, n_mode: int) -> NDArray[np.intp]
     return cols
 
 
+def _exclude_items(exclude: ArrayLike) -> list[Any]:
+    """Items of ``exclude``, keeping a bare ``(node, component)`` key whole.
+
+    ``exclude=(12, "X")`` names one DOF; read element-wise it becomes the two
+    items ``12`` and ``"X"``, which drops *every* DOF of node 12 and silently
+    skips the orphaned component.  A pair of integers stays two node ids —
+    that is what ``exclude=(12, 13)`` has always meant and the component of a
+    key is spelled out as a label here.
+    """
+    if isinstance(exclude, (tuple, list)) and len(exclude) == 2 and isinstance(exclude[1], str):
+        return [tuple(exclude)]
+    items: list[Any] = np.atleast_1d(np.asarray(exclude, dtype=object)).tolist()
+    return items
+
+
 def _excluded_rows(dmap: DOFMap, exclude: ArrayLike) -> NDArray[np.intp]:
     """Rows addressed by ``exclude``: whole nodes, DOF keys or labels."""
-    items = np.atleast_1d(np.asarray(exclude, dtype=object)).tolist()
-    is_node = [isinstance(i, int) and not isinstance(i, bool) for i in items]
+    items = _exclude_items(exclude)
+    # ``np.int64`` is not an ``int``: a node id taken straight out of a DOF
+    # map would otherwise be read as a DOF key, fail to parse, and be skipped.
+    is_node = [isinstance(i, (int, np.integer)) and not isinstance(i, bool) for i in items]
     plain = [i for i, flag in zip(items, is_node, strict=True) if flag]
     keyed = [i for i, flag in zip(items, is_node, strict=True) if not flag]
     rows = dmap.select(nodes=plain) if plain else np.zeros(0, dtype=np.intp)

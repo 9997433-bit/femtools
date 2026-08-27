@@ -1,4 +1,4 @@
-"""Modal Assurance Criterion and its relatives (MAC, COMAC, POC).
+"""Modal Assurance Criterion and its relatives (MAC, MACX, NMD, COMAC, POC).
 
 ``mac[i, j] = |phi_a[:, i]^H phi_b[:, j]|^2
               / ((phi_a[:, i]^H phi_a[:, i]) (phi_b[:, j]^H phi_b[:, j]))``
@@ -28,6 +28,8 @@ __all__ = [
     "mac",
     "mac_value",
     "mac_matrix",
+    "macx",
+    "nmd",
     "comac",
     "ecomac",
     "fmac",
@@ -123,6 +125,126 @@ def mac_pairs(phi_a: ArrayLike, phi_b: ArrayLike, *, weights: Any = None) -> NDA
     num = np.real(cross * cross.conj())
     den = column_norms_sq(a, wa) * column_norms_sq(b, wb)
     return safe_divide(num, den)
+
+
+def macx(
+    phi_a: ArrayLike,
+    phi_b: ArrayLike | None = None,
+    *,
+    weights: Any = None,
+) -> NDArray[np.float64]:
+    """Extended MAC (MACX) for complex modes — uses both ``phi`` and ``conj(phi)``.
+
+    ``macx[i, j] = (|a^H W b| + |a^T W b|)^2
+                   / ((a^H W a + |a^T W a|) (b^H W b + |b^T W b|))``
+
+    Parameters
+    ----------
+    phi_a, phi_b, weights:
+        As in :func:`mac_matrix`; ``phi_b=None`` gives the auto-MACX.
+
+    Returns
+    -------
+    ndarray
+        Real ``(n_mode_a, n_mode_b)`` matrix with entries in ``[0, 1]``,
+        exactly symmetric with a unit diagonal for a self-comparison.
+
+    Notes
+    -----
+    The classical MAC keeps only the Hermitian product ``a^H b``, which for a
+    damped structure measures the two complex modes *as digitized*: a mode and
+    its own complex conjugate — the same physical motion, only the other half
+    of the conjugate pair, and equally likely to come out of a curve fit —
+    score 0 rather than 1, and a mode whose phase lead varies across the
+    structure is penalized for a difference that is not a shape difference.
+    Adding the bilinear product ``a^T b`` makes the criterion insensitive to
+    conjugation (swapping ``b`` for ``conj(b)`` exchanges the two terms and
+    leaves the sum untouched) while keeping the complex-scaling invariance of
+    the MAC, so a complex mode still correlates with its rotated, rescaled
+    copy at 1 (Vacher, Jacquier & Bucharles, IMAC/ISMA 2010).
+
+    For real mode shapes the two products coincide and MACX reduces to
+    :func:`mac_matrix` — bit for bit, so it is a safe drop-in on an undamped
+    model.  The reduction is what makes the difference between the two
+    diagnostic: it isolates the part of a low MAC that is pure phase.
+    """
+    a = as_mode_matrix(phi_a, "phi_a")
+    b = a if phi_b is None else as_mode_matrix(phi_b, "phi_b")
+    self_case = phi_b is None or same_array(a, b)
+    if a.shape[0] != b.shape[0]:
+        raise ValueError(
+            f"phi_a has {a.shape[0]} DOF but phi_b has {b.shape[0]}; align the DOF sets first"
+        )
+
+    wb = weighted(weights, b)
+    wa = wb if self_case else weighted(weights, a)
+    num = (np.abs(a.conj().T @ wb) + np.abs(a.T @ wb)) ** 2
+
+    da = column_norms_sq(a, wa) + np.abs(np.einsum("ij,ij->j", a, wa))
+    db = da if self_case else column_norms_sq(b, wb) + np.abs(np.einsum("ij,ij->j", b, wb))
+    out = safe_divide(num, np.outer(da, db))
+
+    if self_case:
+        out = 0.5 * (out + out.T)
+        np.fill_diagonal(out, np.where(da > 0.0, 1.0, 0.0))
+    if weights is None:
+        np.clip(out, 0.0, 1.0, out=out)
+    return out
+
+
+def nmd(
+    phi_a: ArrayLike | None = None,
+    phi_b: ArrayLike | None = None,
+    *,
+    weights: Any = None,
+    mac: ArrayLike | None = None,
+    relative: bool = False,
+) -> NDArray[np.float64]:
+    """Normalized Modal Difference, ``sqrt(1 - MAC)`` (Allemang).
+
+    The MAC is a squared cosine, so it is flat near 1: two shapes that differ
+    by 5 % score 0.9975, and a table of such numbers hides the ranking it is
+    supposed to show.  The NMD is the corresponding sine — a *difference*
+    measure, linear in the mismatch for well-correlated modes (0.05 for that
+    pair) and directly readable as a fraction of the shape.
+
+    Parameters
+    ----------
+    phi_a, phi_b, weights:
+        As in :func:`mac_matrix`.  Ignored when ``mac`` is given.
+    mac:
+        Pre-computed MAC matrix, to avoid recomputing it or to take the NMD
+        of a variant criterion, e.g. ``nmd(mac=macx(phi_a, phi_b))``.
+    relative:
+        Return Allemang's ratio form ``sqrt((1 - MAC) / MAC)`` instead — the
+        tangent rather than the sine of the same angle, i.e. the difference
+        measured against the *correlated* part of the shape.  It is the
+        sharper of the two for closely correlated modes and the two agree to
+        first order there, but it grows without bound as the MAC goes to 0
+        (``inf`` for uncorrelated modes).
+
+    Returns
+    -------
+    ndarray
+        Non-negative array of the shape of the MAC it was built from:
+        ``(n_mode_a, n_mode_b)`` for two mode sets, so ``nmd(...)[i, j]``
+        belongs to the pair ``(i, j)``.  0 means identical shapes.
+    """
+    if mac is None:
+        if phi_a is None:
+            raise ValueError("pass mode shapes or a pre-computed `mac` matrix")
+        values = mac_matrix(phi_a, phi_b, weights=weights)
+    else:
+        values = np.asarray(mac, dtype=float)
+
+    # A weighted or user-supplied MAC is not clipped to [0, 1]; without the
+    # floor a round-off overshoot of 1 would come back as NaN.
+    gap = np.clip(1.0 - values, 0.0, None)
+    if not relative:
+        return np.sqrt(gap)
+    out = np.full(gap.shape, np.inf)
+    np.sqrt(gap / np.where(values > 0.0, values, 1.0), out=out, where=values > 0.0)
+    return out
 
 
 def modal_scale_factor(phi_a: ArrayLike, phi_b: ArrayLike, *, weights: Any = None) -> NDArray[Any]:

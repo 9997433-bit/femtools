@@ -43,7 +43,9 @@ from .mac import (
     mac_matrix,
     mac_pairs,
     mac_value,
+    macx,
     modal_scale_factor,
+    nmd,
     poc,
 )
 from .orthogonality import (
@@ -80,8 +82,10 @@ __all__ = [
     "mac_matrix",
     "mac_pairs",
     "mac_value",
+    "macx",
     "match_dofs",
     "modal_scale_factor",
+    "nmd",
     "off_diagonal_max",
     "orthogonality_error",
     "pair_modes",
