@@ -3,6 +3,13 @@
 Both entry points return an :class:`FRFResult` holding a complex ``(n_out, n_in, n_freq)``
 array. With the *complete* modal basis and consistent damping the two are algebraically
 identical; see ``scripts``-free self check in ``verify_modal_vs_direct``.
+
+On a **truncated** basis they differ by the missing residual flexibility, and the size of
+that difference depends entirely on how the comparison band is defined. ``fmax`` must be
+the last *retained* mode — :func:`retained_fmax_hz` — so that the 0.2-0.8 fmax band of
+``docs/CONTRACT_API.md`` contains only resonances the modal sum actually carries.
+:func:`retained_band` and :func:`retained_band_lines` build that band, and
+:func:`verify_modal_vs_direct` uses it by default when it truncates the basis itself.
 """
 
 from __future__ import annotations
@@ -19,7 +26,19 @@ from ._utils import TWO_PI, as_dense, is_sparse, resolve_dofs
 from .damping import DampingModel, as_damping
 from .modal import ModalModel, as_modal
 
-__all__ = ["FRFResult", "direct_frf", "modal_frf", "verify_modal_vs_direct"]
+__all__ = [
+    "FRFResult",
+    "direct_frf",
+    "modal_frf",
+    "retained_band",
+    "retained_band_lines",
+    "retained_fmax_hz",
+    "verify_modal_vs_direct",
+]
+
+#: Default band for a truncated-basis comparison, as fractions of ``fmax``
+#: (``docs/CONTRACT_API.md``: "rel L2 on 0.2-0.8 fmax", tolerance 5 %).
+DEFAULT_BAND_FRACTIONS = (0.2, 0.8)
 
 _RESPONSE_KINDS = ("receptance", "mobility", "accelerance")
 _RESPONSE_ALIASES = {
@@ -179,6 +198,69 @@ def _band_mask(freq_hz: np.ndarray, band: tuple[float, float] | None) -> np.ndar
         return np.ones(freq_hz.shape, dtype=bool)
     lo, hi = float(band[0]), float(band[1])
     return (freq_hz >= lo) & (freq_hz <= hi)
+
+
+def _check_fractions(low: float, high: float) -> tuple[float, float]:
+    lo, hi = float(low), float(high)
+    if not (0.0 <= lo < hi):
+        raise ValueError(f"band fractions must satisfy 0 <= low < high, got ({lo}, {hi})")
+    return lo, hi
+
+
+def retained_fmax_hz(modal: Any) -> float:
+    """Highest *retained* natural frequency of ``modal``, in Hz.
+
+    This is the ``fmax`` that a truncated-basis FRF comparison must be built on. A modal
+    sum only knows about the modes it retains, so a band anchored on the *parent* model's
+    highest frequency covers resonances the truncated basis does not contain. On a 40-DOF
+    chain reduced to 20 modes the retained ``fmax`` is 26.84 Hz while the parent's is
+    35.57 Hz: the 0.2-0.8 band of the latter reaches 28.45 Hz, past four missing poles,
+    and the relative L2 error goes from 3.0 % to 13.3 % — a badly-posed comparison rather
+    than a solver defect.
+
+    Rigid-body modes (``f = 0``) are retained in the basis but cannot define the band, so
+    the maximum is taken over all retained frequencies and must be strictly positive.
+    """
+    mm = as_modal(modal)
+    f = np.asarray(mm.freq_hz, dtype=float)
+    if f.size == 0:
+        raise ValueError("modal model has no retained modes")
+    fmax = float(np.max(f))
+    if not np.isfinite(fmax) or fmax <= 0.0:
+        raise ValueError(
+            "retained modes have no positive natural frequency; a truncation band "
+            "cannot be defined from a purely rigid-body basis"
+        )
+    return fmax
+
+
+def retained_band(
+    modal: Any,
+    low: float = DEFAULT_BAND_FRACTIONS[0],
+    high: float = DEFAULT_BAND_FRACTIONS[1],
+) -> tuple[float, float]:
+    """Comparison band ``(low * fmax, high * fmax)`` in Hz for a truncated basis.
+
+    ``fmax`` is :func:`retained_fmax_hz`, i.e. the last *retained* mode. Defaults to the
+    0.2-0.8 fmax band of ``docs/CONTRACT_API.md``.
+    """
+    lo, hi = _check_fractions(low, high)
+    fmax = retained_fmax_hz(modal)
+    return (lo * fmax, hi * fmax)
+
+
+def retained_band_lines(
+    modal: Any,
+    n_lines: int = 240,
+    low: float = DEFAULT_BAND_FRACTIONS[0],
+    high: float = DEFAULT_BAND_FRACTIONS[1],
+) -> np.ndarray:
+    """``n_lines`` frequency lines spanning :func:`retained_band`, in Hz."""
+    n = int(n_lines)
+    if n < 1:
+        raise ValueError(f"n_lines must be >= 1, got {n_lines}")
+    lo_hz, hi_hz = retained_band(modal, low, high)
+    return np.linspace(lo_hz, hi_hz, n)
 
 
 def _as_residual_block(value: Any, n_out: int, n_in: int) -> np.ndarray:
@@ -401,23 +483,87 @@ def verify_modal_vs_direct(
     K: Any,
     M: Any,
     modal: Any,
-    freq_hz: Any,
+    freq_hz: Any = None,
     damping: Any = None,
     inputs: Any = None,
     outputs: Any = None,
-    band: tuple[float, float] | None = None,
+    band: tuple[float, float] | str | None = None,
+    *,
+    n_modes: int | None = None,
+    fmax_hz: float | None = None,
+    n_lines: int = 240,
+    band_fractions: tuple[float, float] = DEFAULT_BAND_FRACTIONS,
 ) -> dict[str, Any]:
     """Compare modal and direct FRF and report the relative L2 error.
 
     ``err = ||H_modal - H_direct||_F / ||H_direct||_F`` over the (optionally banded)
-    frequency lines. The acceptance target of ``docs/CONTRACT_API.md`` is 5 % on
-    0.2-0.8 fmax with a truncated basis; with the complete basis the error is at
-    round-off level.
+    frequency lines. With the complete basis the error is at round-off level; the
+    acceptance target of ``docs/CONTRACT_API.md`` is 5 % on 0.2-0.8 fmax with a
+    truncated basis.
+
+    Parameters
+    ----------
+    K, M:
+        Physical matrices driving the direct side.
+    modal:
+        Modal basis. When ``n_modes`` or ``fmax_hz`` is given this is the *complete*
+        basis and the modal side is truncated from it; otherwise it is used as-is.
+    freq_hz:
+        Frequency lines in Hz. ``None`` (the default) builds ``n_lines`` lines across
+        :func:`retained_band` of the truncated basis, i.e. anchored on the last
+        *retained* mode.
+    damping, inputs, outputs:
+        As in :func:`modal_frf`.
+    band:
+        ``None`` for every line, an explicit ``(lo_hz, hi_hz)`` pair, or ``"retained"``
+        for :func:`retained_band` of the truncated basis. Defaults to ``"retained"``
+        whenever the basis is truncated here or ``freq_hz`` is generated.
+    n_modes, fmax_hz:
+        Truncation applied to ``modal`` for the modal side only. The direct side keeps
+        the complete ``K``/``M``, and the complete basis is what
+        :class:`~femtools.dynamics.damping.ModalDamping` projects into a physical ``C``,
+        so the two sides differ by modal truncation alone.
+    n_lines:
+        Number of generated lines when ``freq_hz is None``.
+    band_fractions:
+        ``(low, high)`` multipliers of ``fmax`` for the generated lines and for
+        ``band="retained"``. Defaults to ``(0.2, 0.8)``.
+
+    Returns
+    -------
+    dict
+        ``rel_l2``, ``abs_l2``, ``max_rel_pointwise``, ``n_modes`` (retained),
+        ``n_modes_full``, ``fmax_hz`` (last retained mode), ``band_hz``, ``n_freq`` and
+        both :class:`FRFResult` objects under ``modal``/``direct``.
     """
-    mm = as_modal(modal)
-    Hm = modal_frf(mm, inputs, outputs, freq_hz, damping)
-    Hd = direct_frf(K, M, inputs, outputs, freq_hz, damping, modal=mm)
-    mask = _band_mask(Hd.freq_hz, band)
+    full = as_modal(modal)
+    truncate = n_modes is not None or fmax_hz is not None
+    truncated = full.truncate(n_modes, fmax_hz) if truncate else full
+    if truncated.n_modes == 0:
+        raise ValueError("truncation kept no modes; relax n_modes / fmax_hz")
+    auto_band = truncated.n_modes < full.n_modes or freq_hz is None
+
+    if freq_hz is None:
+        f = retained_band_lines(truncated, n_lines, *band_fractions)
+    else:
+        f = _check_freq(freq_hz)
+
+    if isinstance(band, str):
+        if band.lower() != "retained":
+            raise ValueError(f"unknown band spec {band!r}; expected 'retained' or a pair")
+        band_hz: tuple[float, float] | None = retained_band(truncated, *band_fractions)
+    elif band is not None:
+        band_hz = (float(band[0]), float(band[1]))
+    elif auto_band:
+        band_hz = retained_band(truncated, *band_fractions)
+    else:
+        band_hz = None
+
+    Hm = modal_frf(truncated, inputs, outputs, f, damping)
+    Hd = direct_frf(K, M, inputs, outputs, f, damping, modal=full)
+    mask = _band_mask(Hd.freq_hz, band_hz)
+    if not mask.any():
+        raise ValueError(f"no frequency line falls inside the band {band_hz}")
     a = Hm.H[:, :, mask]
     b = Hd.H[:, :, mask]
     num = float(np.linalg.norm(a - b))
@@ -429,7 +575,10 @@ def verify_modal_vs_direct(
         "rel_l2": rel,
         "abs_l2": num,
         "max_rel_pointwise": float(np.nanmax(pointwise)) if pointwise.size else 0.0,
-        "n_modes": mm.n_modes,
+        "n_modes": truncated.n_modes,
+        "n_modes_full": full.n_modes,
+        "fmax_hz": retained_fmax_hz(truncated),
+        "band_hz": band_hz,
         "n_freq": int(mask.sum()),
         "modal": Hm,
         "direct": Hd,

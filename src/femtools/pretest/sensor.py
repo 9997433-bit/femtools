@@ -9,6 +9,11 @@ Two complements to EFI:
 * :func:`nodal_kinetic_energy` ranks locations by the modal kinetic energy
   they carry — a cheap measure of signal-to-noise which is often used to
   pre-screen candidates before running EFI.
+
+Both work on the candidate partition produced by
+:func:`~femtools.pretest.candidates.translational_dofs`, and
+:func:`nodal_kinetic_energy` aggregates per node when given the DOF map of a
+solved model (``nodal_kinetic_energy(modal.modes, modal.M, modal)``).
 """
 
 from __future__ import annotations

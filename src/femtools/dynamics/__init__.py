@@ -8,6 +8,10 @@ Public entry points (see ``docs/CONTRACT_API.md``)::
     from femtools.dynamics.craig_bampton import craig_bampton
     from femtools.dynamics.time_domain import time_history
     from femtools.dynamics.residuals import residual_vectors
+    from femtools.dynamics.frf import verify_modal_vs_direct, retained_band
+
+``verify_modal_vs_direct`` is the modal-vs-direct acceptance check; on a truncated basis
+it anchors the 0.2-0.8 fmax band on the last retained mode (``retained_band``).
 
 Everything is also re-exported from this package. Modal input is duck-typed: any object
 exposing ``freq_hz`` and ``modes`` works, including ``femtools.fea.eigen.ModalResult``.
@@ -28,7 +32,15 @@ from .damping import (
     rayleigh_coefficients,
 )
 from .fba import frf_based_assembly
-from .frf import FRFResult, direct_frf, modal_frf, verify_modal_vs_direct
+from .frf import (
+    FRFResult,
+    direct_frf,
+    modal_frf,
+    retained_band,
+    retained_band_lines,
+    retained_fmax_hz,
+    verify_modal_vs_direct,
+)
 from .harmonic import HarmonicResult, harmonic_response
 from .mba import (
     AssemblyResult,
@@ -74,6 +86,9 @@ __all__ = [
     "modal_frf",
     "rayleigh_coefficients",
     "residual_vectors",
+    "retained_band",
+    "retained_band_lines",
+    "retained_fmax_hz",
     "structural_dynamic_modification",
     "synthetic_frf",
     "synthetic_time_response",

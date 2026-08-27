@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
-doe_module = pytest.importorskip("femtools.optimization.doe")
+from femtools.optimization import doe as doe_module
 
 
 def test_latin_hypercube_is_bounded_stratified_and_seeded() -> None:

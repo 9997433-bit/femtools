@@ -162,3 +162,20 @@ module is not installed, rather than failing at import time.
 `model_factory=` (a callable accepting `name=`) to avoid the
 `femtools.core` import, and read `engine.model`, `engine.results` and
 `engine.log` after `run()` / `run_file()` / `execute()`.
+
+## Model-file loading (`femtools.script.loading`)
+
+Next to the FSL engine, this package hosts the model-file loader shared
+by the CLI and the GUI:
+
+```python
+from femtools.script import load_model_file
+loaded = load_model_file("beam.ftproj")   # or .json / .unv / .bdf
+loaded.model      # bare FEModel (Project/UnvData containers unwrapped)
+loaded.results    # named results stored with the file, if any
+```
+
+`.json` models use a plain-JSON schema built on the public
+`FEModel.add_*` API (`nodes`, `materials`, `properties`, `elements`,
+`spcs`); the full schema is documented in the `femtools.script.loading`
+module docstring.

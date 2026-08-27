@@ -1,9 +1,51 @@
 # Acceptance — golden analytical cases and tolerances
 
 Expands the tolerance table in `docs/CONTRACT_API.md` with the exact formulas each golden test
-checks against. Tests live in `tests/` (owner R1-G1); recommended test ids are listed so
+checks against. Tests live in `tests/` (owner R1-G1/R2-G1); recommended test ids are listed so
 failures map back here. Conventions: $c = \sqrt{E/\rho}$ (bar wave speed), $f = \omega/2\pi$,
 all modes mass-normalized ($\Phi^\top M \Phi = I$).
+
+## Measured status (merged tree, 2026-08-27)
+
+Verified by running `examples/*.py` and `pytest tests/` against the merged
+`cursor/femtools-sota-d551` tree (17 passed, 3 perf skips). Checked = measured
+passing with the quoted numbers; unchecked = not yet exercised by a test or
+example on this tree.
+
+- [x] **1a** axial bar, 2-node discrete — `tests/test_golden_fea.py::test_two_node_axial_bar_frequency` green
+- [ ] **1b** axial bar N-element dispersion — no test/example yet
+- [ ] **1c** axial bar mesh-converged continuum — no test/example yet
+- [x] **2** cantilever EB, 10 BEAM2 — `examples/cantilever_beam.py`: 6 lowest bending modes
+      (both planes, 16.71–439.95 Hz) max rel err **2.55e-4** (tol 2e-2);
+      `tests/test_golden_fea.py::test_euler_bernoulli_cantilever_first_three_modes_per_bending_plane` green
+- [x] **3a** mass normalization — `examples/cantilever_beam.py`:
+      $\max|\Phi^\top M \Phi - I|$ = **6.66e-16** (tol 1e-8); `tests/test_mass_normalization.py` green
+- [ ] **3b** stiffness orthogonality — not asserted separately yet
+- [x] **4a–4c** MAC identities — `examples/mac_demo.py`: identity/scale-invariance dev
+      **2.22e-16** (tol 1e-12/1e-10); `tests/test_mac.py` (2 tests) green; Hungarian pairing
+      recovers a shuffled+perturbed set 5/5 (`tests/test_pairing.py` green)
+- [ ] **5** cantilever effective mass — no test/example yet
+- [x] **6** updating: recover E (+10 %) — `examples/update_youngs.py`: relative E error
+      **1.76e-10** in 3 iterations (tol 2e-2), converged, WLS/Gauss–Newton;
+      `tests/test_updating.py` green
+- [ ] **7a** SDOF modal FRF closed form — no test/example yet
+- [x] **7b** modal vs direct FRF — `examples/frf_synthesis.py`: 10×BEAM2 cantilever,
+      20 modes, Rayleigh ζ≈1 %, band 783–3132 Hz (0.2–0.8 f_max): rel L2
+      **1.40 %** (tip driving point) / **0.98 %** (midspan transfer), tol 5 %;
+      `tests/test_frf.py` green
+- [x] **8** EFI toy — `examples/pretest_efi.py`: 10-DOF chain, 2 target modes, 4 sensors
+      → kept-row AutoMAC off-diag **0.0502** (EFI) / **0.0416** (MAC elimination), tol < 0.15;
+      `tests/test_efi.py` green
+- [ ] **9** free–free beam rigid modes — no test/example yet
+- [ ] **10** Craig–Bampton exactness — no test/example yet
+- [ ] **11** static bar/cantilever tip — no test/example yet
+- [ ] **12** Newmark SDOF period error — no test/example yet
+- [ ] **13** force identification — no test/example yet
+- [x] **14** LHS stratification — `tests/test_doe.py` (bounded, stratified, seeded) green
+- [ ] **15** RBPE synthetic rigid body — no test/example yet
+- [ ] **16** FDD synthetic 2-DOF — no test/example yet
+- [x] **SIMP** (small-mesh smoke level only) — `tests/test_topology.py` green; the full
+      60×20 MBB criteria of §8 remain unmeasured
 
 ## 0. Master table
 
@@ -181,7 +223,11 @@ ramp-invariant recurrence is exact for piecewise-linear loads.
 
 - **EFI toy (case 8, contract row)**: 10-DOF fixed–free spring–mass chain (unit masses/springs;
   modes from a dense `eigh` oracle), 2 target modes, select 4 sensors →
-  AutoMAC off-diag of the kept rows < 0.15, and `logdet_history` monotone non-increasing.
+  AutoMAC off-diag of the kept rows < 0.15. The implemented
+  `EFIResult.history` records `(n_remaining, min E_D)` per elimination step
+  (the minimum leverage grows monotonically as the weakest candidates are
+  dropped — measured 0.040 → 0.450 on the toy chain); a log-det trace is not
+  exposed directly. See `examples/pretest_efi.py`.
 - **Craig–Bampton exactness (case 10)**: any golden model, keep *all* interior modes → reduced
   eigenvalues match full-model eigenvalues to 1e-10 relative; $\hat K$ coupling block exactly 0.
 - **LHS (case 14)**: for every dimension, the $n$ samples occupy $n$ distinct strata

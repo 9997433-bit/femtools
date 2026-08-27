@@ -44,28 +44,21 @@ def _missing(feature: str, exc: ImportError) -> typer.Exit:
 
 
 def _load_model(path: Path) -> Any:
-    """Load a model by file extension (.ftproj / .unv / .bdf|.nas|.dat)."""
-    suffix = path.suffix.lower()
+    """Load a model file (.ftproj / .json / .unv / .bdf|.nas|.dat) as an FEModel.
+
+    Container formats (``.ftproj`` projects, ``.unv`` bundles) are
+    unwrapped to the bare model so every downstream solver call receives
+    an ``FEModel``.
+    """
+    from femtools.script.loading import load_model_file
+
     try:
-        if suffix == ".ftproj":
-            from femtools.io.project import load_project
-
-            return load_project(str(path))
-        if suffix in (".unv", ".uff"):
-            from femtools.io.unv import read_unv
-
-            return read_unv(str(path))
-        if suffix in (".bdf", ".nas", ".dat"):
-            from femtools.io.bdf import read_bdf
-
-            return read_bdf(str(path))
+        return load_model_file(path).model
     except ImportError as exc:
-        raise _missing(f"reading {suffix!r} files", exc) from exc
-    err_console.print(
-        f"[red]error:[/red] unsupported model file {path} "
-        "(expected .ftproj, .unv/.uff, .bdf/.nas/.dat)"
-    )
-    raise typer.Exit(code=2)
+        raise _missing(f"reading {path.suffix!r} files", exc) from exc
+    except ValueError as exc:
+        err_console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
 
 
 def _solve(model: Any, n_modes: int, shift: float) -> Any:
@@ -127,7 +120,8 @@ def _main(
 @app.command("solve-modes")
 def solve_modes_cmd(
     model_file: Annotated[Path, typer.Argument(exists=True, readable=True,
-                                               help="Model file (.ftproj, .unv, .bdf).")],
+                                               help="Model file (.ftproj, .json, .unv, "
+                                                    ".bdf).")],
     n_modes: Annotated[int, typer.Option("--n-modes", "-n", min=1,
                                          help="Number of modes.")] = 10,
     shift: Annotated[float, typer.Option("--shift",
@@ -220,6 +214,96 @@ def mac_cmd(
 # ----------------------------------------------------------------------
 # frf
 # ----------------------------------------------------------------------
+_DAMPING_HELP = (
+    "Damping model. A bare number is a modal damping ratio applied to every mode "
+    "(e.g. 0.02). Also accepted: 'modal:Z' or 'modal:Z1,Z2,...' (per-mode zeta), "
+    "'rayleigh:ALPHA,BETA' or 'rayleigh:alpha=..,beta=..' (C = alpha*M + beta*K), "
+    "'structural:ETA' (hysteretic loss factor), 'none', or a combined "
+    "'key=value,...' list with keys zeta/alpha/beta/eta."
+)
+
+
+def _parse_damping_spec(spec: str) -> float | dict[str, Any] | None:
+    """Parse the ``--damping`` option into a value ``as_damping`` understands.
+
+    Returns a float (modal zeta), a dict with ``zeta``/``alpha``/``beta``/
+    ``eta`` keys, or ``None`` for an undamped synthesis.
+    """
+
+    def fail(message: str) -> None:
+        raise typer.BadParameter(f"{message} (from {spec!r}). {_DAMPING_HELP}",
+                                 param_hint="'--damping' / '-z'")
+
+    def floats(text: str, what: str) -> list[float]:
+        try:
+            values = [float(v) for v in text.split(",") if v.strip()]
+        except ValueError:
+            fail(f"bad {what} value in {text!r}")
+        if not values:
+            fail(f"missing {what} value")
+        return values
+
+    def keyvals(text: str, allowed: set[str]) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        for item in text.split(","):
+            key, sep, value = item.partition("=")
+            key = key.strip().lower()
+            if not sep or key not in allowed:
+                fail(f"expected {'/'.join(sorted(allowed))} assignments, got {item.strip()!r}")
+            try:
+                out[key] = float(value)
+            except ValueError:
+                fail(f"bad value for {key}: {value.strip()!r}")
+        return out
+
+    s = spec.strip()
+    if not s or s.lower() in ("none", "off", "undamped"):
+        return None
+    try:
+        return float(s)  # backward compatible: bare number = modal zeta
+    except ValueError:
+        pass
+
+    kind, sep, rest = s.partition(":")
+    if sep:
+        kind = kind.strip().lower()
+        rest = rest.strip()
+        if kind in ("modal", "zeta", "viscous"):
+            values = floats(rest, "zeta")
+            return {"zeta": values[0] if len(values) == 1 else values}
+        if kind in ("structural", "hysteretic", "eta"):
+            values = floats(rest, "eta")
+            return {"eta": values[0] if len(values) == 1 else values}
+        if kind == "rayleigh":
+            if "=" in rest:
+                return keyvals(rest, {"alpha", "beta"})
+            values = floats(rest, "alpha,beta")
+            if len(values) != 2:
+                fail(f"rayleigh needs exactly two values alpha,beta, got {len(values)}")
+            return {"alpha": values[0], "beta": values[1]}
+        fail(f"unknown damping type {kind!r} (use modal, rayleigh or structural)")
+    if "=" in s:
+        return keyvals(s, {"zeta", "alpha", "beta", "eta"})
+    fail("could not parse damping spec")
+    return None  # unreachable; fail() always raises
+
+
+def _describe_damping(parsed: float | dict[str, Any] | None) -> str:
+    if parsed is None:
+        return "undamped"
+    if isinstance(parsed, float):
+        return f"modal zeta={parsed:g}"
+    parts = []
+    if "zeta" in parsed:
+        parts.append(f"modal zeta={parsed['zeta']}")
+    if "alpha" in parsed or "beta" in parsed:
+        parts.append(f"Rayleigh alpha={parsed.get('alpha', 0.0):g} "
+                     f"beta={parsed.get('beta', 0.0):g}")
+    if "eta" in parsed:
+        parts.append(f"structural eta={parsed['eta']}")
+    return " + ".join(parts)
+
+
 def _parse_dof_list(spec: str, option: str) -> list[tuple[int, int]]:
     """Parse 'node:dof[,node:dof...]' into [(node_id, dof_1based), ...]."""
     pairs = []
@@ -251,8 +335,8 @@ def frf_cmd(
                                         help="Frequency points.")] = 500,
     n_modes: Annotated[int, typer.Option("--n-modes", "-n", min=1,
                                          help="Modes kept in the modal basis.")] = 20,
-    damping: Annotated[float, typer.Option(
-        "--damping", "-z", help="Modal damping ratio (zeta, all modes).")] = 0.02,
+    damping: Annotated[str, typer.Option(
+        "--damping", "-z", help=_DAMPING_HELP)] = "0.02",
     output: Annotated[Path | None, typer.Option(
         "--output", "-o", help="Save FRF to .npz (freq_hz, H).")] = None,
     plot: Annotated[Path | None, typer.Option(
@@ -261,6 +345,7 @@ def frf_cmd(
     """Synthesize modal FRFs between input and response DOFs."""
     import numpy as np
 
+    damping_spec = _parse_damping_spec(damping)
     model = _load_model(model_file)
     modal = _solve(model, n_modes, 0.0)
     input_pairs = _parse_dof_list(input_dofs, "--input")
@@ -286,7 +371,7 @@ def frf_cmd(
         from femtools.dynamics.frf import modal_frf
     except ImportError as exc:
         raise _missing("FRF synthesis", exc) from exc
-    frf = modal_frf(modal, inputs, outputs, freq_hz, damping)
+    frf = modal_frf(modal, inputs, outputs, freq_hz, damping_spec)
 
     H = None
     for attr in ("H", "h", "frf", "data", "values"):
@@ -297,7 +382,7 @@ def frf_cmd(
         H = np.asarray(frf)
     console.print(
         f"FRF computed: {len(output_pairs)} outputs x {len(input_pairs)} inputs x {n_freq} "
-        f"frequencies ({fmin:g}-{fmax:g} Hz), zeta={damping:g}"
+        f"frequencies ({fmin:g}-{fmax:g} Hz), damping: {_describe_damping(damping_spec)}"
     )
 
     if output is not None:

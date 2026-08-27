@@ -23,6 +23,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from ._assignment import linear_sum_assignment
+from ._linalg import mode_frequencies
 from .mac import mac_matrix
 
 __all__ = ["ModePair", "PairingResult", "pair_modes"]
@@ -137,6 +138,19 @@ def _freqs(freq: ArrayLike | None, n: int, name: str) -> NDArray[np.float64]:
     return arr
 
 
+def _inherited_freqs(phi: Any, freq: ArrayLike | None, n: int) -> ArrayLike | None:
+    """Fall back to the frequencies carried by a modal result.
+
+    A mismatch is ignored rather than raised: the frequencies are a reporting
+    convenience here, and the caller may legitimately have passed a
+    pre-computed MAC covering a subset of the modes.
+    """
+    if freq is not None:
+        return freq
+    inherited = mode_frequencies(phi)
+    return inherited if inherited is not None and inherited.size == n else None
+
+
 def _greedy(
     mac: NDArray[np.float64], allowed: NDArray[np.bool_], threshold: float
 ) -> list[tuple[int, int]]:
@@ -185,10 +199,14 @@ def pair_modes(
     Parameters
     ----------
     phi_a, phi_b:
-        Mode shape matrices ``(n_dof, n_mode)`` on a common DOF set.
+        Mode shape matrices ``(n_dof, n_mode)`` on a common DOF set, or modal
+        results carrying them.
     freq_a, freq_b:
         Optional natural frequencies [Hz], used for the reported frequency
-        error and for the ``freq_tol`` gate.
+        error and for the ``freq_tol`` gate.  Taken from the mode objects
+        when they carry a matching ``freq_hz``, so pairing two
+        :class:`~femtools.fea.eigen.ModalResult` objects fills the frequency
+        columns of :meth:`PairingResult.table` on its own.
     method:
         ``"greedy"`` (default), ``"hungarian"`` (aliases ``"optimal"``,
         ``"munkres"``, ``"lsa"``) or ``"auto"``, which uses the optimal
@@ -223,8 +241,8 @@ def pair_modes(
             raise ValueError(f"mac must be 2-D, got shape {mac_mat.shape}")
 
     n_a, n_b = mac_mat.shape
-    fa = _freqs(freq_a, n_a, "freq_a")
-    fb = _freqs(freq_b, n_b, "freq_b")
+    fa = _freqs(_inherited_freqs(phi_a, freq_a, n_a), n_a, "freq_a")
+    fb = _freqs(_inherited_freqs(phi_b, freq_b, n_b), n_b, "freq_b")
 
     allowed = np.ones_like(mac_mat, dtype=bool)
     if freq_tol is not None:

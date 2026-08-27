@@ -18,10 +18,16 @@ $= -\omega^2 H$.
 
 ## 1. Damping models (shared dict format)
 
+The model is inferred from the keys (`femtools.dynamics.damping.as_damping`);
+there is no `"model"` key. Multiple key groups combine by superposition.
+
 ```python
-damping = {"model": "modal",      "zeta": 0.01}            # scalar or (m,) per-mode
-damping = {"model": "rayleigh",   "alpha": a, "beta": b}   # C = a*M + b*K
-damping = {"model": "structural", "eta": 0.02}             # hysteretic, scalar or per-mode
+damping = 0.01                          # bare scalar/array -> modal zeta
+damping = {"zeta": 0.01}                # modal viscous, scalar or (m,) per-mode
+damping = {"alpha": a, "beta": b}       # Rayleigh, C = a*M + b*K
+damping = {"eta": 0.02}                 # structural/hysteretic, scalar or per-mode
+damping = {"C": C_matrix}               # explicit viscous matrix (or pass the matrix)
+damping = RayleighDamping(a, b)         # any DampingModel instance passes through
 ```
 
 Rayleigh in modal coordinates: $\zeta_r = \dfrac{\alpha}{2\omega_r} + \dfrac{\beta \omega_r}{2}$

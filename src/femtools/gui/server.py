@@ -61,6 +61,8 @@ class FemtoolsRequestHandler(BaseHTTPRequestHandler):
                 self._send_json(self.state.model_summary())
             elif url.path == "/api/results":
                 self._send_json(self.state.results_summary())
+            elif url.path == "/api/load":  # simple path-query form of the loader
+                self._send_json(self.state.load_model(query.get("path", "")))
             elif url.path.startswith("/api/plot/"):
                 kind = url.path.rsplit("/", 1)[-1]
                 png = self.state.render_png(
@@ -88,6 +90,8 @@ class FemtoolsRequestHandler(BaseHTTPRequestHandler):
                 return
             if url.path == "/api/script":
                 self._send_json(self.state.run_script(payload.get("source", "")))
+            elif url.path == "/api/load":
+                self._send_json(self.state.load_model(payload.get("path", "")))
             else:
                 self._send_error_json(f"not found: {url.path}", code=404)
         except GuiApiError as exc:

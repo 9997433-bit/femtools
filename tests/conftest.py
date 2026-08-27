@@ -14,12 +14,13 @@ SRC = Path(__file__).resolve().parents[1] / "src"
 if SRC.is_dir():
     sys.path.insert(0, str(SRC))
 
+from femtools.core.model import FEModel  # noqa: E402
+
 
 @pytest.fixture
 def axial_bar() -> tuple[Any, dict[str, float]]:
     """A one-element bar with exactly one unconstrained axial DOF."""
-    model_module = pytest.importorskip("femtools.core.model")
-    model = model_module.FEModel(name="axial-bar-golden")
+    model = FEModel(name="axial-bar-golden")
 
     data = {"E": 210.0e9, "rho": 7800.0, "A": 2.5e-4, "L": 1.7}
     model.add_node(id=1, xyz=(0.0, 0.0, 0.0))
@@ -40,17 +41,17 @@ def axial_bar() -> tuple[Any, dict[str, float]]:
 
 @pytest.fixture
 def cantilever() -> tuple[Any, dict[str, float]]:
-    """A slender circular Euler beam represented by sixteen BEAM2 elements."""
-    model_module = pytest.importorskip("femtools.core.model")
-    model = model_module.FEModel(name="cantilever-golden")
+    """A slender rectangular Euler beam represented by sixteen BEAM2 elements."""
+    model = FEModel(name="cantilever-golden")
 
     data = {
         "E": 70.0e9,
         "rho": 2700.0,
         "L": 2.0,
         "A": 8.0e-4,
-        "I": 5.0e-8,
-        "J": 1.0e-7,
+        "Iy": 3.0e-8,
+        "Iz": 6.0e-8,
+        "J": 9.0e-8,
         "n_elements": 16,
     }
     for index in range(data["n_elements"] + 1):
@@ -69,8 +70,8 @@ def cantilever() -> tuple[Any, dict[str, float]]:
         type="beam",
         material_id=1,
         A=data["A"],
-        Iy=data["I"],
-        Iz=data["I"],
+        Iy=data["Iy"],
+        Iz=data["Iz"],
         J=data["J"],
     )
     for index in range(data["n_elements"]):

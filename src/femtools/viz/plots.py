@@ -324,15 +324,15 @@ def _mode_displacements(
     coords: dict[int, np.ndarray],
     dof_map: Any,
 ) -> dict[int, np.ndarray]:
-    """Map a mode-shape vector to per-node translation vectors (3,).
+    """Map a mode-shape vector to per-node DOF vectors (6,): ux..uz, rx..rz.
 
     Supports dof_map as ``{(node_id, local_dof): global_index}`` (local
     DOF 0- or 1-based) or ``{node_id: sequence of global indices}``.
     Without a dof_map, an equal number of DOFs per node is assumed, in
-    ascending node-id order, translations first.
+    ascending node-id order, translations first, then rotations.
     """
     node_ids = sorted(coords)
-    disp = {nid: np.zeros(3) for nid in node_ids}
+    disp = {nid: np.zeros(6) for nid in node_ids}
 
     if dof_map:
         try:
@@ -343,7 +343,7 @@ def _mode_displacements(
             base = min(k[1] for k, _ in items)  # 0- or 1-based local DOF
             for (nid, ldof), gidx in items:
                 comp = int(ldof) - base
-                if nid in disp and 0 <= comp < 3 and 0 <= int(gidx) < phi.shape[0]:
+                if nid in disp and 0 <= comp < 6 and 0 <= int(gidx) < phi.shape[0]:
                     disp[nid][comp] = phi[int(gidx)].real
             return disp
         if items:
@@ -352,7 +352,7 @@ def _mode_displacements(
                     continue
                 if isinstance(gidxs, (int, np.integer)):
                     gidxs = [gidxs]
-                for comp, gidx in enumerate(list(gidxs)[:3]):
+                for comp, gidx in enumerate(list(gidxs)[:6]):
                     if 0 <= int(gidx) < phi.shape[0]:
                         disp[nid][comp] = phi[int(gidx)].real
             return disp
@@ -361,11 +361,51 @@ def _mode_displacements(
     n_nodes = len(node_ids)
     ndof_per_node = max(1, phi.shape[0] // max(n_nodes, 1))
     for i, nid in enumerate(node_ids):
-        for comp in range(min(3, ndof_per_node)):
+        for comp in range(min(6, ndof_per_node)):
             gidx = i * ndof_per_node + comp
             if gidx < phi.shape[0]:
                 disp[nid][comp] = phi[gidx].real
     return disp
+
+
+def _draw_rotations(ax, points: list, rotations: list, *, three_d: bool,
+                    length: float, color: str) -> None:
+    """Draw nodal rotation pseudo-vectors (right-hand rule, rx/ry/rz).
+
+    3D axes get quiver arrows of the rotation vector.  2D (XY) axes get
+    quiver arrows for the in-plane part plus signed circle markers for
+    the out-of-plane component: radius ~ |theta_z|, solid = CCW (+z),
+    dashed = CW (-z).
+    """
+    P = np.asarray(points, dtype=float)
+    R = np.asarray(rotations, dtype=float)
+    if P.size == 0 or R.size == 0:
+        return
+    rmax = float(np.max(np.linalg.norm(R, axis=1)))
+    if rmax <= 0.0:
+        return
+    V = R * (length / rmax)
+    if three_d:
+        ax.quiver(P[:, 0], P[:, 1], P[:, 2], V[:, 0], V[:, 1], V[:, 2],
+                  color=color, linewidth=1.2, alpha=0.9)
+        # mplot3d quiver does not autoscale; include the arrow tips manually
+        pts = np.vstack([P, P + V])
+        ax.auto_scale_xyz(pts[:, 0], pts[:, 1], pts[:, 2], had_data=True)
+        return
+    if np.max(np.abs(V[:, :2])) > 1e-12 * length:
+        ax.quiver(P[:, 0], P[:, 1], V[:, 0], V[:, 1], color=color,
+                  angles="xy", scale_units="xy", scale=1.0, width=0.004, alpha=0.9)
+    rz = R[:, 2] / rmax
+    for sign, style, label in ((1.0, "-", r"$\theta_z>0$ (ccw)"),
+                               (-1.0, "--", r"$\theta_z<0$ (cw)")):
+        sel = sign * rz > 1e-12
+        if np.any(sel):
+            ax.scatter(P[sel, 0], P[sel, 1], s=250.0 * np.abs(rz[sel]),
+                       facecolors="none", edgecolors=color, linestyles=style,
+                       linewidths=1.3, label=label)
+    handles, _labels = ax.get_legend_handles_labels()
+    if handles:
+        ax.legend(loc="best", fontsize=8)
 
 
 def plot_mode(
@@ -377,6 +417,8 @@ def plot_mode(
     scale: float | None = None,
     dof_map: Any = None,
     show_undeformed: bool = True,
+    show_rotations: bool = False,
+    rotation_scale: float | None = None,
     color: str = "tab:red",
     title: str | None = None,
     outfile: str | None = None,
@@ -386,7 +428,16 @@ def plot_mode(
     ``modal`` is a ``ModalResult`` (``modes`` array ``(ndof, n_modes)``,
     optional ``freq_hz`` and ``dof_map``) or a raw mode matrix/vector.
     The displacement scale defaults to 10% of the model bounding-box
-    diagonal at unit maximum displacement.  Returns the matplotlib Figure.
+    diagonal at unit maximum displacement.
+
+    With ``show_rotations=True`` the rotational DOF components (rx, ry,
+    rz) are drawn at the deformed nodes: quiver arrows of the rotation
+    pseudo-vector in 3D; in 2D, arrows for the in-plane part plus circle
+    markers sized by ``|theta_z|`` (solid = CCW, dashed = CW).
+    ``rotation_scale`` sets the length of the largest arrow in model
+    units (default: 8% of the bounding-box diagonal).
+
+    Returns the matplotlib Figure.
     """
     plt = _plt()
     coords = _node_coords(model)
@@ -397,13 +448,15 @@ def plot_mode(
     if dof_map is None:
         dof_map = getattr(modal, "dof_map", None)
 
-    disp = _mode_displacements(phi, coords, dof_map)
+    disp6 = _mode_displacements(phi, coords, dof_map)
+    disp = {nid: v[:3] for nid, v in disp6.items()}
 
     xyz = np.asarray(list(coords.values())) if coords else np.zeros((0, 3))
+    bbox = float(np.linalg.norm(np.ptp(xyz, axis=0))) if len(xyz) else 1.0
+    bbox = bbox if bbox > 0 else 1.0
     dmax = max((float(np.linalg.norm(d)) for d in disp.values()), default=0.0)
     if scale is None:
-        bbox = float(np.linalg.norm(np.ptp(xyz, axis=0))) if len(xyz) else 1.0
-        scale = 0.1 * (bbox if bbox > 0 else 1.0) / dmax if dmax > 0 else 1.0
+        scale = 0.1 * bbox / dmax if dmax > 0 else 1.0
 
     deformed = {nid: coords[nid] + scale * disp[nid] for nid in coords}
     all_pts = np.vstack([xyz, np.asarray(list(deformed.values()))]) if coords else xyz
@@ -421,6 +474,18 @@ def plot_mode(
         _draw_wireframe(ax, seg0, pts0, three_d=three_d, color="0.7", lw=1.0, alpha=0.8)
     seg1, pts1 = _segments(model, deformed)
     _draw_wireframe(ax, seg1, pts1, three_d=three_d, color=color, lw=1.8)
+
+    if show_rotations:
+        node_ids = sorted(coords)
+        arrow_len = rotation_scale if rotation_scale is not None else 0.08 * bbox
+        _draw_rotations(
+            ax,
+            [deformed[nid] for nid in node_ids],
+            [disp6[nid][3:6] for nid in node_ids],
+            three_d=three_d,
+            length=arrow_len,
+            color=color,
+        )
 
     ax.set_xlabel("x")
     ax.set_ylabel("y")

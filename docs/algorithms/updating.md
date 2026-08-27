@@ -96,18 +96,26 @@ relative on the golden beam.
 ## 4. WLS / Bayesian iteration — `update_model(...)`
 
 ```python
-update_model(model, parameters, measured, weights=None,
-             regularization=0.0, max_iter=20, tol=1e-6,
-             move_limit=0.2, method="analytic") -> UpdateResult
+# implemented API (femtools.updating.updater)
+update_model(model, parameters, targets, *, weights=None,
+             method="wls" | "bayesian", bounds=None, p0=None,
+             sensitivity_method="central", regularization=0.0,
+             max_iter=30, tol=1e-6, max_relative_step=0.5,
+             n_modes=10, spec=None) -> UpdateResult
 
-measured = {"freq_hz": ..., "modes": ..., "mode_dofs": [...], "frf": ...}   # any subset
+# parameters: Parameter objects / dicts / names (see femtools.updating.parameters);
+#   relative=True parameters are multipliers on the baseline model value.
+# targets: measured response vector (e.g. frequencies in Hz) or {name: value}.
+# Shape/FRF residuals enter via spec=ResponseSpec(reference_modes=..., include_mac=True,
+#   frf=...) instead of a `measured` dict.
 
 class UpdateResult:
-    model: FEModel            # updated copy — never mutate the input
-    p: np.ndarray             # final relative parameters
-    covariance: np.ndarray    # posterior parameter covariance
-    history: list[dict]       # per-iteration: p, residual norm, max |dp|, pairing
+    model: FEModel            # updated deep copy — the input is never mutated
+    x / p: np.ndarray         # final parameter vector
+    covariance: np.ndarray    # posterior parameter covariance (None if singular)
+    history: list[dict]       # per-iteration: x, cost, rms, lambda, response
     converged: bool
+    n_iter: int; message: str
 ```
 
 Gauss–Newton step on the weighted, prior-regularized objective
@@ -128,8 +136,10 @@ $$\Delta p = \left( S^\top W_z S + W_p \right)^{-1}
 
 Safeguards per iteration:
 
-1. **Move limits**: clip $|\Delta p_k| \le$ `move_limit` (default 0.2) — Gauss–Newton on
-   eigenvalue residuals overshoots badly outside the linearization trust region.
+1. **Move limits**: cap the relative parameter change per iteration at
+   `max_relative_step` (default 0.5), with Levenberg–Marquardt damping and a
+   backtracking line search on top — Gauss–Newton on eigenvalue residuals
+   overshoots badly outside the linearization trust region.
 2. **Bounds**: project $p$ onto $[lower, upper]$ boxes after the step (projected GN); an active
    bound for > 2 iterations should be reported — it usually means wrong parameterization.
 3. **Conditioning**: SVD of $W_z^{1/2} S$; truncate $\sigma_i / \sigma_1 < 10^{-8}$; log the

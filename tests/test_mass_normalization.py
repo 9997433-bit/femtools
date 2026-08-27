@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
-assemble_module = pytest.importorskip("femtools.fea.assemble")
-eigen_module = pytest.importorskip("femtools.fea.eigen")
+from femtools.fea import assemble as assemble_module
+from femtools.fea import eigen as eigen_module
 
 
 def test_modes_are_mass_normalized(

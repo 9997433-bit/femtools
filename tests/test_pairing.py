@@ -5,9 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-import pytest
 
-pairing_module = pytest.importorskip("femtools.correlation.pairing")
+from femtools.correlation import pairing as pairing_module
 
 
 def _pairs_array(result: Any) -> np.ndarray:

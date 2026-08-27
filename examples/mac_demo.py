@@ -45,12 +45,12 @@ def main() -> int:
     perm = RNG.permutation(N_MODES)
     phi_b = q[:, perm] + 0.05 * RNG.standard_normal((N_DOF, N_MODES))
     freq_b = freq_a[perm] * (1.0 + 0.02 * RNG.standard_normal(N_MODES))
-    pairs = pair_modes(freq_a, q, freq_b, phi_b, mac_min=0.5)
-    print("\npairing (i_a -> i_b, MAC):")
+    pairs = pair_modes(q, phi_b, freq_a, freq_b, mac_threshold=0.5)
+    print("\npairing (index_a -> index_b, MAC):")
     recovered = {}
     for p in pairs:
-        print(f"  {p.i_a} -> {p.i_b}   MAC = {p.mac:.3f}")
-        recovered[p.i_a] = p.i_b
+        print(f"  {p.index_a} -> {p.index_b}   MAC = {p.mac:.3f}")
+        recovered[p.index_a] = p.index_b
     checks.append(all(perm[recovered[i]] == i for i in recovered) and len(pairs) == N_MODES)
 
     # 4. Double modes: same 2-D subspace, rotated 45 degrees

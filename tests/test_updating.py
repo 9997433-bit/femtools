@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-reference_module = pytest.importorskip("femtools.updating.reference")
-updater_module = pytest.importorskip("femtools.updating.updater")
+from femtools.updating import reference as reference_module
+from femtools.updating import updater as updater_module
 
 
 @pytest.mark.golden

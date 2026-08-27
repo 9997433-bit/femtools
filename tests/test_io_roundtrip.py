@@ -7,7 +7,10 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
-import pytest
+
+from femtools.io import bdf as bdf_module
+from femtools.io import project as project_module
+from femtools.io import unv as unv_module
 
 
 def _assert_basic_model_equal(
@@ -51,7 +54,6 @@ def test_project_roundtrip_preserves_model(
     tmp_path: Path,
     axial_bar: tuple[object, dict[str, float]],
 ) -> None:
-    project_module = pytest.importorskip("femtools.io.project")
     model, _ = axial_bar
     path = tmp_path / "axial.ftproj"
 
@@ -72,7 +74,6 @@ def test_bdf_roundtrip_preserves_bar_connectivity(
     tmp_path: Path,
     axial_bar: tuple[object, dict[str, float]],
 ) -> None:
-    bdf_module = pytest.importorskip("femtools.io.bdf")
     model, _ = axial_bar
     path = tmp_path / "axial.bdf"
 
@@ -85,7 +86,6 @@ def test_unv_roundtrip_preserves_node_dataset(
     tmp_path: Path,
     axial_bar: tuple[object, dict[str, float]],
 ) -> None:
-    unv_module = pytest.importorskip("femtools.io.unv")
     model, _ = axial_bar
     path = tmp_path / "axial.unv"
 

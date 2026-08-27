@@ -42,6 +42,14 @@ INDEX_HTML = """<!DOCTYPE html>
     background: #0b0f19; color: var(--text); border: 1px solid var(--line);
     font: 13px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; padding: 10px;
   }
+  form.loader { display: flex; gap: 8px; align-items: center; }
+  form.loader input {
+    flex: 1; border-radius: 8px; background: #0b0f19; color: var(--text);
+    border: 1px solid var(--line); padding: 8px 10px;
+    font: 13px/1.4 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  form.loader button { margin-top: 0; }
+  .hint { color: var(--muted); font-size: 12px; margin: 6px 0 0; }
   button {
     background: var(--accent); color: #071120; font-weight: 600; border: 0;
     border-radius: 8px; padding: 8px 18px; margin-top: 10px; cursor: pointer;
@@ -93,6 +101,16 @@ MAC</textarea>
         <button id="refresh" class="secondary">Refresh</button>
       </div>
       <pre id="log">ready.</pre>
+    </section>
+    <section style="margin-top:18px">
+      <h2>Load model file</h2>
+      <form class="loader" id="loadform">
+        <input id="modelpath" type="text" spellcheck="false"
+               placeholder="/path/to/model.ftproj | .json | .unv | .bdf">
+        <button type="submit">Load</button>
+      </form>
+      <p class="hint">Path on the machine running this server; stored results
+        (.ftproj/.unv) are imported too.</p>
     </section>
     <section style="margin-top:18px">
       <h2>Capabilities</h2>
@@ -180,6 +198,25 @@ $('run').onclick = async () => {
       $('log').innerHTML = `<span class="err">error</span>\\n${data.error}\\n\\nexecuted:\\n`
         + (data.executed || []).join('\\n');
       renderModel(data.model);
+    }
+  } catch (e) { $('log').innerHTML = `<span class="err">request failed:</span> ${e}`; }
+};
+$('loadform').onsubmit = async (ev) => {
+  ev.preventDefault();
+  $('log').textContent = 'loading model…';
+  try {
+    const r = await fetch('/api/load', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ path: $('modelpath').value }),
+    });
+    const data = await r.json();
+    if (data.ok) {
+      $('log').innerHTML = `<span class="ok">ok</span> — loaded ${data.path} `
+        + `(${data.format})`;
+      renderModel(data.model); renderResults(data.results || []);
+      showPlots((data.results || []).length ? ['mesh', 'mode', 'mac'] : ['mesh']);
+    } else {
+      $('log').innerHTML = `<span class="err">error</span>\\n${data.error}`;
     }
   } catch (e) { $('log').innerHTML = `<span class="err">request failed:</span> ${e}`; }
 };

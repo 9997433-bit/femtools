@@ -21,7 +21,13 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike
 
-from .parameters import ParameterSet, apply_parameters, as_parameters, snapshot_baseline
+from .parameters import (
+    ParameterSet,
+    apply_parameters,
+    as_parameters,
+    snapshot_baseline,
+    unwrap_model,
+)
 
 __all__ = [
     "ResponseSpec",
@@ -235,6 +241,7 @@ def modal_response_function(
     The model is deep-copied for every evaluation, so the caller's database is
     never mutated.
     """
+    model = unwrap_model(model)
     pset: ParameterSet = as_parameters(parameters)
     if spec is None:
         spec = ResponseSpec(
@@ -303,6 +310,7 @@ def frf_response_function(
     Requires ``femtools.dynamics.frf`` (or an equivalent ``solver`` callback that
     returns a complex array shaped ``(n_out, n_in, n_freq)``).
     """
+    model = unwrap_model(model)
     pset = as_parameters(parameters)
     base = snapshot_baseline(model, pset)
     freq_hz = np.asarray(freq_hz, dtype=float)

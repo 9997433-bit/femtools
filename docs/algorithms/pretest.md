@@ -63,17 +63,25 @@ while n_current > n_sensors:
     drop argmin(E_D)               # ties: drop the one with smaller row norm
 ```
 
-Never form $Q^{-1}$ explicitly: Cholesky-solve $Q X = \Phi_s^\top$ and take
-$E_{D,j} = \phi_j^\top X_{:,j}$ row-wise. Cost per sweep $O(n_s m^2 + m^3)$, total
-$O((n_s - n_{target})(n_s m^2))$ — trivial for realistic sizes. Track and return
-$\det Q$ (as log-det) per step: EFI is the greedy maximizer of $\det Q$ (D-optimality).
+Never form $Q^{-1}$ explicitly: the implementation computes $E_D$ from a thin SVD
+($E_{D,j} = \lVert U_{j,:} \rVert^2$), which avoids squaring the condition number. Cost per
+sweep $O(n_s m^2 + m^3)$, total $O((n_s - n_{target})(n_s m^2))$ — trivial for realistic
+sizes. EFI is the greedy maximizer of $\det Q$ (D-optimality); the implementation records
+the minimum retained leverage per step rather than a log-det trace.
 
 ```python
-class EfiResult:
-    selected: list[int]        # indices into candidate list, ranked by final E_D desc
-    ed_final: np.ndarray       # E_D of the kept set
-    logdet_history: np.ndarray # (n_s - n_sensors + 1,)
-    condition: float           # cond(Phi_s[kept]) — report, warn > 1e3
+# implemented API (femtools.pretest.efi)
+effective_independence(phi, n_sensors, *, candidate_dofs=None, mass=None,
+                       freq_hz=None, method="efi" | "efi-dpr", keep=None) -> EFIResult
+
+class EFIResult:
+    dofs: np.ndarray           # selected candidate ids, ranked by final E_D desc
+    selected: np.ndarray       #   (alias of dofs)
+    efi: np.ndarray            # final E_D of the kept set, same order
+    index: np.ndarray          # row positions of the kept candidates in phi
+    ranking, removed           # all candidates by elimination order / dropped ids
+    ed_initial: np.ndarray     # E_D of the full candidate set before elimination
+    history: list[tuple]       # (n_remaining, min E_D) per elimination step
 ```
 
 Pitfalls: (i) stopping below $n_{sensors} = m$ makes $Q$ singular — hard error; (ii) EFI

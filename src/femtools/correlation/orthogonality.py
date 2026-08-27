@@ -56,8 +56,8 @@ def cross_orthogonality(
         ``(n_mode_a, n_mode_b)`` matrix.  Real for real inputs.
     """
     a = as_mode_matrix(phi_a, "phi_a")
-    self_case = same_array(a, None if phi_b is None else np.asarray(phi_b))
     b = a if phi_b is None else as_mode_matrix(phi_b, "phi_b")
+    self_case = phi_b is None or same_array(a, b)
     if a.shape[0] != b.shape[0]:
         raise ValueError(
             f"phi_a has {a.shape[0]} DOF but phi_b has {b.shape[0]}; align the DOF sets first"

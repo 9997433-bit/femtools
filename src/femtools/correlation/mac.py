@@ -39,7 +39,8 @@ def mac_matrix(
     Parameters
     ----------
     phi_a, phi_b:
-        Mode shapes as ``(n_dof, n_mode)`` arrays (a 1-D array is one mode).
+        Mode shapes as ``(n_dof, n_mode)`` arrays (a 1-D array is one mode),
+        or a modal result carrying them (``ModalResult.modes``).
         ``phi_b=None`` computes the auto-MAC of ``phi_a``.  Real or complex.
     weights:
         Optional weighting operator ``W`` giving the generalized MAC
@@ -61,8 +62,8 @@ def mac_matrix(
     diagonal-only variant.
     """
     a = as_mode_matrix(phi_a, "phi_a")
-    self_case = same_array(a, None if phi_b is None else np.asarray(phi_b))
     b = a if phi_b is None else as_mode_matrix(phi_b, "phi_b")
+    self_case = phi_b is None or same_array(a, b)
     if a.shape[0] != b.shape[0]:
         raise ValueError(
             f"phi_a has {a.shape[0]} DOF but phi_b has {b.shape[0]}; align the DOF sets first"

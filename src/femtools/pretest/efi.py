@@ -119,13 +119,19 @@ def effective_independence(
         Target mode shapes at the candidate DOFs, ``(n_candidate, n_mode)``.
         Rows are candidate sensor DOFs (translations of the measurable
         directions), columns the target modes from
-        :func:`~femtools.pretest.target_modes.select_target_modes`.
+        :func:`~femtools.pretest.target_modes.select_target_modes`.  Both
+        slices come out of
+        :func:`~femtools.pretest.candidates.translational_dofs` for a solved
+        model; a full ``ModalResult`` is accepted too and then treats every
+        DOF as a candidate.
     n_sensors:
         Number of sensors to retain.  Defaults to the number of target modes,
         which is the minimum for an invertible Fisher information matrix.
     candidate_dofs:
         Ids reported for the rows of ``phi`` (DOF numbers, labels, ...).
-        Defaults to ``0 .. n_candidate-1``.
+        Defaults to ``0 .. n_candidate-1``.  Pass ``CandidateSet.dofs`` to
+        get global DOF numbers back, which index straight into
+        ``ModalResult.modes``.
     mass:
         Optional lumped mass (or any positive weight) per candidate DOF.  The
         rows are scaled by ``sqrt(mass)``, giving the kinetic-energy weighted

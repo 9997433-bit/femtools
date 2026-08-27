@@ -15,7 +15,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from ..correlation._linalg import as_mode_matrix, safe_divide, weighted
+from ..correlation._linalg import as_mode_matrix, mode_frequencies, safe_divide, weighted
 from ..correlation.dofmap import DOFMap
 from ._result import IdSequenceMixin
 
@@ -111,10 +111,13 @@ def rigid_body_modes(
 
 
 def _node_coords(coords: Any, nodes: NDArray[np.int64]) -> NDArray[np.float64]:
+    """Expand nodal coordinates to one row per DOF of the map."""
     if coords is None:
         return np.zeros((nodes.size, 3))
     if isinstance(coords, dict):
-        return np.array([np.asarray(coords[int(n)], dtype=float).reshape(3) for n in nodes])
+        keys = np.fromiter((int(k) for k in coords), dtype=np.int64, count=len(coords))
+        table = np.array([np.asarray(v, dtype=float).reshape(3) for v in coords.values()])
+        return _expand(table, keys, nodes)
     arr = np.asarray(coords, dtype=float)
     if arr.ndim != 2 or arr.shape[1] != 3:
         raise ValueError(f"coords must be (n_node, 3), got shape {arr.shape}")
@@ -125,8 +128,19 @@ def _node_coords(coords: Any, nodes: NDArray[np.int64]) -> NDArray[np.float64]:
         raise ValueError(
             f"coords has {arr.shape[0]} rows but the DOF map covers {unique.size} nodes"
         )
-    lookup = {int(n): i for i, n in enumerate(unique.tolist())}
-    return arr[[lookup[int(n)] for n in nodes]]
+    return _expand(arr, unique, nodes)
+
+
+def _expand(
+    table: NDArray[np.float64], keys: NDArray[np.int64], nodes: NDArray[np.int64]
+) -> NDArray[np.float64]:
+    """Rows of ``table`` (labelled by ``keys``) in the order of ``nodes``."""
+    order = np.argsort(keys, kind="stable")
+    pos = np.clip(np.searchsorted(keys[order], nodes), 0, max(keys.size - 1, 0))
+    if keys.size == 0 or not np.all(keys[order][pos] == nodes):
+        missing = np.unique(nodes[keys[order][pos] != nodes]) if keys.size else np.unique(nodes)
+        raise KeyError(f"no coordinates for node(s) {missing[:5].tolist()}")
+    return table[order][pos]
 
 
 @dataclass
@@ -203,7 +217,9 @@ def effective_mass(
     Parameters
     ----------
     phi:
-        Mode shapes ``(n_dof, n_mode)``.
+        Mode shapes ``(n_dof, n_mode)``, or a modal result carrying them —
+        ``effective_mass(modal, modal.M, dof_map=modal, coords=xyz)`` then
+        picks up the frequencies as well.
     mass:
         Mass matrix (dense, sparse, 1-D lumped diagonal, or ``None`` for the
         identity).
@@ -214,7 +230,9 @@ def effective_mass(
     ref_point:
         Reference point for the rotational directions.
     freq_hz:
-        Optional frequencies, carried through to the result for reporting.
+        Optional frequencies, carried through to the result for reporting and
+        used by :func:`select_target_modes` for its band filter.  Inherited
+        from ``phi`` when it is a modal result.
     generalized_mass:
         Modal masses ``m_j``; computed from ``phi`` and ``mass`` when omitted.
 
@@ -259,6 +277,8 @@ def effective_mass(
     labels = (
         DIRECTIONS[: r.shape[1]] if r.shape[1] <= 6 else tuple(f"D{i}" for i in range(r.shape[1]))
     )
+    if freq_hz is None:
+        freq_hz = mode_frequencies(phi)
     freqs = None if freq_hz is None else np.asarray(freq_hz, dtype=float).reshape(-1)
     if freqs is not None and freqs.size != n_mode:
         raise ValueError(f"freq_hz has {freqs.size} entries, expected {n_mode}")

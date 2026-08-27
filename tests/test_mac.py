@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
-mac_module = pytest.importorskip("femtools.correlation.mac")
+from femtools.correlation import mac as mac_module
 
 
 def test_mac_of_orthonormal_basis_is_identity() -> None:

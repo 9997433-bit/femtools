@@ -12,6 +12,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import threading
+from pathlib import Path
 from typing import Any
 
 import femtools
@@ -74,6 +75,46 @@ class GuiState:
                 entry["shape"] = list(shape)
             out.append(entry)
         return {"results": out}
+
+    def load_model(self, path: str) -> dict:
+        """Load a model file (.ftproj / .json / .unv / .bdf) into the session.
+
+        The file lives on the machine running the server (the GUI is a
+        local tool), so a plain path is enough — no upload needed.
+        Results stored in ``.ftproj`` / ``.unv`` files are imported into
+        the session's result store.
+        """
+        text = (path or "").strip()
+        if not text:
+            raise GuiApiError("empty path: pass the path of a model file on this machine")
+        fs_path = Path(text).expanduser()
+        if not fs_path.is_file():
+            raise GuiApiError(f"no such file: {fs_path}")
+        try:
+            from femtools.script.loading import load_model_file
+        except ImportError as exc:  # pragma: no cover - loading.py ships with script
+            raise GuiApiError(f"model loading is unavailable: {exc}") from exc
+        try:
+            loaded = load_model_file(fs_path)
+        except ImportError as exc:
+            raise GuiApiError(
+                f"loading {fs_path.suffix!r} files needs femtools module "
+                f"{exc.name or exc}, which is not installed"
+            ) from exc
+        except Exception as exc:  # unreadable/malformed file: user-facing 400
+            raise GuiApiError(f"could not load {fs_path.name}: {exc}") from exc
+        with self._lock:
+            self.engine.model = loaded.model
+            for name, result in loaded.results.items():
+                self.engine.results[name] = result
+            self.engine.log.append(f"(gui) load {fs_path}")
+            return {
+                "ok": True,
+                "path": str(fs_path),
+                "format": loaded.format,
+                "model": self.model_summary(),
+                "results": self.results_summary()["results"],
+            }
 
     def run_script(self, source: str) -> dict:
         if not isinstance(source, str) or not source.strip():

@@ -12,19 +12,57 @@ from numpy.typing import ArrayLike, NDArray
 
 __all__ = [
     "as_mode_matrix",
+    "mode_source",
+    "mode_frequencies",
     "same_array",
     "weighted",
     "column_norms_sq",
     "safe_divide",
 ]
 
+#: Attributes searched when unwrapping a modal result object.
+_MODE_ATTRS = ("modes", "phi", "mode_shapes", "shapes", "eigenvectors")
+
+#: Attributes searched when unwrapping the frequencies of a modal result.
+_FREQ_ATTRS = ("freq_hz", "frequencies", "freq")
+
+
+def mode_source(obj: Any) -> Any:
+    """Unwrap a modal result to its mode shape matrix.
+
+    Anything array-like passes through unchanged; an object exposing
+    ``modes`` / ``phi`` (:class:`femtools.fea.eigen.ModalResult` and the
+    equivalents produced by the readers) yields that array, so the whole
+    correlation and pretest API accepts a solver result where it documents a
+    ``(n_dof, n_mode)`` array.
+    """
+    if obj is None or isinstance(obj, (np.ndarray, list, tuple)):
+        return obj
+    for name in _MODE_ATTRS:
+        value = getattr(obj, name, None)
+        if value is not None and not callable(value):
+            return value
+    return obj
+
+
+def mode_frequencies(obj: Any) -> NDArray[np.float64] | None:
+    """Natural frequencies [Hz] carried by a modal result, if any."""
+    if obj is None or isinstance(obj, (np.ndarray, list, tuple)):
+        return None
+    for name in _FREQ_ATTRS:
+        value = getattr(obj, name, None)
+        if value is not None and not callable(value):
+            return np.asarray(value, dtype=float).reshape(-1)
+    return None
+
 
 def as_mode_matrix(phi: ArrayLike, name: str = "phi") -> NDArray[Any]:
     """Return ``phi`` as a 2-D ``(n_dof, n_mode)`` array.
 
-    A 1-D input is interpreted as a single mode shape (one column).
+    A 1-D input is interpreted as a single mode shape (one column); a modal
+    result object is unwrapped by :func:`mode_source` first.
     """
-    arr = np.asarray(phi)
+    arr = np.asarray(mode_source(phi))
     if arr.ndim == 1:
         arr = arr.reshape(-1, 1)
     if arr.ndim != 2:

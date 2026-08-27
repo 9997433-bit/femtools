@@ -15,5 +15,12 @@ Usage::
 from __future__ import annotations
 
 from femtools.script.engine import ScriptEngine, ScriptError
+from femtools.script.loading import LoadedModel, load_model_file, model_from_json_dict
 
-__all__ = ["ScriptEngine", "ScriptError"]
+__all__ = [
+    "ScriptEngine",
+    "ScriptError",
+    "LoadedModel",
+    "load_model_file",
+    "model_from_json_dict",
+]

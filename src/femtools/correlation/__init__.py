@@ -8,6 +8,12 @@ Typical workflow::
     result = pair_modes(phi_t, phi_a, f_test, f_fe, method="hungarian")
     print(result.table())
 
+A solved model can be used wherever mode shapes are expected: a
+:class:`~femtools.fea.eigen.ModalResult` supplies its ``modes``, its real
+``dof_map`` and its frequencies on its own, so the analysis side of the same
+workflow reads ``align_modes(phi_test, map_test, modal)`` followed by
+``pair_modes(phi_t, phi_a, f_test)``.
+
 The scalar single-vector MAC lives at :func:`femtools.correlation.mac.mac`
 (exported here as :func:`mac_value`); the name ``femtools.correlation.mac``
 itself remains the module.
@@ -19,8 +25,10 @@ from .dofmap import (
     COMPONENT_NAMES,
     DOFMap,
     align_modes,
+    as_dofmap,
     match_dofs,
     parse_component,
+    parse_components,
     parse_dof_label,
     restrict,
 )
@@ -40,6 +48,7 @@ __all__ = [
     "ModePair",
     "PairingResult",
     "align_modes",
+    "as_dofmap",
     "auto_orthogonality",
     "comac",
     "cross_orthogonality",
@@ -58,6 +67,7 @@ __all__ = [
     "orthogonality_error",
     "pair_modes",
     "parse_component",
+    "parse_components",
     "parse_dof_label",
     "poc",
     "restrict",

@@ -26,7 +26,29 @@ __all__ = [
     "apply_parameters",
     "parameter_bounds",
     "clip_to_bounds",
+    "unwrap_model",
 ]
+
+# Containers an FE model database is expected to expose.
+_MODEL_CONTAINERS = ("materials", "properties", "elements", "nodes")
+
+
+def unwrap_model(obj: Any) -> Any:
+    """Return the FE model carried by a project-style wrapper.
+
+    ``femtools.io.project.load_project`` hands back a ``Project`` holding the
+    database in ``.model``; readers and GUI state objects do the same.  Anything
+    that already exposes the model containers is returned unchanged.
+    """
+    current = obj
+    for _ in range(4):
+        if current is None or any(hasattr(current, a) for a in _MODEL_CONTAINERS):
+            return current
+        nxt = getattr(current, "model", None)
+        if nxt is None or nxt is current:
+            return obj
+        current = nxt
+    return obj
 
 # Canonical attribute names probed on materials/properties/elements for each kind.
 _KIND_ATTRS: dict[str, tuple[str, ...]] = {
@@ -77,10 +99,40 @@ _ALIASES = {
     "damper": "damper_c",
 }
 
+# Entity-class names accepted by the ``container`` field / the ``type`` key of a
+# parameter descriptor mapping.
+_CONTAINER_ALIASES = {
+    "material": "materials",
+    "materials": "materials",
+    "mat": "materials",
+    "mats": "materials",
+    "property": "properties",
+    "properties": "properties",
+    "prop": "properties",
+    "props": "properties",
+    "element": "elements",
+    "elements": "elements",
+    "elem": "elements",
+    "elems": "elements",
+    "node": "nodes",
+    "nodes": "nodes",
+}
+
 
 def _normalize_kind(kind: str) -> str:
     key = str(kind).strip().lower()
     return _ALIASES.get(key, key)
+
+
+def _normalize_container(name: Any) -> str:
+    key = str(name).strip().lower()
+    try:
+        return _CONTAINER_ALIASES[key]
+    except KeyError:
+        raise ValueError(
+            f"unknown model container {name!r}; expected one of "
+            f"{sorted(set(_CONTAINER_ALIASES.values()))}"
+        ) from None
 
 
 @dataclass
@@ -112,6 +164,10 @@ class Parameter:
     scale:
         Optional scaling used to non-dimensionalise the parameter in the solver.
         Defaults to ``abs(value)`` (or 1.0).
+    container:
+        Restricts the search to one model container (``"materials"``,
+        ``"properties"``, ``"elements"``, ``"nodes"``).  ``None`` probes the
+        containers that normally carry ``kind``.
     """
 
     name: str
@@ -124,9 +180,12 @@ class Parameter:
     setter: Callable[[Any, float, Parameter], None] | None = None
     scale: float | None = None
     unit: str | None = None
+    container: str | None = None
 
     def __post_init__(self) -> None:
         self.kind = _normalize_kind(self.kind)
+        if self.container is not None:
+            self.container = _normalize_container(self.container)
         self.value = float(self.value)
         self.lower = float(self.lower)
         self.upper = float(self.upper)
@@ -207,7 +266,10 @@ def _resolve_entities(model: Any, param: Parameter) -> list[tuple[Any, Any, str]
     if attrs is None:
         # Fall back to using the kind itself as the attribute name.
         attrs = (param.kind,)
-    containers = _KIND_CONTAINERS.get(kind, ("materials", "properties", "elements"))
+    if param.container is not None:
+        containers: tuple[str, ...] = (param.container,)
+    else:
+        containers = _KIND_CONTAINERS.get(kind, ("materials", "properties", "elements"))
     wanted = param.target_ids()
     found: list[tuple[Any, Any, str]] = []
     for cname in containers:
@@ -289,6 +351,104 @@ class ParameterSet(Sequence[Parameter]):
         return np.clip(v, self.lower, self.upper)
 
 
+# Descriptor-mapping key aliases, mapped onto ``Parameter`` field names.
+_DESCRIPTOR_KEYS: dict[str, str] = {
+    "name": "name",
+    "kind": "kind",
+    "quantity": "kind",
+    "parameter": "kind",
+    "attribute": "kind",
+    "attr": "kind",
+    "value": "value",
+    "initial": "value",
+    "start": "value",
+    "x0": "value",
+    "lower": "lower",
+    "low": "lower",
+    "min": "lower",
+    "lb": "lower",
+    "upper": "upper",
+    "high": "upper",
+    "max": "upper",
+    "ub": "upper",
+    "target": "target",
+    "targets": "target",
+    "id": "target",
+    "ids": "target",
+    "entity_id": "target",
+    "entity_ids": "target",
+    "mid": "target",
+    "pid": "target",
+    "eid": "target",
+    "material_id": "target",
+    "property_id": "target",
+    "element_id": "target",
+    "relative": "relative",
+    "setter": "setter",
+    "scale": "scale",
+    "unit": "unit",
+    "units": "unit",
+    "container": "container",
+    "type": "container",
+    "entity": "container",
+}
+
+
+def _parameter_from_mapping(item: Mapping[str, Any], default_name: str) -> Parameter:
+    """Build a :class:`Parameter` from a descriptor mapping.
+
+    Beyond the plain ``Parameter`` field names this understands the entity
+    descriptor style used throughout the examples and the CLI JSON files::
+
+        {"type": "material", "id": 1, "name": "E", "lower": 0.5, "upper": 2.0}
+
+    Here ``type`` names the model container, ``id`` the entity and ``name`` the
+    physical quantity.  A descriptor that does not state an explicit ``value``
+    is interpreted as a *multiplier* on the model's own value, starting at 1.0 —
+    which is what bounds such as ``(0.5, 2.0)`` imply.
+    """
+    kwargs: dict[str, Any] = {}
+    for key, val in item.items():
+        field_name = _DESCRIPTOR_KEYS.get(str(key).strip().lower())
+        if field_name is None:
+            raise TypeError(
+                f"unknown parameter descriptor key {key!r}; expected one of "
+                f"{sorted(set(_DESCRIPTOR_KEYS))}"
+            )
+        if field_name in kwargs and kwargs[field_name] != val:
+            raise TypeError(f"parameter descriptor sets {field_name!r} twice")
+        kwargs[field_name] = val
+    kwargs.setdefault("name", default_name)
+    if "kind" not in kwargs:
+        kwargs["kind"] = _guess_kind(str(kwargs["name"]))
+    if "relative" not in kwargs and "value" not in kwargs and kwargs.get("setter") is None:
+        # No absolute starting value was supplied, so the parameter can only be
+        # meant as a multiplier on whatever the model already carries.
+        kwargs["relative"] = True
+    return Parameter(**kwargs)
+
+
+def _deduplicate_names(params: list[Parameter]) -> list[Parameter]:
+    """Disambiguate repeated names by appending the entity id, then an index."""
+    counts: dict[str, int] = {}
+    for p in params:
+        counts[p.name] = counts.get(p.name, 0) + 1
+    if all(n == 1 for n in counts.values()):
+        return params
+    seen: set[str] = set()
+    for i, p in enumerate(params):
+        if counts[p.name] == 1:
+            seen.add(p.name)
+            continue
+        base = p.name
+        candidate = f"{base}_{p.target}" if p.target is not None else f"{base}_{i + 1}"
+        if candidate in seen:
+            candidate = f"{base}_{i + 1}"
+        p.name = candidate
+        seen.add(candidate)
+    return params
+
+
 def as_parameters(spec: Any) -> ParameterSet:
     """Coerce a user-supplied parameter specification into a :class:`ParameterSet`.
 
@@ -298,6 +458,7 @@ def as_parameters(spec: Any) -> ParameterSet:
         [Parameter(...), ...]
         {"E1": 210e9, "E2": 200e9}              # name -> initial value
         {"E1": {"kind": "E", "value": 2.1e11, "lower": ..., "target": 1}}
+        [{"type": "material", "id": 1, "name": "E", "lower": 0.5, "upper": 2.0}]
         [("E", 1, 210e9), ...]                  # (kind, target, value)
         ["E", "rho"]                            # names only, value 1.0 (relative)
         3                                       # 3 anonymous unit-valued params
@@ -317,10 +478,9 @@ def as_parameters(spec: Any) -> ParameterSet:
                 p.name = p.name or str(name)
                 out.append(p)
             elif isinstance(val, Mapping):
-                kwargs = dict(val)
-                kwargs.setdefault("name", str(name))
-                kwargs.setdefault("kind", _guess_kind(str(name)))
-                out.append(Parameter(**kwargs))
+                p = _parameter_from_mapping(val, str(name))
+                p.name = str(name)
+                out.append(p)
             else:
                 out.append(
                     Parameter(name=str(name), kind=_guess_kind(str(name)), value=float(val))
@@ -332,9 +492,7 @@ def as_parameters(spec: Any) -> ParameterSet:
             if isinstance(item, Parameter):
                 out.append(item)
             elif isinstance(item, Mapping):
-                kwargs = dict(item)
-                kwargs.setdefault("name", f"p{i + 1}")
-                out.append(Parameter(**kwargs))
+                out.append(_parameter_from_mapping(item, f"p{i + 1}"))
             elif isinstance(item, str):
                 out.append(Parameter(name=item, kind=_guess_kind(item), relative=True))
             elif isinstance(item, (tuple, list)):
@@ -353,7 +511,7 @@ def as_parameters(spec: Any) -> ParameterSet:
                 out.append(Parameter(name=f"p{i + 1}", value=float(item)))
             else:
                 raise TypeError(f"cannot interpret parameter spec element {item!r}")
-        return ParameterSet(out)
+        return ParameterSet(_deduplicate_names(out))
     raise TypeError(f"cannot interpret parameter specification {spec!r}")
 
 

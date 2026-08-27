@@ -34,7 +34,13 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike
 
-from .parameters import ParameterSet, apply_parameters, as_parameters, snapshot_baseline
+from .parameters import (
+    ParameterSet,
+    apply_parameters,
+    as_parameters,
+    snapshot_baseline,
+    unwrap_model,
+)
 from .responses import ResponseSpec, modal_response_function
 
 __all__ = [
@@ -465,6 +471,8 @@ def sensitivity_matrix(
     """
     from .reference import ReferenceModel
 
+    if not callable(response) and not isinstance(response, ReferenceModel):
+        response = unwrap_model(response)
     method_l = str(method).lower().replace("_", "-")
     pset: ParameterSet | None = None
     if parameters is not None:

@@ -79,6 +79,19 @@ class TopologyResult:
         return self.density
 
     @property
+    def densities(self) -> np.ndarray:
+        return self.density
+
+    @property
+    def design(self) -> np.ndarray:
+        return self.density
+
+    @property
+    def compliance_history(self) -> np.ndarray:
+        """Compliance at every iteration, as a plain array."""
+        return np.array([rec["compliance"] for rec in self.history], dtype=float)
+
+    @property
     def discreteness(self) -> float:
         """Sigmund's measure of "greyness": 0 = fully black/white, 1 = all grey."""
         r = self.density.ravel()
@@ -271,6 +284,9 @@ def topology_simp(
     continuation: bool = False,
     callback: Any = None,
     verbose: bool = False,
+    loads: Any = None,
+    spcs: Sequence[int] | None = None,
+    seed: int | None = None,
 ) -> TopologyResult:
     """Minimum-compliance SIMP topology optimization on a ``nelx x nely`` grid.
 
@@ -302,6 +318,11 @@ def topology_simp(
     continuation:
         Ramp ``penal`` from 1 to the requested value over the first iterations,
         which reduces the risk of poor local minima.
+    loads, spcs:
+        Spelling aliases for ``forces`` and ``fixed_dofs``.
+    seed:
+        Accepted for signature compatibility; the OC iteration is deterministic
+        and does not use it.
 
     Returns
     -------
@@ -316,6 +337,15 @@ def topology_simp(
     nelx, nely = int(nelx), int(nely)
     n_elem = nelx * nely
     ndof = 2 * (nelx + 1) * (nely + 1)
+
+    if loads is not None:
+        if forces is not None:
+            raise TypeError("pass either `forces` or `loads`, not both")
+        forces = loads
+    if spcs is not None:
+        if fixed_dofs is not None:
+            raise TypeError("pass either `fixed_dofs` or `spcs`, not both")
+        fixed_dofs = spcs
 
     # -- loads / supports ------------------------------------------------
     if forces is None or fixed_dofs is None:

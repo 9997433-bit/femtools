@@ -14,7 +14,7 @@ from __future__ import annotations
 import numpy as np
 from femtools.core.model import FEModel
 from femtools.fea.eigen import solve_modes
-from femtools.updating.updater import update_model
+from femtools.updating import Parameter, update_model
 
 L = 1.0
 B, H = 0.02, 0.03
@@ -49,18 +49,22 @@ def main() -> int:
     print(f"nominal FE frequencies (E = E0):      {np.round(f_start, 4)} Hz")
     print(f"initial max rel freq error: {np.max(np.abs(f_start - f_test) / f_test):.3%}")
 
+    # A single relative parameter: multiplier on material 1's Young's modulus.
+    param = Parameter(name="E", kind="E", target=1, value=1.0,
+                      relative=True, lower=0.5, upper=2.0)
     result = update_model(
         nominal,
-        parameters=[{"type": "material", "id": 1, "name": "E", "lower": 0.5, "upper": 2.0}],
-        measured={"freq_hz": f_test},
-        method="analytic",
+        parameters=[param],
+        targets=f_test,
+        method="wls",
+        n_modes=N_FREQS,
         max_iter=20,
         tol=1e-8,
     )
 
     e_updated = result.p[0] * E0
     rel_err = abs(e_updated - E_TRUE) / E_TRUE
-    print(f"\nconverged: {result.converged} in {len(result.history)} iterations")
+    print(f"\nconverged: {result.converged} in {result.n_iter} iterations")
     print(f"recovered E = {e_updated:.6e} Pa (true {E_TRUE:.6e} Pa)")
     print(f"relative parameter error: {rel_err:.3e}  (acceptance: < 2e-2)")
 

@@ -27,7 +27,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from ..correlation._linalg import as_mode_matrix
+from ..correlation._linalg import as_mode_matrix, mode_frequencies
 from ..correlation.mac import mac_matrix
 
 __all__ = ["MassLoadingResult", "mass_loading", "sensor_mass_limit"]
@@ -109,8 +109,8 @@ def _sensor_partition(
 
 def mass_loading(
     phi: ArrayLike,
-    freq_hz: ArrayLike,
-    added_mass: ArrayLike,
+    freq_hz: ArrayLike | None = None,
+    added_mass: ArrayLike = 0.0,
     dofs: ArrayLike | None = None,
     *,
     method: str = "modal",
@@ -124,7 +124,8 @@ def mass_loading(
         Mass-normalized mode shapes ``(n_dof, n_mode)`` of the unloaded
         structure, in consistent units (SI: m/sqrt(kg)).
     freq_hz:
-        Corresponding natural frequencies [Hz].
+        Corresponding natural frequencies [Hz]; taken from ``phi`` when it is
+        a modal result carrying them.
     added_mass:
         Mass per sensor [kg]: a scalar for identical transducers, or one
         value per entry of ``dofs``.
@@ -146,6 +147,10 @@ def mass_loading(
         unloaded ones (values below 1 signal shape distortion).
     """
     p = as_mode_matrix(phi, "phi")
+    if freq_hz is None:
+        freq_hz = mode_frequencies(phi)
+        if freq_hz is None:
+            raise ValueError("freq_hz is required unless phi carries its own frequencies")
     f = np.asarray(freq_hz, dtype=float).reshape(-1)
     if f.size != p.shape[1]:
         raise ValueError(f"freq_hz has {f.size} entries but phi has {p.shape[1]} modes")

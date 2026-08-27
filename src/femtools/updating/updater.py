@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 import numpy as np
@@ -35,6 +35,7 @@ from .parameters import (
     as_parameters,
     parameter_bounds,
     snapshot_baseline,
+    unwrap_model,
 )
 from .responses import ResponseSpec, modal_response_function
 from .sensitivity import SensitivityResult, sensitivity_matrix
@@ -218,11 +219,82 @@ def _inverse_spd(A: np.ndarray) -> np.ndarray:
         return np.linalg.pinv(A)
 
 
+_MEASURED_FREQ_KEYS = ("freq_hz", "frequencies", "freq", "f_hz", "f", "omega_hz")
+_MEASURED_MODE_KEYS = ("modes", "mode_shapes", "shapes", "phi")
+_MEASURED_MAC_KEYS = ("mac", "macs", "mac_targets")
+_MEASURED_DOF_KEYS = ("dof_indices", "dofs", "measured_dof", "dof")
+_MEASURED_KEYS = frozenset(
+    _MEASURED_FREQ_KEYS + _MEASURED_MODE_KEYS + _MEASURED_MAC_KEYS + _MEASURED_DOF_KEYS
+)
+
+
+def _resolve_measured(
+    measured: Any, spec: ResponseSpec | None
+) -> tuple[np.ndarray, list[str], ResponseSpec | None]:
+    """Turn a structured ``measured=`` argument into ``(targets, names, spec)``.
+
+    Accepts a plain response vector, a ``{name: value}`` mapping, or a test-data
+    mapping such as ``{"freq_hz": [...], "modes": Phi, "mac": [...]}``.
+    """
+    if not isinstance(measured, Mapping):
+        return np.atleast_1d(np.asarray(measured, dtype=float)).ravel(), [], spec
+
+    keys = {str(k).strip().lower(): k for k in measured}
+    if not (_MEASURED_KEYS & set(keys)):
+        # Plain {response name: value} mapping.
+        return (
+            np.asarray([float(v) for v in measured.values()], dtype=float),
+            list(str(k) for k in measured),
+            spec,
+        )
+
+    def _pick(names: tuple[str, ...]) -> Any:
+        for n in names:
+            if n in keys:
+                return measured[keys[n]]
+        return None
+
+    freq = _pick(_MEASURED_FREQ_KEYS)
+    if freq is None:
+        raise ValueError(
+            "`measured` must contain the measured frequencies "
+            f"(one of {list(_MEASURED_FREQ_KEYS)})"
+        )
+    freq_arr = np.atleast_1d(np.asarray(freq, dtype=float)).ravel()
+    modes = _pick(_MEASURED_MODE_KEYS)
+    mac = _pick(_MEASURED_MAC_KEYS)
+    dof = _pick(_MEASURED_DOF_KEYS)
+
+    out_spec = spec
+    if modes is not None or dof is not None or mac is not None:
+        # Copy: the caller's spec must not be mutated.
+        out_spec = replace(spec) if spec is not None else ResponseSpec(n_modes=freq_arr.size)
+        if modes is not None:
+            out_spec.reference_modes = np.asarray(modes)
+        if dof is not None:
+            out_spec.dof_indices = list(np.asarray(dof, dtype=int))
+        if mac is not None:
+            out_spec.include_mac = True
+        out_spec.n_modes = max(out_spec.n_modes, freq_arr.size)
+
+    names = [f"f{i + 1}" for i in range(freq_arr.size)]
+    targets = freq_arr
+    if mac is not None:
+        mac_arr = np.atleast_1d(np.asarray(mac, dtype=float)).ravel()
+        if mac_arr.size == 1:
+            mac_arr = np.full(freq_arr.size, float(mac_arr[0]))
+        # The residual carries ``1 - MAC``, so a target MAC of 1 means 0.
+        targets = np.concatenate([freq_arr, 1.0 - mac_arr])
+        names += [f"1-MAC{i + 1}" for i in range(mac_arr.size)]
+    return targets, names, out_spec
+
+
 def update_model(
     model: Any,
     parameters: Any = None,
     targets: Any = None,
     *,
+    measured: Any = None,
     response: Callable[[np.ndarray], np.ndarray] | None = None,
     weights: Any = None,
     method: str = "wls",
@@ -241,7 +313,7 @@ def update_model(
     lm_damping: float = 1.0e-3,
     line_search: bool = True,
     max_relative_step: float = 0.5,
-    n_modes: int = 10,
+    n_modes: int | None = None,
     spec: ResponseSpec | None = None,
     solver: Callable[..., Any] | None = None,
     options: UpdateOptions | None = None,
@@ -263,13 +335,19 @@ def update_model(
     targets:
         Measured response vector (e.g. experimental frequencies in Hz).  May be a
         mapping ``{name: value}``.
+    measured:
+        Alternative to ``targets`` accepting structured test data, e.g.
+        ``{"freq_hz": [...]}`` or ``{"freq_hz": [...], "modes": Phi, "mac": 1.0}``.
+        Mode shapes switch the residual to MAC-based mode pairing.
     response:
         Explicit response callback; overrides the model-driven one.
     weights:
         ``None``/``"relative"`` (default, ``W = diag(1/r_m^2)``), ``"unit"``,
         a per-response weight vector, or a full weight matrix.
     method:
-        ``"wls"`` (default) or ``"bayesian"``.
+        ``"wls"`` (default), ``"bayesian"``, or ``"analytic"`` /
+        ``"semi-analytic"`` — the latter two are weighted least squares driven
+        by closed-form eigenvalue derivatives instead of finite differences.
     bounds:
         ``(lo, hi)`` pair, per-parameter sequence of pairs, or ``{name: (lo, hi)}``.
         Falls back to the bounds carried by the parameters themselves.
@@ -310,10 +388,14 @@ def update_model(
         max_relative_step=max_relative_step,
         verbose=verbose,
     )
-    meth = opts.method.lower()
+    meth = opts.method.lower().replace("_", "-")
     if meth in ("bayes", "bayesian", "map", "minimum-variance"):
         meth = "bayesian"
     elif meth in ("wls", "ls", "lsq", "least-squares", "gauss-newton", "sensitivity"):
+        meth = "wls"
+    elif meth in ("analytic", "semi-analytic", "semianalytic", "modal"):
+        # An eigenvalue-derivative *sensitivity* choice, not a different estimator.
+        opts.sensitivity_method = "analytic" if meth == "analytic" else "semi-analytic"
         meth = "wls"
     else:
         raise ValueError(f"unknown updating method {method!r}")
@@ -328,6 +410,25 @@ def update_model(
             raise ValueError("`parameters` must be provided")
     pset: ParameterSet = as_parameters(parameters)
 
+    # ---- targets -------------------------------------------------------
+    if measured is not None:
+        if targets is not None:
+            raise ValueError("pass either `targets` or `measured`, not both")
+        t, target_names, spec = _resolve_measured(measured, spec)
+    elif targets is None:
+        raise ValueError("`targets` must be provided")
+    elif isinstance(targets, Mapping):
+        target_names = [str(k) for k in targets]
+        t = np.asarray([float(v) for v in targets.values()], dtype=float)
+    else:
+        target_names = []
+        t = np.atleast_1d(np.asarray(targets, dtype=float)).ravel()
+
+    # With no explicit request, solve exactly as many modes as there are
+    # frequency targets; fall back to the historical default of 10.
+    if n_modes is None:
+        n_modes = int(t.size) if (spec is None and t.size) else 10
+
     # ---- response function --------------------------------------------
     fea_model: Any = None
     if response is not None:
@@ -337,8 +438,8 @@ def update_model(
     elif callable(model):
         fun = model
     else:
-        fea_model = model
-        fun = modal_response_function(model, pset, spec, solver=solver, n_modes=n_modes)
+        fea_model = unwrap_model(model)
+        fun = modal_response_function(fea_model, pset, spec, solver=solver, n_modes=n_modes)
 
     # ---- start point ---------------------------------------------------
     if p0 is not None:
@@ -353,16 +454,6 @@ def update_model(
     lo, hi = parameter_bounds(pset, bounds)
     x0 = np.clip(x0, lo, hi)
 
-    # ---- targets -------------------------------------------------------
-    if targets is None:
-        raise ValueError("`targets` must be provided")
-    if isinstance(targets, Mapping):
-        target_names = list(targets.keys())
-        t = np.asarray([float(v) for v in targets.values()], dtype=float)
-    else:
-        target_names = []
-        t = np.atleast_1d(np.asarray(targets, dtype=float)).ravel()
-
     n_eval = 0
 
     def evaluate(x: np.ndarray) -> np.ndarray:
@@ -376,6 +467,38 @@ def update_model(
         return r[: t.size]
 
     W, weight_kind = _build_weight_matrix(weights, t)
+
+    # ---- how the sensitivity matrix is obtained ---------------------------
+    # The analytic / semi-analytic routes differentiate the assembled K, M and
+    # therefore need the *model*, not the response callback; and they only
+    # produce eigenvalue (frequency) sensitivities, so a MAC-augmented residual
+    # falls back to finite differences.
+    sens_method = opts.sensitivity_method
+    sens_source: Any = fun
+    sens_kwargs: dict[str, Any] = {}
+    if str(sens_method).lower().replace("_", "-") in (
+        "analytic",
+        "semi-analytic",
+        "semianalytic",
+        "modal",
+    ):
+        mac_in_residual = spec is not None and (
+            spec.include_mac or spec.reference_modes is not None
+        )
+        if mac_in_residual:
+            sens_method = "central"
+        elif isinstance(model, ReferenceModel):
+            sens_source = model
+            sens_kwargs = {"n_modes": n_modes}
+        elif fea_model is not None:
+            sens_source = fea_model
+            sens_kwargs = {"n_modes": n_modes, "solver": solver}
+        else:
+            raise ValueError(
+                f"sensitivity_method={opts.sensitivity_method!r} needs an FEModel or a "
+                "femtools.updating.reference model; a bare response callback can only "
+                "be differentiated by finite differences."
+            )
 
     # ---- Bayesian priors ------------------------------------------------
     Cp_inv = None
@@ -453,15 +576,22 @@ def update_model(
 
     for it in range(1, opts.max_iter + 1):
         S = sensitivity_matrix(
-            fun,
+            sens_source,
             x,
             parameters=pset,
-            method=opts.sensitivity_method,
+            method=sens_method,
             step=opts.step,
-            r0=r,
+            r0=r if sens_source is fun else None,
             bounds=(lo, hi),
+            **sens_kwargs,
         )
-        Smat = np.asarray(S)[: t.size, :]
+        Smat = np.asarray(S)
+        if Smat.shape[0] < t.size:
+            raise ValueError(
+                f"sensitivity matrix has {Smat.shape[0]} rows but {t.size} targets "
+                f"were given (sensitivity_method={sens_method!r})"
+            )
+        Smat = Smat[: t.size, :]
         n_eval += S.n_evaluations
 
         d = t - r

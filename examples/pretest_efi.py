@@ -40,19 +40,21 @@ def main() -> int:
 
     # --- EFI backward elimination ------------------------------------------
     efi = effective_independence(targets, n_sensors=N_SENSORS)
-    print(f"\nEFI selected sensor DOFs (0-based): {sorted(efi.selected)}")
-    print(f"final E_D values: {efi.ed_final}")
-    print(f"log det(Q) history: {efi.logdet_history}")
+    kept = np.sort(np.asarray(efi.selected, dtype=int))
+    print(f"\nEFI selected sensor DOFs (0-based): {kept.tolist()}")
+    print(f"final E_D values (ranked): {efi.efi}")
+    print(f"elimination history (n_alive, min E_D): {efi.history}")
 
-    mac_sel = mac_matrix(targets[sorted(efi.selected), :])
+    mac_sel = mac_matrix(targets[kept, :])
     max_offdiag = np.max(np.abs(mac_sel - np.diag(np.diag(mac_sel))))
     print(f"AutoMAC of selected rows:\n{mac_sel}")
     print(f"max off-diagonal MAC = {max_offdiag:.4f}  (acceptance: < 0.15)")
 
     # --- cross-check: MAC-based elimination --------------------------------
     mac_elim = eliminate_by_mac(targets, n_sensors=N_SENSORS)
-    print(f"\neliminate_by_mac kept DOFs: {sorted(mac_elim.selected)} "
-          f"(final max off-diag = {mac_elim.max_offdiag:.4f})")
+    print(f"\neliminate_by_mac kept DOFs: "
+          f"{np.sort(np.asarray(mac_elim.selected, dtype=int)).tolist()} "
+          f"(final max off-diag = {mac_elim.max_off_diagonal:.4f})")
 
     # --- reference: full candidate set (for contrast) ----------------------
     mac_full = mac_matrix(targets)
@@ -61,7 +63,7 @@ def main() -> int:
 
     ok = bool(
         max_offdiag < 0.15
-        and mac_elim.max_offdiag < 0.15
+        and mac_elim.max_off_diagonal < 0.15
         and len(efi.selected) == N_SENSORS
     )
     print("\nPASS" if ok else "\nFAIL")

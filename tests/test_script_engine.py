@@ -6,8 +6,8 @@ from typing import Any
 
 import pytest
 
-pytest.importorskip("femtools.core.model")
-script_module = pytest.importorskip("femtools.script.engine")
+from femtools.core.model import FEModel
+from femtools.script import engine as script_module
 
 
 def _model_from(engine: Any, result: Any) -> Any:
@@ -26,6 +26,7 @@ def test_script_engine_creates_project_and_node() -> None:
     result = engine.run("NEW PROJECT; ADD NODE 1 0 0 0")
     model = _model_from(engine, result)
 
+    assert isinstance(model, FEModel)
     assert 1 in model.nodes
     node = model.nodes[1]
     assert tuple(node.xyz) == pytest.approx((0.0, 0.0, 0.0))

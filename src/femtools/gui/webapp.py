@@ -34,6 +34,9 @@ def create_app(state: GuiState | None = None) -> Any:
     class ScriptRequest(BaseModel):
         source: str
 
+    class LoadRequest(BaseModel):
+        path: str
+
     @app.exception_handler(GuiApiError)
     async def _api_error(_request: Any, exc: GuiApiError) -> JSONResponse:
         return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
@@ -57,6 +60,14 @@ def create_app(state: GuiState | None = None) -> Any:
     @app.post("/api/script")
     async def run_script(request: ScriptRequest) -> dict:
         return gui.run_script(request.source)
+
+    @app.post("/api/load")
+    async def load_model(request: LoadRequest) -> dict:
+        return gui.load_model(request.path)
+
+    @app.get("/api/load")
+    async def load_model_by_query(path: str = "") -> dict:
+        return gui.load_model(path)
 
     @app.get("/api/plot/{kind}")
     async def plot(kind: str, name: str = "mac", index: int = 0) -> Response:

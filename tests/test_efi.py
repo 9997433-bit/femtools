@@ -5,9 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-import pytest
 
-efi_module = pytest.importorskip("femtools.pretest.efi")
+from femtools.pretest import efi as efi_module
 
 
 def _ranking_and_values(result: Any) -> tuple[np.ndarray, np.ndarray]:

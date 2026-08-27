@@ -119,19 +119,19 @@ are a separate plot-level tool.
 ## 5. Mode pairing — `pair_modes` (incl. double modes)
 
 ```python
-pair_modes(freq_a, phi_a, freq_b, phi_b, mac_min=0.5, w_freq=0.0, freq_tol_rel=None)
-    -> list[ModePair]   # ModePair(i_a, i_b, mac, dfreq_rel)
+# implemented API (femtools.correlation.pairing)
+pair_modes(phi_a, phi_b, freq_a=None, freq_b=None, *,
+           method="greedy" | "hungarian" | "auto",
+           mac_threshold=0.0, freq_tol=None, weights=None)
+    -> PairingResult    # iterable of ModePair(index_a, index_b, mac, freq_a, freq_b)
 ```
 
-Cost matrix combining shape and frequency proximity:
-
-$$C_{ij} = w_f\, \frac{|f_{a,i} - f_{b,j}|}{\max(f_{a,i}, \epsilon)} + (1 - w_f)\,(1 - \mathrm{MAC}_{ij}),$$
-
-solved as a rectangular linear assignment (`scipy.optimize.linear_sum_assignment`,
-Jonker–Volgenant, $O(\max(m_a, m_b)^3)$). Post-filter: drop pairs with
-$\mathrm{MAC} < \texttt{mac\_min}$ or $|\Delta f|/f > \texttt{freq\_tol\_rel}$ (if given).
-Greedy max-MAC pairing is *not* acceptable: it deadlocks on crossed modes (classic switch of
-modes 2/3 after updating steps).
+`method="hungarian"` solves the rectangular linear assignment maximizing total MAC
+(`scipy`-style Jonker–Volgenant, $O(\max(m_a, m_b)^3)$); `"auto"` uses it up to 512 modes
+and falls back to greedy above. Gates: pairs with $\mathrm{MAC} < \texttt{mac\_threshold}$
+are rejected, and `freq_tol` forbids candidates with $|\Delta f| / f_b$ beyond the window.
+Prefer the optimal assignment when modes are close in shape: greedy max-MAC pairing
+deadlocks on crossed modes (classic switch of modes 2/3 after updating steps).
 
 **Double / repeated modes.** For (near-)degenerate pairs (symmetric structures: cylinders,
 plates, discs), eigenvectors are only defined up to an arbitrary rotation inside the 2-D

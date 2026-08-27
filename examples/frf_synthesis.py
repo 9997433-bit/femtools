@@ -21,6 +21,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from femtools.core.model import FEModel
 from femtools.dynamics.frf import direct_frf, modal_frf
+from femtools.fea.assemble import assemble_km
 from femtools.fea.eigen import solve_modes
 
 L = 1.0
@@ -46,39 +47,52 @@ def build_model() -> FEModel:
     return model
 
 
+def free_index(asm, node_id: int, component: str) -> int:
+    """Position of (node, component) inside the free-DOF partition."""
+    pos = np.flatnonzero(asm.free_dof == asm.dof_map.index(node_id, component))
+    if pos.size != 1:
+        raise ValueError(f"DOF ({node_id}, {component}) is not a free DOF")
+    return int(pos[0])
+
+
 def main() -> int:
     model = build_model()
-    modal = solve_modes(model, n_modes=N_MODES)
+    asm = assemble_km(model)
+    modal = solve_modes(model, n_modes=N_MODES, assembly=asm)
     f_max = modal.freq_hz[-1]
 
     # Rayleigh anchors at first and last retained mode, equal zeta at both:
     # alpha = 2 z w1 w2 / (w1 + w2), beta = 2 z / (w1 + w2)
     w1, w2 = 2.0 * np.pi * modal.freq_hz[0], 2.0 * np.pi * f_max
     damping = {
-        "model": "rayleigh",
         "alpha": 2.0 * ZETA_TARGET * w1 * w2 / (w1 + w2),
         "beta": 2.0 * ZETA_TARGET / (w1 + w2),
     }
 
     tip, mid = N_ELEM + 1, N_ELEM // 2 + 1
-    inputs = [(tip, 2)]                  # transverse (UY) force at the tip
-    outputs = [(tip, 2), (mid, 2)]       # tip driving point + midspan transfer
+    dofs = [(tip, "uz"), (mid, "uz")]    # tip driving point + midspan transfer
+    # modal_frf indexes the full DOF space of the mode shapes; direct_frf works
+    # on the SPC-reduced free partition of K and M -- two views of the same DOFs.
+    in_full = [asm.dof_map.index(tip, "uz")]
+    out_full = [asm.dof_map.index(n, c) for n, c in dofs]
+    in_free = [free_index(asm, tip, "uz")]
+    out_free = [free_index(asm, n, c) for n, c in dofs]
     freq_hz = np.linspace(0.2 * f_max, 0.8 * f_max, 400)
 
-    h_modal = modal_frf(modal, inputs, outputs, freq_hz, damping)
-    h_direct = direct_frf(model, inputs, outputs, freq_hz, damping)
+    h_modal = modal_frf(modal, in_full, out_full, freq_hz, damping)
+    h_direct = direct_frf(asm.Kff, asm.Mff, in_free, out_free, freq_hz, damping)
 
     print(f"band: {freq_hz[0]:.1f} - {freq_hz[-1]:.1f} Hz "
           f"({N_MODES} modes, f_max = {f_max:.1f} Hz)")
     errs = []
-    for i_out, out_dof in enumerate(outputs):
+    for i_out, out_dof in enumerate(dofs):
         hm, hd = h_modal.H[i_out, 0, :], h_direct.H[i_out, 0, :]
         err = np.linalg.norm(hm - hd) / np.linalg.norm(hd)
         errs.append(err)
         print(f"  output {out_dof}: rel L2(modal - direct) = {err:.3%}")
 
     fig, (ax_mag, ax_ph) = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
-    for i_out, out_dof in enumerate(outputs):
+    for i_out, out_dof in enumerate(dofs):
         ax_mag.semilogy(freq_hz, np.abs(h_modal.H[i_out, 0, :]),
                         label=f"modal, out={out_dof}")
         ax_mag.semilogy(freq_hz, np.abs(h_direct.H[i_out, 0, :]), "--",

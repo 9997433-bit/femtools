@@ -5,9 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-import pytest
 
-topology_module = pytest.importorskip("femtools.optimization.topology")
+from femtools.optimization import topology as topology_module
 
 
 def _density_array(result: Any) -> np.ndarray:

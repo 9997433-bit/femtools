@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import re
 
-import pytest
+from typer.testing import CliRunner
 
-cli_module = pytest.importorskip("femtools.cli")
-typer_testing = pytest.importorskip("typer.testing")
+from femtools import cli as cli_module
 
 
 def test_cli_help_lists_all_contract_subcommands() -> None:
-    runner = typer_testing.CliRunner()
+    runner = CliRunner()
     result = runner.invoke(cli_module.app, ["--help"])
 
     assert result.exit_code == 0, result.output
