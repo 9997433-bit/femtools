@@ -1,7 +1,7 @@
 # Round 4 结论简报
 
 **Branch:** `cursor/femtools-remaining-d551`  
-**pytest:** all previously failing skips for new APIs should now collect; ruff clean after merge.
+**pytest:** 65 passed / 3 skipped / 0 failed; ruff clean.
 
 ## 已落地（相对 R3 的 R3+ 清单）
 
