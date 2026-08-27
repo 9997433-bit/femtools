@@ -582,30 +582,43 @@ _OBLIQUE = np.linalg.qr(
 
 
 def shell_drilling_orientation_gap(
-    etype: str = "QUAD4", *, nx: int = 3, ny: int = 3, n_modes: int = 9
+    etype: str = "QUAD4",
+    *,
+    nx: int = 3,
+    ny: int = 3,
+    n_modes: int = 9,
+    nodal_frames: bool = True,
 ) -> dict[str, float]:
-    """How the free-free spectrum of one flat plate depends on its orientation.
+    """Does the free-free spectrum of one flat plate depend on its orientation?
 
-    A flat shell has no genuine stiffness about its own normal, so ``TRIA3`` and
-    ``QUAD4`` add a rank deficient drilling penalty and the assembler drops the
-    drilling DOFs that receive nothing else.  Dropping them is only possible
-    while the normal *is* a global axis; for any other orientation the drilling
-    direction is a mix of ``rx``, ``ry`` and ``rz``, nothing can be dropped, and
-    the mesh keeps a zero-energy drilling mechanism that reads as a seventh
-    rigid body mode.  ``assemble_km`` warns when it detects that, and this
-    function is the reproduction behind the warning.
+    It must not, and the interesting part is that making it not depend on the
+    orientation takes work.  A flat shell has no genuine stiffness about its own
+    normal, so ``TRIA3`` and ``QUAD4`` add a rank deficient drilling penalty and
+    the assembler drops the drilling DOFs that receive nothing else.  Dropping
+    one *global* rotation is only possible while the normal is a global axis;
+    for any other orientation the drilling direction is a mix of ``rx``, ``ry``
+    and ``rz``, and a mesh assembled in the basic frame keeps a zero-energy
+    drilling mechanism that reads as a seventh rigid body mode.  The assembler
+    avoids that by solving the rotations of each shell node in a triad built on
+    its averaged normal (:mod:`femtools.fea.nodal_frames`), so the drilling
+    rotation is one degree of freedom again.
 
-    Returns the number of (near) zero frequencies and the first elastic
-    frequency for the axis-aligned and the rotated copy of the same plate.  The
-    elastic frequencies agree to round-off -- only the count of zeros differs,
-    which is what makes the extra mode diagnosable rather than merely wrong.
+    Returns, for the axis-aligned and the rotated copy of the same plate, the
+    number of (near) zero frequencies, the first elastic frequency, the size of
+    the solved set, how many drilling DOFs were removed, how many nodes needed
+    a local triad and whether ``assemble_km`` warned.  Everything except
+    ``*_frame_nodes`` now agrees between the two, which is the acceptance
+    statement: same plate, same spectrum, six rigid body modes either way.
+
+    Pass ``nodal_frames=False`` to reproduce the pre-frame behaviour -- seven
+    zero frequencies and a warning on the oblique plate.
     """
     out: dict[str, float] = {}
     for label, rotation in (("aligned", None), ("oblique", _OBLIQUE)):
         model = shell_plate(nx, ny, etype=etype, rotation=rotation)
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            asm = assemble_km(model)
+            asm = assemble_km(model, nodal_frames=nodal_frames)
         result = solve_modes(model, n_modes=n_modes, assembly=asm)
         freq = np.asarray(result.freq_hz, dtype=float)
         elastic = freq[freq > 1.0e-6 * max(freq.max(), 1.0)]
@@ -613,6 +626,7 @@ def shell_drilling_orientation_gap(
         out[f"{label}_first_elastic_hz"] = float(elastic[0]) if elastic.size else float("nan")
         out[f"{label}_free_dof"] = float(asm.n_free)
         out[f"{label}_drilling_dof"] = float(asm.drilling_dof.size)
+        out[f"{label}_frame_nodes"] = float(len(asm.framed_nodes))
         out[f"{label}_warned"] = float(len(caught))
     return out
 

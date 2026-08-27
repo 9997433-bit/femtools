@@ -7,25 +7,25 @@ Both elements carry six degrees of freedom per node in the global frame:
   transverse shear (quad, 2x2 Gauss),
 * drilling   -- a rank deficient fictitious stiffness that leaves rigid body
   rotations energy free.  The assembler removes drilling DOFs that receive no
-  genuine stiffness, so a flat plate produces no spurious mechanism.
+  genuine stiffness, so a flat plate produces no spurious mechanism whatever
+  its orientation.
 
-Orientation caveat
-------------------
+Orientation
+-----------
 
-That last step needs the drilling direction to *be* a global DOF.  A flat mesh
-lying in a plane spanned by two global axes has its drilling rotation on a
-single component (``rz`` for an x-y plate, ``ry`` for an x-z one) and the
-assembler drops it exactly.  Tilt the same mesh so its normal is oblique and
-the drilling direction becomes a combination of ``rx``, ``ry`` and ``rz``: no
-whole DOF can be removed without taking a genuine bending rotation with it, so
-the per-element null spaces survive as one global zero-energy mechanism and the
-free-free spectrum shows a *seventh* zero frequency.  The elastic frequencies
-are unaffected -- :func:`femtools.fea.verification.shell_drilling_orientation_gap`
-reproduces both spectra and they agree to twelve digits -- and
-:func:`femtools.fea.assemble.assemble_km` warns when it detects the retained
-mechanism.  Removing it for good needs a per-node rotational frame rather than
-an index set of eliminated DOFs, which is a change to the assembly contract
-rather than to this module.
+That last step needs the drilling direction to *be* a degree of freedom.  A
+flat mesh lying in a plane spanned by two global axes has its drilling rotation
+on a single global component (``rz`` for an x-y plate, ``ry`` for an x-z one),
+but tilt the same mesh and the direction becomes a combination of ``rx``,
+``ry`` and ``rz`` -- no whole *global* DOF can be removed without taking a
+genuine bending rotation with it.  The assembler therefore solves the rotations
+of a shell node in a local triad whose third axis is the averaged shell normal
+(:mod:`femtools.fea.nodal_frames`), which puts the drilling rotation back on one
+component at any orientation.  This module keeps producing plain global
+matrices; the change of frame is a property of the assembly, not of the
+element.  :func:`femtools.fea.verification.shell_drilling_orientation_gap`
+reproduces the aligned and the tilted spectrum of one plate: both now show six
+zero frequencies, and their elastic frequencies agree to twelve digits.
 """
 
 from __future__ import annotations

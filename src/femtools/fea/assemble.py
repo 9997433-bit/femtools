@@ -12,6 +12,7 @@ import scipy.sparse as sp
 
 from .dofmap import DofMap
 from .elements import ModelIndex, element_matrices, element_spec
+from .nodal_frames import NodalFrames, shell_nodal_frames
 from .protocols import get_any, iter_records, spc_entries
 
 __all__ = ["AssemblyResult", "assemble_km"]
@@ -25,6 +26,19 @@ class AssemblyResult:
     single-point constrained, not empty (no stiffness *and* no mass) and not a
     purely fictitious drilling rotation.  ``unconstrained_dof`` keeps the plain
     "not SPC'd" set for callers that need it.
+
+    Analysis frame
+    --------------
+
+    Matrices and full-length vectors are expressed in the *analysis* frame: the
+    basic (global) frame everywhere except at the rotations of the shell nodes
+    listed in :attr:`frames`, which live in a per-node triad whose third axis is
+    the averaged shell normal (:mod:`femtools.fea.nodal_frames`).  That is what
+    lets the drilling rotation of an arbitrarily oriented plate be removed as a
+    single DOF.  Translations are never rotated, and the frame is the identity
+    unless a shell normal is oblique, so for every axis-aligned model the two
+    frames are the same object.  :meth:`to_basic` and :meth:`from_basic` convert
+    displacement *or* force vectors between the two.
     """
 
     K: sp.csr_matrix
@@ -41,6 +55,7 @@ class AssemblyResult:
     node_ids: list[Any] = field(default_factory=list)
     element_ids: list[Any] = field(default_factory=list)
     skipped_elements: dict[Any, str] = field(default_factory=dict)
+    frames: NodalFrames | None = None
 
     # -- convenience --------------------------------------------------
     @property
@@ -98,6 +113,25 @@ class AssemblyResult:
         u_full = np.asarray(u_full)
         return u_full[self.free_dof] if u_full.ndim == 1 else u_full[self.free_dof, :]
 
+    # -- analysis frame <-> basic frame --------------------------------
+    def to_basic(self, vector: np.ndarray) -> np.ndarray:
+        """Rotate a full-length vector out of the analysis frame.
+
+        Works for displacements and for forces alike: the transformation is
+        orthogonal, so both share it.  A no-op for a model without oblique
+        shell nodes.
+        """
+        return vector if self.frames is None else self.frames.to_basic(vector)
+
+    def from_basic(self, vector: np.ndarray) -> np.ndarray:
+        """Rotate a full-length basic-frame vector into the analysis frame."""
+        return vector if self.frames is None else self.frames.from_basic(vector)
+
+    @property
+    def framed_nodes(self) -> list[Any]:
+        """Nodes whose rotations are solved in a local triad."""
+        return [] if self.frames is None else self.frames.framed_nodes
+
     def __iter__(self):
         """Allow ``K, M, C = assemble_km(model)``."""
         return iter((self.K, self.M, self.C))
@@ -106,10 +140,12 @@ class AssemblyResult:
         return (self.K, self.M, self.C)[index]
 
     def summary(self) -> str:  # pragma: no cover - reporting helper
+        framed = 0 if self.frames is None else self.frames.n_framed
         return (
             f"AssemblyResult(n_dof={self.n_dof}, free={self.n_free}, "
             f"spc={self.spc_dof.size}, empty={self.null_dof.size}, "
-            f"drilling={self.drilling_dof.size}, elements={len(self.element_ids)})"
+            f"drilling={self.drilling_dof.size}, framed_nodes={framed}, "
+            f"elements={len(self.element_ids)})"
         )
 
 
@@ -163,18 +199,20 @@ def _retained_drilling_mechanism(
     The drilling penalty is rank deficient on purpose: rotating a whole element
     about its own normal has to stay free, or the rigid body modes would be
     lost.  On a *flat* mesh those per-element null spaces line up into one
-    global mechanism, which is what the elimination above exists to remove --
-    but eliminating works only while the shell normal *is* a global axis.  For
-    any other orientation the drilling direction is a combination of ``rx``,
-    ``ry`` and ``rz``, no whole DOF can be dropped without taking a genuine
-    bending rotation with it, and the mechanism survives as a phantom seventh
-    rigid body mode.
+    global mechanism, which is what the elimination above exists to remove.
+    Since the assembly is expressed in the per-node rotational frames of
+    :mod:`femtools.fea.nodal_frames`, the drilling direction of a flat patch is
+    local component 5 whatever the orientation of the plate, so the elimination
+    reaches every case it used to miss.
 
-    Rebuild that candidate mechanism -- every drilling node rotating by the
-    common normal -- and measure its strain energy, so the case is reported
-    instead of being returned as a zero frequency.  A folded or curved shell
-    has no common normal, the candidate is not a null vector and the test stays
-    quiet.
+    What is left for this check are the meshes where no single DOF *is* the
+    mechanism: a node whose rotations had to stay in the basic frame because
+    they are single point constrained there, or a user assembling with
+    ``nodal_frames=False``.  Rebuild the candidate mechanism -- every drilling
+    node rotating about the common normal -- and measure its strain energy, so
+    such a case is reported instead of being returned as a zero frequency.  A
+    folded or curved shell has no common normal, the candidate is not a null
+    vector and the test stays quiet.
     """
     if dofs_per_node < 6:
         return False
@@ -206,6 +244,7 @@ def assemble_km(
     apply_spc: bool = True,
     remove_null_dofs: bool = True,
     suppress_drilling: bool = True,
+    nodal_frames: bool = True,
     lumped_mass: bool = False,
     drill_factor: float = 1.0e-3,
     rayleigh: tuple[float, float] | None = None,
@@ -229,6 +268,13 @@ def assemble_km(
     suppress_drilling
         Drop shell drilling rotations whose *only* stiffness is the fictitious
         drilling penalty; this removes the spurious mechanism of a flat mesh.
+    nodal_frames
+        Solve the rotations of a shell node in a local triad whose third axis
+        is the averaged shell normal (:mod:`femtools.fea.nodal_frames`), which
+        is what makes the drilling elimination above work for a plate at any
+        orientation rather than only for one lying in a global plane.  The
+        triad is the identity wherever the normal already is a global axis, so
+        turning this off only changes an oblique model.
     lumped_mass
         Use diagonal element mass matrices instead of consistent ones.
     rayleigh
@@ -332,6 +378,22 @@ def assemble_km(
             spc_mask[spc_index] = True
             spc_values[spc_index] = value
 
+    # -- per-node rotational frames --------------------------------------
+    # A rotational SPC is written in the basic frame and only remains a single
+    # DOF constraint there, so those nodes keep the basic triad; everything
+    # else follows its averaged shell normal.
+    frames = NodalFrames(dof_map=dof_map)
+    if nodal_frames and dofs_per_node >= 6:
+        constrained_rotations = {
+            dof_map.dof_node(int(d)) for d in np.flatnonzero(spc_mask) if int(d) % dofs_per_node >= 3
+        }
+        frames = shell_nodal_frames(model, dof_map, index=index, skip=constrained_rotations)
+    if not frames.is_identity:
+        K = frames.congruence(K)
+        M = frames.congruence(M)
+        C = frames.congruence(C)
+        K_drill = frames.congruence(K_drill)
+
     k_rows = _row_norms(K)
     m_rows = _row_norms(M)
     c_rows = _row_norms(C)
@@ -362,11 +424,11 @@ def assemble_km(
         and _retained_drilling_mechanism(K, K_drill, free_mask, dofs_per_node, k_scale)
     ):
         warnings.warn(
-            "this flat shell mesh keeps a fictitious drilling mechanism: its normal is "
-            "not a global axis, so the drilling rotations cannot be removed one DOF at a "
-            "time and the assembly carries a spurious zero-energy mode (it surfaces as an "
-            "extra zero frequency alongside the six rigid body modes). Model the mesh in a "
-            "plane spanned by two global axes, or constrain one drilling rotation.",
+            "this flat shell mesh keeps a fictitious drilling mechanism: its drilling "
+            "rotations could not be expressed as one degree of freedom each, so the "
+            "assembly carries a spurious zero-energy mode (it surfaces as an extra zero "
+            "frequency alongside the six rigid body modes). Assemble with "
+            "nodal_frames=True, or constrain one drilling rotation.",
             RuntimeWarning,
             stacklevel=2,
         )
@@ -385,4 +447,5 @@ def assemble_km(
         node_ids=dof_map.node_ids,
         element_ids=element_ids,
         skipped_elements=skipped,
+        frames=frames,
     )

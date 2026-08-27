@@ -35,6 +35,25 @@ class StaticResult:
         return np.asarray(self.u, dtype=dtype)
 
 
+def _reject_framed_rotation(assembly: AssemblyResult, node_id: Any, index: int) -> None:
+    """Refuse an enforced rotation on a node solved in a local triad.
+
+    Prescribing one basic-frame rotation of such a node is a constraint across
+    all three of its equations, not a value for one of them, so writing it
+    straight into the analysis-frame vector would silently mean something else.
+    """
+    if assembly.frames is None or assembly.frames.is_identity:
+        return
+    if index % assembly.dofs_per_node < 3 or not assembly.frames.is_framed(node_id):
+        return
+    raise ValueError(
+        f"node {node_id!r} solves its rotations in a local shell triad (its averaged "
+        "normal is not a global axis), so a single enforced rotation about a basic axis "
+        "is not one degree of freedom there; enforce the translations, or assemble with "
+        "nodal_frames=False to work in the basic frame"
+    )
+
+
 def _factorized_solve(A: sp.csr_matrix, b: np.ndarray) -> np.ndarray:
     if A.shape[0] == 0:
         return np.zeros_like(b)
@@ -55,7 +74,12 @@ def solve_static(
     """Solve ``K u = f`` with single point constraints eliminated.
 
     Returns the displacement vector over **all** ``6 * n_nodes`` DOFs, with
-    enforced displacements written back into the constrained positions.
+    enforced displacements written back into the constrained positions.  Loads
+    are read in the basic (global) frame; the answer comes back in the
+    assembly's analysis frame, which differs from the basic one only at the
+    rotations of an obliquely oriented shell node (see
+    :class:`~femtools.fea.assemble.AssemblyResult`).  ``assembly.to_basic(u)``
+    rotates it back when those rotations are wanted globally.
 
     Parameters
     ----------
@@ -78,7 +102,10 @@ def solve_static(
     """
     asm = assembly if assembly is not None else assemble_km(model, **assemble_kwargs)
     dof_map = asm.dof_map
-    f = build_load_vector(loads, dof_map, model=model)
+    # Applied loads are given in the basic frame; the equations are written in
+    # the analysis frame.  The map is orthogonal, so forces use the same one as
+    # displacements.
+    f = asm.from_basic(build_load_vector(loads, dof_map, model=model))
 
     u_prescribed = asm.spc_values.copy()
     held = np.zeros(asm.n_dof, dtype=bool)
@@ -86,6 +113,7 @@ def solve_static(
         for key, value in enforced.items():
             node_id, comp = key if isinstance(key, tuple) else (key, 0)
             index = dof_map.index(node_id, comp)
+            _reject_framed_rotation(asm, node_id, index)
             u_prescribed[index] = float(value)
             held[index] = True
 
@@ -139,7 +167,8 @@ def reactions(
     """Recover ``K u - f`` on the constrained DOFs (zero elsewhere).
 
     ``extra_dof`` adds DOFs held by an enforced displacement rather than by the
-    model's own constraints; they carry a reaction just the same.
+    model's own constraints; they carry a reaction just the same.  ``u`` and the
+    returned reactions are both in the assembly's analysis frame.
     """
     u = np.asarray(u)
     residual = assembly.K @ u
