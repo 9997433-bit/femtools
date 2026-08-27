@@ -190,9 +190,11 @@ def _semidefinite_modes(
     """Solve ``K q = lam M q`` allowing a singular (semi-definite) ``M``.
 
     Coordinates carrying no mass cannot oscillate; they follow the massive ones
-    statically. They are therefore rotated out (eigen-decomposition of ``M``), condensed
-    into the massive block by a Schur complement, and recovered afterwards. With a
-    regular ``M`` this is a plain :func:`scipy.linalg.eigh`.
+    statically. Rotating into the eigenbasis of ``M`` separates the two sets, the massless
+    one is condensed into the massive block by a Schur complement, and the eigenproblem
+    that is left has a diagonal, strictly positive mass matrix. The rotation costs an
+    extra symmetric eigen-decomposition of the (small) reduced ``M`` and buys tolerance
+    of MacNeal's deliberately singular mass matrix.
 
     Returns ``(lam, Q)`` with ascending ``lam`` and ``Q^T M Q = I``.
     """
@@ -201,26 +203,27 @@ def _semidefinite_modes(
     w, V = np.linalg.eigh(Ms)
     scale = float(w.max()) if w.size else 0.0
     massive = w > max(tol * scale, 0.0)
-    if bool(massive.all()):
-        lam, Q = sla.eigh(Ks, Ms)
-        return np.clip(lam, 0.0, None), Q
     if not bool(massive.any()):
         raise ValueError("the reduced model carries no mass; nothing to solve")
 
     Vm, V0 = V[:, massive], V[:, ~massive]
-    Kmm = symmetrize(Vm.T @ Ks @ Vm)
-    K0m = V0.T @ Ks @ Vm
-    K00 = symmetrize(V0.T @ Ks @ V0)
-    try:
-        X = -np.linalg.solve(K00, K0m)
-    except np.linalg.LinAlgError as exc:  # a massless *and* stiffness-free direction
-        raise ValueError(
-            "the massless coordinates of the reduced model are also unrestrained by "
-            "stiffness, so they form a mechanism and cannot be condensed"
-        ) from exc
-    Keff = symmetrize(Kmm + K0m.T @ X)
+    Keff = symmetrize(Vm.T @ Ks @ Vm)
+    X: np.ndarray | None = None
+    if V0.shape[1]:
+        K0m = V0.T @ Ks @ Vm
+        K00 = symmetrize(V0.T @ Ks @ V0)
+        try:
+            X = -np.linalg.solve(K00, K0m)
+        except np.linalg.LinAlgError as exc:  # massless *and* free of stiffness
+            raise ValueError(
+                "the massless coordinates of the reduced model are also unrestrained by "
+                "stiffness, so they form a mechanism and cannot be condensed"
+            ) from exc
+        Keff = symmetrize(Keff + K0m.T @ X)
+
     lam, Qm = sla.eigh(Keff, np.diag(w[massive]))
-    return np.clip(lam, 0.0, None), Vm @ Qm + V0 @ (X @ Qm)
+    Q = Vm @ Qm if X is None else Vm @ Qm + V0 @ (X @ Qm)
+    return np.clip(lam, 0.0, None), Q
 
 
 def _free_interface_modes(

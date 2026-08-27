@@ -274,9 +274,11 @@ def psd_response(
         ``freq_hz``, ``damping``, ``inputs``, ``outputs`` and ``response`` must be left
         alone because the FRF already fixes them.
     force_psd:
-        One-sided force spectral density in ``force^2/Hz``. A scalar, a spectrum shared
-        by all inputs, one auto-spectrum per input, or the full complex cross-spectral
-        matrix; see :func:`_as_force_psd` for the exact shapes.
+        One-sided force spectral density in ``force^2/Hz``: a scalar, a ``(n_freq,)``
+        spectrum shared by every input, a ``(n_in,)`` level per input, ``(n_in, n_freq)``
+        auto-spectra — all four uncorrelated — a constant ``(n_in, n_in)`` cross-spectral
+        matrix, or the general ``(n_in, n_in, n_freq)`` correlated case. Where the shapes
+        collide (``n_in == n_freq``) the per-frequency reading wins.
     freq_hz:
         Frequency lines in Hz. They set both the synthesis grid and the integration
         band, so they must resolve the resonances (see the module docstring).
@@ -319,9 +321,7 @@ def psd_response(
     else:
         if freq_hz is None:
             raise ValueError("freq_hz is required to synthesise the FRF")
-        frf = modal_frf(
-            modal, inputs, outputs, freq_hz, damping, response=response
-        )
+        frf = modal_frf(modal, inputs, outputs, freq_hz, damping, response=response)
 
     H = frf.H
     n_out, n_in, n_freq = H.shape
