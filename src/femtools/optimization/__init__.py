@@ -5,6 +5,8 @@ Public entry points (see ``docs/CONTRACT_API.md``)::
     from femtools.optimization.size import size_optimize
     from femtools.optimization.topology import topology_simp
     from femtools.optimization.doe import latin_hypercube, full_factorial
+    from femtools.optimization.surrogate import fit_rsm, predict_rsm
+    from femtools.optimization.multi import pareto_weighted
 """
 
 from __future__ import annotations
@@ -19,12 +21,22 @@ from .doe import (
     scale_to_bounds,
     sobol,
 )
+from .multi import (
+    ParetoResult,
+    crowding_distance,
+    hypervolume,
+    non_dominated_sort,
+    pareto_front,
+    pareto_weighted,
+    simplex_lattice,
+)
 from .size import (
     Constraint,
     OptimizationResult,
     finite_difference_gradient,
     size_optimize,
 )
+from .surrogate import RSMFit, design_matrix, fit_rsm, predict_rsm, rsm_terms
 from .topology import TopologyResult, element_stiffness_q4, topology_simp
 
 __all__ = [
@@ -43,4 +55,18 @@ __all__ = [
     "scale_to_bounds",
     "maximin_distance",
     "discrepancy",
+    # response surfaces
+    "fit_rsm",
+    "predict_rsm",
+    "RSMFit",
+    "rsm_terms",
+    "design_matrix",
+    # multi-objective
+    "pareto_weighted",
+    "ParetoResult",
+    "pareto_front",
+    "non_dominated_sort",
+    "crowding_distance",
+    "simplex_lattice",
+    "hypervolume",
 ]

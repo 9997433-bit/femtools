@@ -23,6 +23,46 @@ inertia tensor:
     M_{rb} = \\begin{bmatrix} m I_3 & -m\\,\\tilde c \\\\
                               m\\,\\tilde c & I_{ref}\\end{bmatrix},
     \\qquad I_{cg} = I_{ref} - m\\left(\\|c\\|^2 I_3 - c c^T\\right).
+
+Two options exist for the departures from that ideal that every real test has.
+
+**Inertia restraint** (``restraint="inertia"``).  The default estimator fits
+:math:`M^{-1}` and inverts it, which is exactly where measurement noise does
+the most damage: the smallest singular value of the fitted inverse becomes the
+largest of the mass matrix.  The inertia-restraint estimator instead *restrains
+the measured acceleration field to the rigid-body subspace*,
+
+.. math::
+    \\ddot q = T_{out}^{+}\\, \\ddot x,
+
+and imposes Newton-Euler equilibrium on the result, :math:`M \\ddot q = T_{in}^T
+F`, which is linear in :math:`M` itself.  No inversion of a fitted quantity is
+involved, and the projection discards whatever part of the measured motion is
+not rigid-body — the flexible contamination the mass line is most exposed to.
+It needs enough sensors to determine all six rigid-body DOF (``rank(T_out) =
+6``); the excitation set must still span all six, exactly as for the mass line,
+because a rank-deficient set of rigid-body accelerations leaves part of
+:math:`M` unobserved however the equations are arranged.  What the projection
+buys is immunity to the *non-rigid* part of the measured motion: on data
+contaminated by a nearby flexible mode it roughly halves the inertia error.
+Against purely random FRF noise it is marginally worse than the mass line,
+because the noise then sits in the coefficient matrix rather than the
+right-hand side.
+
+**Mounting stiffness** (``mount_k=...``).  A test article hangs on bungees or
+sits on air springs, so the support contributes a rigid-body stiffness
+:math:`K` and the response is no longer a flat mass line:
+
+.. math::
+    A(\\omega) = T_{out}\\left[M - K/\\omega^2\\right]^{-1} T_{in}^T .
+
+The suspension therefore acts as an *apparent negative mass* :math:`K/\\omega^2`
+which diverges as the frequency falls — the reason a mass line taken too close
+to the suspension modes reads high.  Given ``mount_k`` the fit is done line by
+line and the term is removed analytically, which extends the usable band down
+towards the suspension frequencies instead of away from them.  With
+``mount_k="fit"`` both :math:`M` and :math:`K` are identified together, since
+the equilibrium equations stay linear in the pair.
 """
 
 from __future__ import annotations
@@ -39,6 +79,7 @@ __all__ = [
     "rigid_body_properties",
     "rigid_body_transform",
     "rigid_body_mass_matrix",
+    "mount_stiffness_matrix",
     "mass_line",
     "skew",
 ]
@@ -236,6 +277,186 @@ def rigid_body_mass_matrix(
     M[3:, :3] = S
     M[3:, 3:] = I_ref
     return M
+
+
+def mount_stiffness_matrix(
+    mounts: Any, reference_point: ArrayLike = (0.0, 0.0, 0.0)
+) -> np.ndarray:
+    """Rigid-body ``6x6`` stiffness of a suspension, about ``reference_point``.
+
+    Each mount contributes :math:`k_j t_j t_j^T` with :math:`t_j = [n_j^T,
+    (r_j \\times n_j)^T]`, i.e. exactly the same rigid-body transform that maps
+    the body DOF onto a sensor direction.
+
+    Parameters
+    ----------
+    mounts:
+        One of
+
+        * a scalar — three translational springs of that rate at the reference
+          point, ``diag(k, k, k, 0, 0, 0)``;
+        * a 3- or 6-vector — the diagonal of the rigid-body stiffness;
+        * a ``6x6`` matrix — used as it is (symmetrised);
+        * a sequence of ``{"position": ..., "direction": ..., "stiffness": ...}``
+          dicts, or a sequence of ``(position, direction, stiffness)`` tuples —
+          the physical description of a real suspension.
+    reference_point:
+        Point the matrix is expressed about.
+
+    Examples
+    --------
+    Two vertical springs one metre either side of the origin: they carry the
+    vertical translation and, through their offset, the roll about ``x``.
+
+    >>> import numpy as np
+    >>> from femtools.rbpe import mount_stiffness_matrix
+    >>> K = mount_stiffness_matrix(
+    ...     [((0.0, 1.0, 0.0), (0, 0, 1), 500.0), ((0.0, -1.0, 0.0), (0, 0, 1), 500.0)]
+    ... )
+    >>> np.round(np.diag(K), 6)
+    array([   0.,    0., 1000., 1000.,    0.,    0.])
+    """
+    ref = np.asarray(reference_point, dtype=float).ravel()
+    if isinstance(mounts, (int, float, np.floating, np.integer)):
+        return np.diag([float(mounts)] * 3 + [0.0] * 3)
+    arr = np.asarray(mounts, dtype=object)
+    if arr.dtype != object:
+        num = np.asarray(mounts, dtype=float)
+        if num.shape == (6, 6):
+            return 0.5 * (num + num.T)
+        if num.size == 3:
+            return np.diag([*num.ravel().tolist(), 0.0, 0.0, 0.0])
+        if num.size == 6 and num.ndim == 1:
+            return np.diag(num.ravel())
+
+    K = np.zeros((6, 6))
+    for item in mounts:
+        if isinstance(item, dict):
+            pos = item.get("position", item.get("xyz"))
+            direction = item.get("direction", item.get("dir"))
+            k = item.get("stiffness", item.get("k"))
+        else:
+            seq = list(item)
+            if len(seq) != 3:
+                raise ValueError(f"cannot interpret mount {item!r}")
+            pos, direction, k = seq
+        if pos is None or direction is None or k is None:
+            raise ValueError(f"mount {item!r} needs a position, direction and stiffness")
+        t = rigid_body_transform(
+            np.asarray(pos, dtype=float).reshape(1, 3),
+            np.asarray(direction, dtype=float).reshape(1, 3),
+            ref,
+        )[0]
+        K += float(k) * np.outer(t, t)
+    return K
+
+
+def _length_scale(T: np.ndarray) -> float:
+    """Characteristic moment arm of a rigid-body transform.
+
+    The translation and rotation halves of a rigid-body DOF vector carry
+    different units, so a least-squares fit that mixes them silently weights
+    metres against radians.  Rescaling the rotations by this length makes the
+    two halves comparable, which is the difference between a well-conditioned
+    normal matrix and one whose condition number is the square of the model's
+    size in millimetres.
+    """
+    trans = float(np.linalg.norm(T[:, :3]))
+    rot = float(np.linalg.norm(T[:, 3:]))
+    if trans <= 0 or rot <= 0:
+        return 1.0
+    return rot / trans
+
+
+def _sym_basis() -> list[np.ndarray]:
+    """The 21 symmetric ``6x6`` basis matrices, upper-triangle order."""
+    basis = []
+    for a, b in zip(*np.triu_indices(6), strict=True):
+        E = np.zeros((6, 6))
+        E[a, b] = 1.0
+        E[b, a] = 1.0
+        basis.append(E)
+    return basis
+
+
+def _from_upper(x: np.ndarray) -> np.ndarray:
+    M = np.zeros((6, 6))
+    iu = np.triu_indices(6)
+    M[iu] = x
+    return M + M.T - np.diag(np.diag(M))
+
+
+def _fit_mass_restrained(
+    T_out: np.ndarray,
+    T_in: np.ndarray,
+    A_lines: np.ndarray,
+    omega: np.ndarray,
+    *,
+    stiffness: np.ndarray | None = None,
+    fit_stiffness: bool = False,
+    rcond: float = 1.0e-12,
+) -> tuple[np.ndarray, np.ndarray | None, float, float]:
+    """Inertia-restraint fit of ``M`` (and optionally ``K``).
+
+    ``A_lines`` is ``(n_out, n_in, n_line)`` real accelerance.  The measured
+    accelerations are restrained to the rigid-body subspace, ``qdd =
+    pinv(T_out) @ A``, and Newton-Euler equilibrium ``(M - K/w^2) qdd = T_in^T``
+    is imposed in the least-squares sense over the 21 (or 42) unknowns.
+    """
+    tol = 1e-10 * max(float(np.linalg.norm(T_out)), 1.0)
+    if np.linalg.matrix_rank(T_out, tol=tol) < 6:
+        raise ValueError(
+            "restraint='inertia' needs responses spanning all six rigid-body DOF; "
+            "the sensor set gives rank(T_out) < 6"
+        )
+    basis = _sym_basis()
+    n_in = T_in.shape[0]
+    n_line = A_lines.shape[2]
+    n_unk = 21 * (2 if fit_stiffness else 1)
+    rows = 6 * n_in * n_line
+    if rows < n_unk:
+        raise ValueError(
+            f"{n_in} inputs over {n_line} lines give {rows} equations for {n_unk} "
+            "unknowns; add inputs, widen the band, or drop mount_k='fit'"
+        )
+
+    # Work in scaled DOF (rotations multiplied by a characteristic length) so
+    # the six equilibrium equations carry comparable magnitudes.
+    L = _length_scale(T_out)
+    Sinv = np.diag([1.0, 1.0, 1.0, 1.0 / L, 1.0 / L, 1.0 / L])
+    S = np.diag([1.0, 1.0, 1.0, L, L, L])
+    T_out = T_out @ Sinv
+    T_in = T_in @ Sinv
+    if stiffness is not None:
+        stiffness = Sinv @ stiffness @ Sinv
+
+    Tp = np.linalg.pinv(T_out)
+    B = np.zeros((rows, n_unk))
+    rhs = np.zeros(rows)
+    Tin_T = T_in.T  # (6, n_in)
+    r = 0
+    for line in range(n_line):
+        Q = Tp @ A_lines[:, :, line]  # (6, n_in) rigid-body accelerations
+        block = slice(r, r + 6 * n_in)
+        for u, E in enumerate(basis):
+            B[block, u] = (E @ Q).ravel()
+        target = Tin_T.copy()
+        if fit_stiffness:
+            inv_w2 = 1.0 / max(omega[line] ** 2, 1e-300)
+            for u, E in enumerate(basis):
+                B[block, 21 + u] = (-inv_w2 * (E @ Q)).ravel()
+        elif stiffness is not None:
+            target = target + (stiffness @ Q) / max(omega[line] ** 2, 1e-300)
+        rhs[block] = target.ravel()
+        r += 6 * n_in
+
+    sv = np.linalg.svd(B, compute_uv=False)
+    cond = float(sv[0] / sv[-1]) if sv[-1] > 0 else math.inf
+    x, *_ = np.linalg.lstsq(B, rhs, rcond=rcond)
+    resid = float(np.linalg.norm(B @ x - rhs)) / max(float(np.linalg.norm(rhs)), 1e-300)
+    M = S @ _from_upper(x[:21]) @ S
+    K = S @ _from_upper(x[21:]) @ S if fit_stiffness else None
+    return M, K, resid, cond
 
 
 def _decompose(M6: np.ndarray, reference_point: np.ndarray) -> dict[str, Any]:
@@ -457,6 +678,8 @@ def rigid_body_properties(
     band: tuple[float, float] | None = None,
     frf_type: str = "accelerance",
     method: str = "massline",
+    restraint: str | None = None,
+    mount_k: Any = None,
     statistic: str = "mean",
     flatness_tol: float = 0.02,
     mass_matrix: np.ndarray | None = None,
@@ -493,7 +716,22 @@ def rigid_body_properties(
         ``"apparent_mass"``.
     method:
         ``"massline"`` averages the real part over the band and fits once;
-        ``"band"`` fits all selected spectral lines simultaneously.
+        ``"band"`` fits all selected spectral lines simultaneously.  A
+        ``mount_k`` correction always implies ``"band"``, since the apparent
+        mass then depends on frequency.
+    restraint:
+        ``None``/``"none"`` (default) fits the inverse mass matrix and inverts
+        it; ``"inertia"`` uses the inertia-restraint estimator, which projects
+        the measured accelerations onto the rigid-body subspace and imposes
+        Newton-Euler equilibrium, giving ``M`` directly (see the module
+        docstring).  Prefer it when the data is noisy or slightly flexible, and
+        when there are more sensors than the six DOF strictly need.
+    mount_k:
+        Rigid-body stiffness of the suspension, in any form accepted by
+        :func:`mount_stiffness_matrix`, or the string ``"fit"`` to identify it
+        together with the inertia (``restraint="inertia"`` only).  The
+        identified stiffness and the resulting suspension frequencies are
+        returned in ``extras``.
     mass_matrix / inverse_mass_matrix:
         Skip the FRF stage and decompose a known ``6x6`` matrix instead (useful
         for verification against an FE model).
@@ -507,7 +745,11 @@ def rigid_body_properties(
     The inverse mass matrix has 21 independent entries, so the excitation set
     must span all six rigid-body DOF: at least 6 independent input directions
     (and enough responses) are required, otherwise the fit is rank deficient and
-    the reported ``condition_number`` explodes.
+    the reported ``condition_number`` explodes.  The inertia-restraint estimator
+    needs that same span on the input side *and* ``rank(T_out) = 6`` on the
+    response side, since it solves ``M Q = T_in^T`` from ``6 * n_in``
+    equilibrium equations per spectral line and a rank-deficient ``Q`` leaves
+    part of ``M`` unobserved.
 
     Examples
     --------
@@ -517,6 +759,30 @@ def rigid_body_properties(
     >>> p = rigid_body_properties(mass_matrix=M)
     >>> round(p.mass, 9), np.round(p.cog, 9)
     (12.5, array([ 0.1 , -0.05,  0.2 ]))
+
+    The same body hung on soft mounts and measured from 6 to 15 Hz, close
+    enough to the suspension modes that the mass line reads high.  Declaring
+    the mounts removes the apparent negative mass exactly:
+
+    >>> from femtools.rbpe import mount_stiffness_matrix, rigid_body_transform
+    >>> pos = np.repeat([[sx, sy, sz] for sx in (-0.5, 0.5)
+    ...                  for sy in (-0.4, 0.4) for sz in (-0.3, 0.3)], 3, axis=0)
+    >>> dirs = np.tile(np.eye(3), (8, 1))
+    >>> mounts = [((x, y, -0.3), (0, 0, 1), 900.0)
+    ...           for x in (-0.5, 0.5) for y in (-0.4, 0.4)]
+    >>> K = mount_stiffness_matrix(mounts)
+    >>> To = rigid_body_transform(pos, dirs, (0, 0, 0))
+    >>> Ti = To[[0, 4, 8, 13, 17, 22]]
+    >>> f = np.linspace(6.0, 15.0, 21)
+    >>> w = 2 * np.pi * f
+    >>> H = np.stack([-(wk**2) * (To @ np.linalg.solve(K - wk**2 * M, Ti.T))
+    ...               for wk in w], axis=2)
+    >>> args = dict(sensors=(pos, dirs), inputs=(pos[[0, 4, 8, 13, 17, 22]],
+    ...             dirs[[0, 4, 8, 13, 17, 22]]), band=(6.0, 15.0))
+    >>> round(rigid_body_properties(H, f, **args).mass, 3)          # mounts ignored
+    12.14
+    >>> round(rigid_body_properties(H, f, mount_k=mounts, **args).mass, 9)
+    12.5
     """
     if isinstance(reference_point, str):
         key = reference_point.lower()
@@ -583,43 +849,123 @@ def rigid_body_properties(
     T_out = rigid_body_transform(pos, dirs, ref)
     T_in = rigid_body_transform(ipos, idirs, ref)
 
+    # ---- support condition ---------------------------------------------
+    fit_stiffness = isinstance(mount_k, str) and mount_k.strip().lower() == "fit"
+    K6: np.ndarray | None = None
+    if mount_k is not None and not fit_stiffness:
+        K6 = mount_stiffness_matrix(mount_k, ref)
+        if K6.shape != (6, 6):  # pragma: no cover - guarded in the helper
+            raise ValueError(f"mount stiffness must be 6x6, got {K6.shape}")
+
+    rkey = "none" if restraint is None else str(restraint).strip().lower()
+    if rkey in ("none", "massline", "inverse", "inverse-mass"):
+        rkey = "none"
+    elif rkey in ("inertia", "inertia-restraint", "inertia_restraint", "irm", "restrained"):
+        rkey = "inertia"
+    else:
+        raise ValueError(
+            f"unknown restraint {restraint!r}; expected None/'none' or 'inertia'"
+        )
+    if fit_stiffness and rkey != "inertia":
+        raise ValueError("mount_k='fit' requires restraint='inertia'")
+
     A_line, band_used, sel = mass_line(
         H, freq_hz, band=band, frf_type=frf_type, statistic=statistic,
         flatness_tol=flatness_tol,
     )
 
-    if method.lower() in ("massline", "mean", "average"):
-        N, resid, cond = _fit_inverse_mass(T_out, T_in, A_line, rcond=rcond)
-    elif method.lower() in ("band", "lines", "all"):
-        f = np.asarray(freq_hz, dtype=float).ravel()
-        A_all = np.real(_to_accelerance(H, f, frf_type)[:, :, sel])
-        Ns = []
-        for k in range(A_all.shape[2]):
-            Nk, _, _ = _fit_inverse_mass(T_out, T_in, A_all[:, :, k], rcond=rcond)
-            Ns.append(Nk)
-        N = np.mean(Ns, axis=0)
-        pred = T_out @ N @ T_in.T
-        resid = float(np.linalg.norm(pred[:, :, None] - A_all)) / max(
-            float(np.linalg.norm(A_all)), 1e-300
-        )
-        _, _, cond = _fit_inverse_mass(T_out, T_in, A_line, rcond=rcond)
+    mkey = method.lower()
+    if mkey in ("massline", "mean", "average"):
+        mkey = "massline"
+    elif mkey in ("band", "lines", "all"):
+        mkey = "band"
     else:
         raise ValueError(f"unknown method {method!r}")
+    # The apparent mass M - K/w^2 is frequency dependent, so a suspension
+    # correction can only be applied line by line.
+    per_line = mkey == "band" or K6 is not None or fit_stiffness
 
-    try:
-        M6 = np.linalg.inv(N)
-    except np.linalg.LinAlgError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "the identified inverse mass matrix is singular; the excitation set "
-            "probably does not span all six rigid-body DOF"
-        ) from exc
+    f = np.asarray(freq_hz, dtype=float).ravel()
+    A_all = np.real(_to_accelerance(H, f, frf_type)[:, :, sel])
+    w_sel = 2.0 * math.pi * f[sel]
+    if per_line and np.any(w_sel <= 0):
+        keep = w_sel > 0
+        A_all, w_sel, sel = A_all[:, :, keep], w_sel[keep], sel[keep]
+        if w_sel.size == 0:
+            raise ValueError("a mounting-stiffness correction needs non-zero frequencies")
+
+    extras: dict[str, Any] = {"T_out": T_out, "T_in": T_in}
+    K_fitted: np.ndarray | None = None
+
+    if rkey == "inertia":
+        lines = A_all if per_line else A_line[:, :, None]
+        omegas = w_sel if per_line else np.ones(1)
+        M6, K_fitted, resid, cond = _fit_mass_restrained(
+            T_out, T_in, lines, omegas,
+            stiffness=K6, fit_stiffness=fit_stiffness, rcond=rcond,
+        )
+        N = np.linalg.pinv(M6)
+    else:
+        if per_line:
+            Ms = []
+            for k in range(A_all.shape[2]):
+                Nk, _, _ = _fit_inverse_mass(T_out, T_in, A_all[:, :, k], rcond=rcond)
+                M_eff = np.linalg.pinv(Nk)
+                if K6 is not None:
+                    M_eff = M_eff + K6 / w_sel[k] ** 2
+                Ms.append(M_eff)
+            M6 = np.mean(Ms, axis=0)
+            M6 = 0.5 * (M6 + M6.T)
+            N = np.linalg.pinv(M6)
+            pred = np.stack(
+                [
+                    T_out @ np.linalg.pinv(M6 - (0.0 if K6 is None else K6 / wk**2)) @ T_in.T
+                    for wk in w_sel
+                ],
+                axis=2,
+            )
+            resid = float(np.linalg.norm(pred - A_all)) / max(
+                float(np.linalg.norm(A_all)), 1e-300
+            )
+            _, _, cond = _fit_inverse_mass(T_out, T_in, A_line, rcond=rcond)
+        else:
+            N, resid, cond = _fit_inverse_mass(T_out, T_in, A_line, rcond=rcond)
+            try:
+                M6 = np.linalg.inv(N)
+            except np.linalg.LinAlgError as exc:  # pragma: no cover
+                raise RuntimeError(
+                    "the identified inverse mass matrix is singular; the excitation "
+                    "set probably does not span all six rigid-body DOF"
+                ) from exc
+
+    K_used = K_fitted if K_fitted is not None else K6
+    if K_used is not None:
+        extras["mount_stiffness"] = K_used
+        extras["suspension_hz"] = _suspension_frequencies(K_used, M6)
+    extras["inverse_mass_matrix"] = N
 
     parts = _decompose(M6, ref)
+    tag = mkey if rkey == "none" else f"{mkey}+inertia"
+    if fit_stiffness:
+        tag += "+fitk"
+    elif K6 is not None:
+        tag += "+mount"
     return RigidBodyProperties(
         **parts,
         residual=resid,
         condition_number=cond,
         band=band_used,
-        method=method.lower(),
-        extras={"inverse_mass_matrix": N, "T_out": T_out, "T_in": T_in},
+        method=tag,
+        extras=extras,
     )
+
+
+def _suspension_frequencies(K: np.ndarray, M: np.ndarray) -> np.ndarray:
+    """Rigid-body-on-mounts frequencies in Hz, ascending (zeros for free DOF)."""
+    from scipy.linalg import eigh
+
+    try:
+        w = eigh(0.5 * (K + K.T), 0.5 * (M + M.T), eigvals_only=True)
+    except (np.linalg.LinAlgError, ValueError):  # pragma: no cover - defensive
+        return np.full(6, math.nan)
+    return np.sqrt(np.clip(np.asarray(w, dtype=float), 0.0, None)) / (2.0 * math.pi)
