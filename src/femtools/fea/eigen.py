@@ -547,15 +547,17 @@ class ComplexModalResult:
         real modes untouched and scores 1 to round-off, while a localised
         damper drags the modes it acts on well below it.
 
-        The index is the eccentricity of the scatter of ``(Re, Im)`` pairs
-        about their mean, i.e. ``((s1 - s2) / (s1 + s2))**2`` for the two
-        eigenvalues of their covariance (Pappa, Elliott & Schenk, 1993).
+        The index is the eccentricity of the scatter of the ``(Re, Im)`` pairs
+        of a mode, ``((s1 - s2) / (s1 + s2))**2`` for the two eigenvalues of
+        their second-moment matrix (Pappa, Elliott & Schenk, 1993).  The scatter
+        is deliberately *not* mean-centred: centring is degenerate for a model
+        with two DOFs, where any two points are collinear and the index would
+        read 1 for every mode however complex.
         """
         out = np.zeros(self.modes.shape[1])
         for j in range(self.modes.shape[1]):
             col = self.modes[:, j]
             points = np.column_stack([col.real, col.imag])
-            points = points - points.mean(axis=0)
             if not np.any(points):
                 out[j] = 1.0
                 continue
