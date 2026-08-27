@@ -10,6 +10,7 @@ from __future__ import annotations
 from .rbfit import (
     RigidBodyProperties,
     mass_line,
+    mount_stiffness_matrix,
     rigid_body_mass_matrix,
     rigid_body_properties,
     rigid_body_transform,
@@ -21,6 +22,7 @@ __all__ = [
     "RigidBodyProperties",
     "rigid_body_transform",
     "rigid_body_mass_matrix",
+    "mount_stiffness_matrix",
     "mass_line",
     "skew",
 ]
