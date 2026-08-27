@@ -190,6 +190,12 @@ def assemble_km(
         element ids to include.
     on_unknown
         ``"raise"`` (default), ``"skip"`` or ``"warn"`` for unregistered types.
+    options
+        Solver-wide element options, passed through to every element builder.
+        Currently read by ``HEX8``, which accepts ``{"hex8": name}`` with
+        *name* one of :data:`femtools.fea.HEX8_FORMULATIONS` (default
+        ``"incompatible"``).  A ``formulation`` field on the element or on its
+        property overrides the assembly-wide setting.
 
     Returns
     -------
