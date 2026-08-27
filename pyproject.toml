@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,8 +8,31 @@ version = "0.1.0"
 description = "Solver-independent CAE framework for structural dynamics, correlation, model updating and optimization"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "MIT"}
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{name = "femtools contributors"}]
+keywords = [
+  "structural-dynamics",
+  "modal-analysis",
+  "finite-elements",
+  "model-updating",
+  "correlation",
+  "pretest",
+  "optimization",
+  "experimental-modal-analysis",
+  "operational-modal-analysis",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Scientific/Engineering :: Physics",
+  "Typing :: Typed",
+]
 dependencies = [
   "numpy>=1.26",
   "scipy>=1.11",
@@ -18,6 +41,11 @@ dependencies = [
   "rich>=13.7",
   "matplotlib>=3.8",
 ]
+
+[project.urls]
+Homepage = "https://github.com/9997433-bit/femtools"
+Repository = "https://github.com/9997433-bit/femtools"
+Issues = "https://github.com/9997433-bit/femtools/issues"
 
 [project.optional-dependencies]
 dev = [
@@ -29,6 +57,7 @@ dev = [
 ]
 viz = [
   "plotly>=5.20",
+  "pyvista>=0.43",
 ]
 web = [
   "fastapi>=0.110",
@@ -40,8 +69,10 @@ femtools = "femtools.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+namespaces = false
 
 [tool.pytest.ini_options]
+minversion = "8.0"
 testpaths = ["tests"]
 addopts = "-q --strict-markers"
 markers = [
@@ -53,11 +84,30 @@ markers = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+src = ["src", "tests"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# typer declares CLI options via function-call defaults (B008 false positive)
+"src/femtools/cli.py" = ["B008"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["femtools"]
 
 [tool.mypy]
 python_version = "3.11"
 strict = false
 ignore_missing_imports = true
+
+[tool.coverage.run]
+source = ["femtools"]
+branch = true
+
+[tool.coverage.report]
+exclude_also = [
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
+  "@overload",
+]
