@@ -34,6 +34,7 @@ from femtools.fea.nodal_frames import (
 from femtools.fea.verification import (
     beam_cantilever,
     hex8_bending_ratio,
+    hex8_eas_equivalence,
     hex8_patch_test_error,
     hex8_rigid_body_frequencies,
     shell_drilling_orientation_gap,
@@ -324,6 +325,28 @@ def test_hex8_goldens_are_unchanged() -> None:
     assert np.count_nonzero(frequencies < 1.0e-6) == 6
     assert frequencies[6] > 1.0
     assert hex8_patch_test_error() < 1.0e-10
+
+
+def test_shipped_hex8_already_is_the_simo_rifai_eas9_element() -> None:
+    """Why the optional EAS item lands as a proof rather than as a formulation.
+
+    An independent enhanced-assumed-strain brick built the Simo-Rifai way --
+    nine *strain* amplitudes mapped through the natural-strain transform of the
+    element centre -- condenses to exactly the matrix the shipped
+    incompatible-modes element produces, on regular, skewed, trapezoidal and
+    randomly distorted geometry alike.  Shipping it as a second formulation
+    would duplicate the element, and it cannot cure the trapezoidal distortion
+    loss because the element it would replace is itself.
+
+    The transposed natural-strain convention is a genuinely different element
+    and is compared alongside, so the agreement cannot be an insensitive test.
+    """
+    result = hex8_eas_equivalence()
+
+    assert result["n_shapes"] >= 7.0
+    assert result["worst_relative_difference"] < 1.0e-12
+    assert result["worst_relative_difference_transposed"] > 1.0e-3
+    assert result["eas9_zero_modes"] == 6.0
 
 
 def test_beam2_euler_bernoulli_cantilever_golden() -> None:
