@@ -12,6 +12,7 @@ See docs/algorithms/updating.md.
 from __future__ import annotations
 
 import numpy as np
+
 from femtools.core.model import FEModel
 from femtools.fea.eigen import solve_modes
 from femtools.updating import Parameter, update_model

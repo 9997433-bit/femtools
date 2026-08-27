@@ -14,6 +14,7 @@ See docs/algorithms/correlation.md and docs/ACCEPTANCE.md (cases 4a-4c).
 from __future__ import annotations
 
 import numpy as np
+
 from femtools.correlation.mac import mac_matrix
 from femtools.correlation.pairing import pair_modes
 

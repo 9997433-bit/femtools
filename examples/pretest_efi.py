@@ -14,6 +14,7 @@ See docs/algorithms/pretest.md and docs/ACCEPTANCE.md (case 8).
 from __future__ import annotations
 
 import numpy as np
+
 from femtools.correlation.mac import mac_matrix
 from femtools.pretest.efi import effective_independence
 from femtools.pretest.sensor import eliminate_by_mac

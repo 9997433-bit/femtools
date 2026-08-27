@@ -19,6 +19,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+
 from femtools.core.model import FEModel
 from femtools.dynamics.frf import direct_frf, modal_frf
 from femtools.fea.assemble import assemble_km

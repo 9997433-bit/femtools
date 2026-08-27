@@ -16,6 +16,7 @@ See docs/algorithms/fea.md and docs/ACCEPTANCE.md (cases 2, 3a).
 from __future__ import annotations
 
 import numpy as np
+
 from femtools.core.model import FEModel
 from femtools.fea.assemble import assemble_km
 from femtools.fea.eigen import solve_modes

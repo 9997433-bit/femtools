@@ -53,10 +53,10 @@ def probe_mac() -> dict[str, Any]:
 
 
 def probe_eigen() -> dict[str, Any]:
+    from benchmarks.bench_eigen import build_axial_chain
+
     from femtools.fea.assemble import assemble_km
     from femtools.fea.eigen import solve_modes
-
-    from benchmarks.bench_eigen import build_axial_chain
 
     model = build_axial_chain(12)
     modal = solve_modes(model, n_modes=4, shift=0.0)
@@ -82,6 +82,7 @@ def probe_eigen() -> dict[str, Any]:
 
 def probe_modal_frf() -> dict[str, Any]:
     from benchmarks.bench_frf import make_modal_data, response_array
+
     from femtools.dynamics.frf import modal_frf
 
     modal = make_modal_data(n_dof=48, n_modes=8, seed=0)
