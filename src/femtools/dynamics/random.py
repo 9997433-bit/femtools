@@ -17,11 +17,14 @@ moments ``m_k = integral f^k S(f) df`` give the mean upcrossing rate ``sqrt(m2/m
 (Rice) and, with it, a Davenport peak factor for a stated exposure duration — the
 quantities a random-vibration load case is actually assessed on.
 
-Accuracy is bounded by two things the caller controls: the frequency grid must resolve
-every resonance in the band (a half-power bandwidth of ``2 zeta f_r`` spanned by a
-handful of lines at least, otherwise the trapezoidal integral misses most of the peak),
-and the band must be wide enough that the tails carry no variance. :func:`miles_rms` is
-the closed-form SDOF answer to check a single-mode case against.
+Accuracy is bounded by two things the caller controls: the band must be wide enough that
+the tails carry no variance, and the grid must resolve the *shape* of the spectrum, not
+merely hit the peaks. The second is the one that bites. A grid fine enough at a resonance
+is usually still coarse on its shoulders, where the curvature is highest, and the
+trapezoidal integral converges as ``df^2``: on a 5 %-damped SDOF, 8 k uniform lines over
+100 ``f_n`` leave 6e-4 relative error in the RMS while 40 k geometrically spaced lines
+reach 1e-8. Log spacing is the cheap fix. :func:`miles_rms` is the closed-form SDOF answer
+to check a single-mode case against.
 """
 
 from __future__ import annotations

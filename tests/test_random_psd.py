@@ -19,11 +19,20 @@ def _sdof() -> ModalModel:
     return ModalModel(freq_hz=[FN_HZ], modes=[[1.0]])
 
 
-def _band(f_max_factor: float = 100.0, n_coarse: int = 4001, n_fine: int = 4001) -> np.ndarray:
-    """Lines that resolve the half-power bandwidth and still cover the tail."""
-    coarse = np.linspace(0.0, f_max_factor * FN_HZ, n_coarse)
-    fine = np.linspace(0.9 * FN_HZ, 1.1 * FN_HZ, n_fine)
-    return np.unique(np.concatenate([coarse, fine]))
+def _band(f_max_factor: float = 100.0, n_lines: int = 40000) -> np.ndarray:
+    """Lines that resolve the resonance *and* its shoulders out to the tail.
+
+    Trapezoidal integration is what limits the RMS, and on this response the error comes
+    from the shoulders rather than the peak: a uniform grid fine enough at 25 Hz is still
+    coarse at 40 Hz, where the spectrum is falling steeply. A geometric grid puts the
+    lines where the curvature is and reaches 1e-8 relative with 40 k of them, against
+    6e-4 for 8 k uniform ones.
+    """
+    return np.unique(
+        np.concatenate(
+            [np.linspace(0.0, 5.0, 50), np.geomspace(5.0, f_max_factor * FN_HZ, n_lines)]
+        )
+    )
 
 
 def _two_dof() -> ModalModel:
@@ -46,11 +55,31 @@ def test_sdof_white_noise_rms_matches_the_closed_form() -> None:
     exact = np.sqrt(S0 / (8.0 * ZETA * omega_n**3))
     assert isinstance(result, PSDResult)
     assert result.rms.shape == (1,)
-    assert float(result.rms[0]) == pytest.approx(exact, rel=2.0e-3)
+    assert float(result.rms[0]) == pytest.approx(exact, rel=1.0e-6)
     assert float(result.sigma[0]) == float(result.rms[0])
-    assert float(result.three_sigma[0]) == pytest.approx(3.0 * exact, rel=2.0e-3)
-    assert float(result.variance[0]) == pytest.approx(exact**2, rel=4.0e-3)
+    assert float(result.three_sigma[0]) == pytest.approx(3.0 * exact, rel=1.0e-6)
+    assert float(result.variance[0]) == pytest.approx(exact**2, rel=2.0e-6)
     assert miles_rms(FN_HZ, ZETA, S0) == pytest.approx(exact, rel=1e-12)
+
+
+def test_a_coarse_frequency_grid_is_what_limits_the_rms() -> None:
+    """The integration grid, not the synthesis, sets the accuracy; it converges O(df^2)."""
+    omega_n = 2.0 * np.pi * FN_HZ
+    exact = np.sqrt(S0 / (8.0 * ZETA * omega_n**3))
+    errors = []
+    for n_lines in (4001, 20001):
+        f = np.unique(
+            np.concatenate(
+                [
+                    np.linspace(0.0, 100.0 * FN_HZ, n_lines),
+                    np.linspace(0.9 * FN_HZ, 1.1 * FN_HZ, 4001),
+                ]
+            )
+        )
+        rms = float(psd_response(_sdof(), S0, f, ZETA).rms[0])
+        errors.append(abs(rms - exact) / exact)
+    assert errors[0] < 1.0e-3
+    assert errors[1] < 0.1 * errors[0]  # five times the lines, ~25 times less error
 
 
 def test_psd_is_the_squared_frf_times_the_force_spectrum() -> None:
