@@ -23,6 +23,15 @@ tagged with SI units.  Mode shapes / FRF ordinates are *not* rescaled
 (their physical unit depends on the data characteristic); this is recorded
 as a warning when factors differ from 1.
 
+Exception: femtools-authored files carry the writing model's exact unit
+system inside private dataset 30000 (see below).  Every value in such a
+file -- coordinates *and* material/property tables -- is stored verbatim
+in those units, so on read the original unit system is restored and
+nothing is rescaled: the round trip is exact and the model stays
+internally consistent.  (Rescaling only the coordinates, as for foreign
+files, would silently mix unit systems: metre coordinates against MPa
+moduli.)  Third-party readers still convert correctly via dataset 164.
+
 Material/property gap
 ---------------------
 The classic UFF catalogue has no simple material/property cards for this
@@ -32,8 +41,9 @@ and property *ids* only -- materials and section values are lost when a
 model is exchanged with third-party tools.  To keep femtools round trips
 lossless, :func:`write_unv` appends one **private dataset 30000** (dataset
 numbers 1..32767 are legal; unassigned numbers are skipped by conforming
-readers) holding the material and property tables as line-wrapped JSON
-behind a ``FEMTOOLSCARDS`` marker.  :func:`read_unv` restores it; every
+readers) holding the material and property tables plus the model's unit
+system as line-wrapped JSON behind a ``FEMTOOLSCARDS`` marker.
+:func:`read_unv` restores it; every
 other UFF reader ignores it with at most an "unknown dataset" note.
 ``read_unv(...).model`` is always a fully-formed :class:`FEModel` either
 way -- when dataset 30000 is absent the tables are simply empty.
@@ -56,7 +66,7 @@ from numpy.typing import NDArray
 
 from ..core.model import FEModel, Material, Property
 from ..core.results import FRFResult, ModalResult
-from ..core.units import UnitSystem
+from ..core.units import UnitError, UnitSystem
 
 __all__ = [
     "UnvData",
@@ -400,8 +410,12 @@ def _json_scalar(obj):
     raise TypeError(f"not JSON serializable: {type(obj)}")
 
 
-def _read_cards_30000(body: list[str], model: FEModel, notes: list[str]) -> None:
-    """Restore materials/properties from the femtools private dataset."""
+def _read_cards_30000(body: list[str], model: FEModel, notes: list[str]) -> UnitSystem | None:
+    """Restore materials/properties from the femtools private dataset.
+
+    Returns the writing model's :class:`UnitSystem` when the payload carries
+    one (files written since the units fix), else ``None``.
+    """
     head = body[0].split() if body else []
     if not head or head[0] != _FEMTOOLS_CARDS_MARKER:
         raise ValueError(
@@ -413,7 +427,7 @@ def _read_cards_30000(body: list[str], model: FEModel, notes: list[str]) -> None
             f"dataset {_FEMTOOLS_CARDS_DS}: version {version} newer than supported "
             f"{_FEMTOOLS_CARDS_VERSION}; material/property cards skipped"
         )
-        return
+        return None
     payload = json.loads("".join(line.strip() for line in body[1:]))
     for md in payload.get("materials", ()):
         mat = Material(**md)
@@ -427,6 +441,13 @@ def _read_cards_30000(body: list[str], model: FEModel, notes: list[str]) -> None
             notes.append(f"dataset {_FEMTOOLS_CARDS_DS}: duplicate property {prop.id} ignored")
         else:
             model.properties[prop.id] = prop
+    units_dict = payload.get("units")
+    if units_dict is not None:
+        try:
+            return UnitSystem.from_dict(units_dict)
+        except (UnitError, TypeError) as exc:
+            notes.append(f"dataset {_FEMTOOLS_CARDS_DS}: unreadable unit system ({exc}); ignored")
+    return None
 
 
 def _read_82(body: list[str]) -> Traceline:
@@ -700,6 +721,7 @@ def read_unv(path: str | Path) -> UnvData:
     functions: list[UnvFunction] = []
     shapes: list[_ModeShape55] = []
     units_factors: tuple[float, float, float] | None = None
+    cards_units: UnitSystem | None = None
 
     for dsnum, body in _split_datasets(text):
         try:
@@ -717,7 +739,9 @@ def read_unv(path: str | Path) -> UnvData:
             elif dsnum == 2412:
                 _read_2412(body, model, notes)
             elif dsnum == _FEMTOOLS_CARDS_DS:
-                _read_cards_30000(body, model, notes)
+                units = _read_cards_30000(body, model, notes)
+                if cards_units is None:
+                    cards_units = units
             elif dsnum == 82:
                 tracelines.append(_read_82(body))
             elif dsnum == 55:
@@ -734,8 +758,14 @@ def read_unv(path: str | Path) -> UnvData:
     if header.get("model_name"):
         model.name = header["model_name"]
 
-    # unit handling: convert coordinates to SI when a non-trivial 164 is present
-    if units_factors is not None:
+    # unit handling.  femtools-authored files record the writing model's unit
+    # system in dataset 30000 and store every value verbatim in those units,
+    # so restore the system as-is (rescaling only the coordinates would leave
+    # them inconsistent with the material/property tables).  For foreign
+    # files, convert coordinates to SI when a non-trivial 164 is present.
+    if cards_units is not None:
+        model.units = cards_units
+    elif units_factors is not None:
         lf = units_factors[0]
         if lf not in (0.0, 1.0):
             for node in model.nodes.values():
@@ -858,6 +888,10 @@ def _write_cards_30000(model: FEModel) -> list[str]:
             }
             for prop in model.properties.values()
         ],
+        # exact unit system of every value in this file; read_unv restores it
+        # instead of rescaling coordinates to SI (additive key, still version 1:
+        # older readers ignore it and behave as before)
+        "units": model.units.to_dict(),
     }
     text = json.dumps(
         payload, separators=(",", ":"), sort_keys=True, default=_json_scalar
