@@ -8,6 +8,24 @@ Both elements carry six degrees of freedom per node in the global frame:
 * drilling   -- a rank deficient fictitious stiffness that leaves rigid body
   rotations energy free.  The assembler removes drilling DOFs that receive no
   genuine stiffness, so a flat plate produces no spurious mechanism.
+
+Orientation caveat
+------------------
+
+That last step needs the drilling direction to *be* a global DOF.  A flat mesh
+lying in a plane spanned by two global axes has its drilling rotation on a
+single component (``rz`` for an x-y plate, ``ry`` for an x-z one) and the
+assembler drops it exactly.  Tilt the same mesh so its normal is oblique and
+the drilling direction becomes a combination of ``rx``, ``ry`` and ``rz``: no
+whole DOF can be removed without taking a genuine bending rotation with it, so
+the per-element null spaces survive as one global zero-energy mechanism and the
+free-free spectrum shows a *seventh* zero frequency.  The elastic frequencies
+are unaffected -- :func:`femtools.fea.verification.shell_drilling_orientation_gap`
+reproduces both spectra and they agree to twelve digits -- and
+:func:`femtools.fea.assemble.assemble_km` warns when it detects the retained
+mechanism.  Removing it for good needs a per-node rotational frame rather than
+an index set of eliminated DOFs, which is a change to the assembly contract
+rather than to this module.
 """
 
 from __future__ import annotations
