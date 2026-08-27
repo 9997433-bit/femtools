@@ -6,6 +6,8 @@ Spec for `femtools.updating` (owner: R1-O4). Frozen entry points:
 from femtools.updating.sensitivity import sensitivity_matrix
 from femtools.updating.updater import update_model, UpdateResult
 from femtools.updating.force_id import identify_harmonic_forces
+# Round-6 additions (REMAINING.md, owner R6-O4) — see §6:
+from femtools.updating.uq import parameter_covariance, monte_carlo_update, UQResult
 ```
 
 Method class: iterative sensitivity-based weighted least squares with Bayesian (prior-weighted)
@@ -181,7 +183,94 @@ selection by the L-curve corner (log–log $\lVert \hat F \rVert$ vs residual) o
 $\hat F$, per-line condition numbers, and the chosen $\lambda(\omega)$. Golden case: noiseless
 2-DOF synthetic recovers the exact force to $10^{-8}$.
 
-## 6. Complexity summary
+## 6. Parameter uncertainty — `femtools.updating.uq` (Round 6, owner R6-O4)
+
+First-order propagation of measurement scatter through the converged WLS/Bayesian estimator
+of §4, plus a seeded Monte Carlo cross-check. Method class: minimum-variance / delta-method
+covariance from Friswell & Mottershead, *Finite Element Model Updating in Structural
+Dynamics* (Kluwer 1995, ch. 5–6 — the same penalty-function framework §4 already implements);
+Friswell, "The adjustment of structural parameters using a minimum variance estimator",
+*MSSP* 3(2), 1989. Deliberately **no** Bayesian samplers (no MCMC): the frozen scope is the
+first-order covariance and a plain, seeded MC resampling loop.
+
+```python
+parameter_covariance(S, *, weights=None, residual_cov=None, regularization=0.0,
+                     prior_cov=None, residuals=None) -> UQResult
+monte_carlo_update(model, parameters, targets, *, target_cov, n_samples, seed,
+                   **update_kwargs) -> UQResult   # seed is REQUIRED, not defaulted
+
+class UQResult:
+    covariance: np.ndarray      # (n_p, n_p) parameter covariance
+    std: np.ndarray             # sqrt(diag)
+    correlation: np.ndarray     # Cov normalized to unit diagonal
+    samples: np.ndarray | None  # (n_samples, n_p) — MC only
+    mean: np.ndarray | None     # MC sample mean
+```
+
+### 6.1 First-order covariance — `parameter_covariance`
+
+At a *converged* estimate $\hat p$ with Jacobian $S$ (from `sensitivity_matrix`, evaluated at
+$\hat p$), data weighting $W_z$, prior weighting $W_p$ and measurement covariance $C_z$, the
+GN normal equations linearize the estimator as $\hat p = p^* + (S^\top W_z S + W_p)^{-1}
+S^\top W_z\, \delta z + O(\delta z^2)$, so
+
+$$\mathrm{Cov}(\hat p) =
+\left( S^\top W_z S + W_p \right)^{-1} S^\top W_z\, C_z\, W_z S
+\left( S^\top W_z S + W_p \right)^{-1}$$
+
+(the sandwich form). Special cases to pin in tests:
+
+- $W_z = C_z^{-1}$, $W_p = 0$ (Gauss–Markov weighting):
+  $\mathrm{Cov}(\hat p) = (S^\top C_z^{-1} S)^{-1}$ — the minimum-variance estimator, equal to
+  the Cramér–Rao bound under Gaussian residuals; the sandwich must collapse to this
+  algebraically (identity test, 1e-10).
+- $W_p = C_p^{-1}$: the sandwich is the *frequentist* covariance of the regularized
+  (biased) estimator; the Bayesian posterior $(S^\top W_z S + W_p)^{-1}$ already returned as
+  `UpdateResult.covariance` (§4) is a different object — it adds prior information instead of
+  describing the resampling scatter. Return the sandwich; document the distinction, do not
+  average the two.
+- $C_z$ unknown: estimate $\hat C_z = \hat\sigma^2 W_z^{-1}$ from the converged residuals
+  $r$, $\hat\sigma^2 = r^\top W_z r / (n_z - n_p)$ (pass `residuals=`) — the classic
+  variance-of-unit-weight scaling.
+
+Also derivable and worth returning: the response-space re-projection
+$S\,\mathrm{Cov}(\hat p)\,S^\top$ (how much data scatter the parameters can explain) and the
+correlation matrix — off-diagonals $|\rho_{kl}| > 0.95$ mean the pair is not separately
+identifiable from this data (same collinearity report as §4 safeguard 3).
+
+Closed-form golden anchor (extends the §4 E-recovery case): for the 1-parameter uniform-$E$
+problem with relative frequency residuals, $f_r(p) = \sqrt{p}\, f_r(1)$ gives
+$\partial z_i / \partial p = -1/2$ at $p = \hat p = 1$ exactly, so with i.i.d. relative
+frequency noise $\sigma_f$ on $n_z$ frequencies
+
+$$\sigma_{\hat p} = \frac{2 \sigma_f}{\sqrt{n_z}}$$
+
+— an analytic value the first-order path must hit to 1e-6 and the MC path to sampling
+accuracy (`docs/ACCEPTANCE.md` §10, case 21).
+
+### 6.2 Monte Carlo — `monte_carlo_update`
+
+Factor $C_z = L L^\top$ (Cholesky; reject non-PSD input), draw
+$z^{(j)} = z_{test} + L w^{(j)}$ with $w^{(j)} \sim N(0, I)$ from
+`np.random.default_rng(seed)` — the seed is a **required argument** so no run is silently
+irreproducible — and rerun `update_model` from the same $p_0$ per sample. Report sample mean,
+sample covariance, and per-parameter percentiles; the comparison against the §6.1 ellipsoid
+is the point of the exercise: divergence flags linearization failure (strong nonlinearity,
+mode swaps mid-update, active bounds). Cost: `n_samples` full updates — this is the expensive
+oracle, not the default path.
+
+Pitfalls: the covariance is a *noise-propagation* statement only — it says nothing about
+model-form bias, which dominates real updating (report both, never sell $\sigma_{\hat p}$ as
+total uncertainty); it is valid only at convergence (the delta method assumes a zero
+gradient — calling it mid-iteration returns garbage); mode pairing must be re-run inside
+every MC sample (a mode swap turns an $O(\sigma)$ resample into an $O(1)$ outlier — same trap
+as §3.2); bounded parameters clip samples at the box (§4 safeguard 2) → the MC distribution
+is truncated, compare percentiles, not just second moments; FD-sensitivity noise in $S$
+inflates the first-order covariance floor; sample covariance from $n$ draws carries
+$\approx \sqrt{2/(n-1)}$ relative scatter per entry — do not quote three digits from 50
+samples.
+
+## 7. Complexity summary
 
 | Kernel | Cost |
 |---|---|
@@ -191,3 +280,5 @@ $\hat F$, per-line condition numbers, and the chosen $\lambda(\omega)$. Golden c
 | GN step | $O(n_z n_p^2 + n_p^3)$ (dense, tiny) |
 | Full update | `max_iter` × (modal solve + $S$ + step) |
 | Force ID | $O(n_f \cdot n_{out} n_{in} \min(n_{out}, n_{in}))$ SVDs |
+| `parameter_covariance` | $O(n_z n_p^2 + n_p^3)$ dense (one sandwich) |
+| `monte_carlo_update` | `n_samples` × full update — the dominant UQ cost |

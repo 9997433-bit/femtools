@@ -10,6 +10,8 @@ from femtools.rbpe.rbfit import rigid_body_properties
 # Round-4 additions (REMAINING.md, owner R4-O4) — see §5–§6:
 from femtools.mpe.frf_estimation import estimate_h1, estimate_h2, coherence
 from femtools.mpe.ssi import ssi_cov
+# Round-6 addition (REMAINING.md, owner R6-O4) — see §7:
+from femtools.mpe.ssi import ssi_data
 ```
 
 Common conventions: FRFs `H (n_out, n_in, n_f)` on `freq_hz`; continuous-time poles
@@ -295,7 +297,74 @@ $1/(n-k)$; harmonics masquerade as ζ ≈ 0 poles (flag, don't fit); damping est
 record lengths of ≳ 500 cycles of the lowest mode for ~10 % scatter; seeded
 `synthetic_response` is the deterministic test source.
 
-## 7. Complexity summary
+## 7. SSI-DATA — `femtools.mpe.ssi.ssi_data` (Round 6, owner R6-O4)
+
+Data-driven stochastic subspace identification (N4SID-class): Van Overschee & De Moor,
+*Subspace Identification for Linear Systems: Theory — Implementation — Applications*
+(Kluwer, 1996), ch. 3 (stochastic case); reference-based variant Peeters & De Roeck,
+"Reference-based stochastic subspace identification for output-only modal analysis",
+*MSSP* 13(6), 1999. Same problem as §6 — output-only poles/shapes under unmeasured broadband
+excitation — but the Hankel compression step differs: instead of estimating correlations
+$\hat R_k$ first, project the raw data directly.
+
+Build the output block-Hankel with $2i$ block rows and $j = n_t - 2i + 1$ columns
+(scaled $1/\sqrt j$), split into past and future halves:
+
+$$Y_{0|2i-1} = \frac{1}{\sqrt j}
+\begin{bmatrix} y_0 & y_1 & \cdots & y_{j-1}\\
+\vdots & & & \vdots\\
+y_{2i-1} & y_{2i} & \cdots & y_{2i+j-2}\end{bmatrix}
+= \begin{bmatrix} Y_p \\ Y_f \end{bmatrix},$$
+
+then the orthogonal projection of the future row space onto the past row space
+
+$$\mathcal P_i = Y_f / Y_p = Y_f Y_p^\top \left( Y_p Y_p^\top \right)^{+} Y_p .$$
+
+The main stochastic identification theorem (Van Overschee & De Moor, ch. 3) states
+$\mathcal P_i = \mathcal O_i \hat X_i$: the projection factors into the extended
+observability matrix and the forward Kalman-filter state sequence — the data-driven
+counterpart of §6's $\mathcal H = \mathcal O_i\, \mathcal C_i$. Numerics: **never form
+$Y Y^\top$**. Compute one LQ factorization of the stacked Hankel,
+$[Y_p; Y_f] = L Q^\top$ with orthonormal $Q$; then $\mathcal P_i = L_{21} Q_1^\top$, and
+since the column space is unchanged by the orthonormal right factor, the SVD can act on the
+small triangular block $L_{21}$ ($(il) \times (il)$) directly. Weighted SVD
+$W_1 \mathcal P_i W_2 = U S V^\top$; weighting variants UPC ($W_1 = W_2 = I$ — the Round-6
+default), PC, and CVA ($W_1 = (Y_f Y_f^\top)^{-1/2}$, better separation of close/weak modes
+at extra cost). Keep `order` singular values, $\mathcal O_i = W_1^{-1} U_1 S_1^{1/2}$, and
+from there the path is **identical to §6** and shared in code: $C = \mathcal O[:l,:]$, shift
+invariance $A = \mathcal O[:-l,:]^{+} \mathcal O[l:,:]$, poles $\lambda_r = f_s \ln z_r$,
+unscaled shapes $\phi_r = C \psi_r$, conjugate-pair/$\zeta$-window filtering and the
+stabilization sweep.
+
+```python
+ssi_data(data, fs, *, order=None, n_modes=None, block_rows=None, orders=None,
+         f_range=None, stabilization=True, ref_channels=None, ...)
+    -> ModalParameterResult          # same result type and defaults as ssi_cov (§6)
+```
+
+cov vs data, when to use which: `ssi_cov` compresses the record to $2i$ correlation
+matrices first — cheapest, and fine for long clean records; `ssi_data` works on the raw
+data through one LQ, is numerically better conditioned (never squares the data, works on
+triangular factors) and statistically somewhat more efficient on short/noisy records (the
+projection is a conditional-mean, i.e. Kalman, estimate rather than a truncated correlation
+sequence). Both return unscaled shapes and share every downstream convention, so results on
+the same record must agree to well within the acceptance gates (`docs/ACCEPTANCE.md` §10,
+case 23). Reference channels (Peeters–De Roeck): replace $Y_p$ by the reference-row
+sub-Hankel — cost drops from $O(j(2il)^2)$ toward $O(j(i(l+r))^2)$ and noisy channels stop
+polluting the conditioning; `ref_channels=` mirrors §6.
+
+Pitfalls: all of §6's (unscaled shapes; overspecify `order` 2–3× and let stabilization
+choose; harmonics masquerade as $\zeta \approx 0$ poles; ≳500 cycles of the lowest mode for
+~10 % damping scatter; `block_rows` must satisfy $i\,l \ge$ order with $i/f_s$ spanning
+about half a period of the lowest mode) plus the data-driven specials: de-mean/detrend every
+channel first (a DC offset is a unit-circle pole that eats one order and biases the lowest
+mode); keep the $1/\sqrt j$ normalization consistent between the projection and any
+singular-value-based order diagnostics (poles are invariant to it, singular values are
+not); never materialize $Q$ ($ (2il) \times j$ — economy-mode `scipy.linalg.qr` on the
+transposed data returns only the triangular factor needed); memory scales with $j \cdot il$
+for the Hankel itself — build it as a strided view, not a copy, for long records.
+
+## 8. Complexity summary
 
 | Kernel | Cost |
 |---|---|
@@ -305,4 +374,5 @@ record lengths of ≳ 500 cycles of the lowest mode for ~10 % scatter; seeded
 | `lsce` | LS $O(n_o n_i n_t (2m)^2)$ + roots $O((2m)^3)$ |
 | `estimate_h1/h2`, `coherence` | Welch $O(n_o n_i n_t \log n_{seg})$ |
 | `ssi_cov` | correlations $O(n_o^2\, i\, n_t)$ + SVD $O((i\, n_o)^3)$ |
+| `ssi_data` | LQ $O(j\,(2 i n_o)^2)$ + SVD $O((i\, n_o)^3)$ — LQ dominates |
 | `rigid_body_properties` | $O(n_f n_i (n_o \cdot 6 + 6 \cdot 10))$ LS stacks |

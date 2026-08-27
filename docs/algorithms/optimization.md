@@ -1,4 +1,4 @@
-# Optimization algorithms — size (SLSQP), topology (SIMP), DOE
+# Optimization algorithms — size (SLSQP), topology (SIMP), shape, DOE
 
 Spec for `femtools.optimization` (owner: R1-O4). Frozen entry points:
 
@@ -6,6 +6,8 @@ Spec for `femtools.optimization` (owner: R1-O4). Frozen entry points:
 from femtools.optimization.size import size_optimize
 from femtools.optimization.topology import topology_simp
 from femtools.optimization.doe import latin_hypercube, full_factorial
+# Round-6 addition (REMAINING.md, owner R6-O4) — see §4:
+from femtools.optimization.shape import shape_optimize, ShapeResult
 ```
 
 ## 1. Size optimization — `size_optimize`
@@ -130,11 +132,81 @@ Uses: multistart seeds for §1, surrogate/DOE studies over updating parameters, 
 screening. Pitfall: LHS guarantees 1-D stratification only — pairwise projections can still
 cluster without the maximin criterion; for $k > n$ dimensions any DOE is degenerate, warn.
 
-## 4. Complexity summary
+## 4. Node-based shape optimization — `shape_optimize` (Round 6, owner R6-O4)
+
+Shape optimization with **selected node coordinates as design variables** (the "natural
+design variable" formulation) on a fixed mesh topology — no remeshing, no CAD
+parameterization in Round-6 scope. Method class: Haftka & Grandhi, "Structural shape
+optimization — a survey", *CMAME* 57 (1986) 91–106; Haftka & Gürdal, *Elements of Structural
+Optimization* (3rd ed., Kluwer 1992). NLP solved with
+`scipy.optimize.minimize(method="SLSQP" | "trust-constr")`, reusing the §1 machinery.
+
+```python
+shape_optimize(model, design_nodes, objective, constraints=(), *,
+               directions=None,            # per-node xyz mask, default all three
+               bounds=None,                # box on the coordinate perturbations
+               method="slsqp",             # or "trust-constr"
+               quality_min=0.2,            # min-Jacobian barrier threshold
+               smoothing="laplacian",      # non-design nodes follow the boundary
+               max_iter=50, tol=1e-6) -> ShapeResult
+# objective: {"kind": "frequency", "mode": r, "target": f_hz | "maximize"}
+#            | {"kind": "compliance", "loads": ...} | {"kind": "mass"} | callable
+# ShapeResult: model (updated copy, input never mutated), x, history,
+#              quality_history, converged, n_iter, message
+```
+
+Design variables are coordinate *perturbations* $s$ of the selected nodes
+($x_a = x_a^0 + s_a$, optionally masked to chosen directions), scaled by a characteristic
+element length so SLSQP sees $O(1)$ variables (same scaling argument as §1).
+
+Sensitivities — semi-analytic at element level: only elements touching a moved node change,
+so $\partial K / \partial s_a \approx (K_e(x + h e_a) - K_e(x - h e_a)) / (2h)$ with
+$h \approx 10^{-6} L_e$, assembled over the adjacent-element patch. Then reuse the standard
+adjoint/eigen formulas: Fox–Kapoor for frequencies
+($\partial \lambda_r / \partial s = \phi_r^\top (\partial K/\partial s -
+\lambda_r\, \partial M/\partial s)\, \phi_r$ — mind that $M$ *does* depend on shape, unlike
+§1 thickness variables), self-adjoint compliance
+$\partial c / \partial s = -u^\top (\partial K / \partial s)\, u$ (plus a load term when
+loads ride on moved nodes — warn instead of silently ignoring). Known accuracy trap:
+the semi-analytic method loses digits on rigid-rotation-dominated beam/shell elements and
+the error *grows* with mesh refinement (Barthelemy & Haftka, *Structural Optimization* 2,
+1990) — central differences and the relative step above are the standard mitigation; an FD
+oracle on the full objective is the acceptance cross-check.
+
+Mesh-quality barrier (mandatory — the failure mode of node-based shape is mesh tangling,
+not divergence): per element the scaled Jacobian $q_e = \min_{gp} \det J_{gp} /
+\det J_{gp}^0$ over the Gauss points, and either the hard constraint
+$\min_e q_e \ge q_{min}$ smoothed by KS/p-norm aggregation
+($-\tfrac{1}{\rho} \ln \sum_e e^{-\rho q_e}$, since $\min$ is non-smooth) or a log-barrier
+term $-\mu \sum_e \ln(q_e - q_{min})$ added to the objective. An inverted element
+($q_e \le 0$) must short-circuit the evaluation (return a large penalty) — never hand the
+eigensolver a tangled mesh.
+
+Laplacian smoothing (`smoothing="laplacian"`): design nodes move as the optimizer dictates;
+the remaining *non-design* nodes follow by solving the graph-Laplacian system
+$L_{ii} x_{int} = -L_{ib} x_{design}$ (equivalently iterating
+$x_i \leftarrow \tfrac{1}{|N(i)|} \sum_{j \in N(i)} x_j$) so interior distortion is spread
+over the mesh instead of accumulating in the first element ring — the spring-analogy mesh
+deformation classically paired with node-based shape variables. It also suppresses the
+**jagged-boundary** pathology: raw node-by-node variables produce oscillatory boundaries
+(the standard objection to natural design variables in Haftka–Grandhi); smoothing acts as
+the regularizing filter, exactly like the SIMP density filter in §2.1.
+
+Pitfalls: mode switching and repeated eigenvalues for frequency objectives — track modes by
+MAC against the initial shapes and constrain cluster minima (§1 pitfalls apply verbatim);
+mass changes implicitly with shape even for "frequency" objectives — add a mass constraint
+unless drift is intended; symmetry is broken by numerical noise unless symmetric design
+nodes are linked to one variable; loads/BCs attached to moved nodes change the problem
+definition (report which); fixed topology means large shape changes starve the mesh —
+the quality barrier going active for many iterations is the signal to stop trusting the
+result, report `quality_history`.
+
+## 5. Complexity summary
 
 | Kernel | Cost |
 |---|---|
 | SLSQP iteration | QP $O(n_x^3)$ + 1 modal/static solve + analytic gradients |
 | SIMP iteration | 1 static solve (reused pattern) + $O(nnz_W)$ filter + $O(40 n_e)$ bisection |
+| Shape iteration | 1 modal/static solve + $O(n_s \bar n_{adj})$ element re-integrations + QP $O(n_s^3)$ |
 | LHS | $O(\text{iters} \cdot n^2 k)$ maximin, $O(nk)$ plain |
 | Full factorial | $O(\prod_k L_k)$ — memory bound |
