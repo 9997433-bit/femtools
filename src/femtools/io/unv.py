@@ -883,8 +883,8 @@ def _write_58_frf(frf: FRFResult, i_out: int, i_in: int, func_id: int) -> list[s
 
 
 def write_unv(
-    path: str | Path,
-    model: FEModel | None = None,
+    path: str | Path | FEModel,
+    model: FEModel | str | Path | None = None,
     modal: ModalResult | None = None,
     frf: FRFResult | None = None,
     tracelines: Sequence[Traceline] | None = None,
@@ -892,6 +892,8 @@ def write_unv(
     node_dataset: int = 2411,
 ) -> None:
     """Write a universal file with the given content.
+
+    Accepts ``write_unv(path, model=...)`` or ``write_unv(model, path)``.
 
     * ``model`` -> datasets 151/164 + nodes (2411 by default, or 15) + 2412
     * ``modal`` -> one dataset 55 per mode (normal or complex modes)
@@ -901,6 +903,12 @@ def write_unv(
     A ``modal`` result without ``dof_index`` requires ``model`` (the
     canonical model DOF ordering is assumed).
     """
+    from ._compat import coerce_path_model
+
+    if not isinstance(path, (str, Path)) or (
+        model is not None and not isinstance(model, FEModel)
+    ):
+        path, model = coerce_path_model(path, model)
     if node_dataset not in (15, 2411):
         raise ValueError("node_dataset must be 15 or 2411")
     lines: list[str] = []

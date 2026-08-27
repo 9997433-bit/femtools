@@ -292,16 +292,21 @@ def _result_from_parts(
 
 
 def save_project(
-    path: str | Path,
-    model: FEModel,
+    path: str | Path | FEModel,
+    model: FEModel | str | Path | None = None,
     results: dict[str, AnyResult] | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> None:
     """Save ``model`` (+ named ``results`` and free-form ``metadata``) to ``path``.
 
+    Accepts ``save_project(path, model)`` or ``save_project(model, path)``.
+
     The conventional extension is ``.ftproj``; arrays are stored as binary
     npz so the round trip is bit-exact for all numeric data.
     """
+    from ._compat import coerce_path_model
+
+    path, model = coerce_path_model(path, model)
     results = results or {}
     manifest: dict[str, Any] = {
         "format": FORMAT_NAME,

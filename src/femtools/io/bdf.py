@@ -502,13 +502,18 @@ def _grid_large(node_id: int, cp: int, xyz: np.ndarray, cd: int) -> list[str]:
 _CORD_NAME = {"cartesian": "CORD2R", "cylindrical": "CORD2C", "spherical": "CORD2S"}
 
 
-def write_bdf(path: str | Path, model: FEModel) -> None:
+def write_bdf(path: str | Path | FEModel, model: FEModel | str | Path | None = None) -> None:
     """Write an :class:`FEModel` as a bulk-data deck (small field, GRID* large).
+
+    Accepts ``write_bdf(path, model)`` or ``write_bdf(model, path)``.
 
     Lumped MASS/SPRING/DAMPER elements are written as CONM2/CELAS2/CDAMP2
     with values taken from their lumped property; the auto property card
     itself is not emitted (Nastran keeps these values on the element).
     """
+    from ._compat import coerce_path_model
+
+    path, model = coerce_path_model(path, model)
     lines: list[str] = [
         f"$ femtools bulk data export -- model: {model.name}",
         f"$ units: {model.units.length}-{model.units.force}-{model.units.mass}-{model.units.time}"
