@@ -1,7 +1,27 @@
-# File Ownership — Round 1
+# File Ownership
 
 Agents MUST only write files under their exclusive paths.
 Shared-read: everything else. If a change is needed outside ownership, document it in the report; do not edit.
+
+Parent-owned (do not touch): `.agent_workspace/PROGRESS.md`, `.agent_workspace/FILE_OWNERSHIP.md`, `.agent_workspace/ORCHESTRATION.md`, `.agent_workspace/ROUND1_BRIEF.md`
+
+Each agent MAY write exactly one report: `.agent_workspace/reports/<ID>.md`
+
+## Round 2
+
+| ID | Model slug | Exclusive write paths |
+|----|------------|----------------------|
+| R2-F1 | claude-fable-5-thinking-xhigh | `docs/ARCHITECTURE.md`, `docs/PRODUCT_MAP.md`, `docs/SOTA.md`, `.github/**`, `pyproject.toml`, `src/femtools/__init__.py` |
+| R2-F2 | claude-fable-5-thinking-xhigh | `src/femtools/core/**`, `src/femtools/io/**` |
+| R2-F3 | claude-fable-5-thinking-xhigh | `docs/algorithms/**`, `docs/ACCEPTANCE.md`, `examples/**` |
+| R2-F4 | claude-fable-5-thinking-xhigh | `src/femtools/script/**`, `src/femtools/cli.py`, `src/femtools/gui/**`, `src/femtools/viz/**` |
+| R2-O1 | claude-opus-5-thinking-high-fast | `src/femtools/fea/**` |
+| R2-O2 | claude-opus-5-thinking-high-fast | `src/femtools/dynamics/**` |
+| R2-O3 | claude-opus-5-thinking-high-fast | `src/femtools/correlation/**`, `src/femtools/pretest/**` |
+| R2-O4 | claude-opus-5-thinking-high-fast | `src/femtools/updating/**`, `src/femtools/optimization/**`, `src/femtools/mpe/**`, `src/femtools/rbpe/**` |
+| R2-G1 | gpt-5.6-sol-xhigh-fast | `tests/**` except `tests/perf/**` |
+| R2-G2 | gpt-5.6-sol-xhigh-fast | `benchmarks/**`, `tests/perf/**`, `scripts/**` |
+
 
 | ID | Model slug | Exclusive write paths |
 |----|------------|----------------------|
