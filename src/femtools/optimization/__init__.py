@@ -1,8 +1,9 @@
-"""Optimization: sizing (SLSQP), 2-D SIMP topology, and design of experiments.
+"""Optimization: sizing, shape, 2-D SIMP topology, and design of experiments.
 
 Public entry points (see ``docs/CONTRACT_API.md``)::
 
     from femtools.optimization.size import size_optimize
+    from femtools.optimization.shape import shape_optimize
     from femtools.optimization.topology import topology_simp
     from femtools.optimization.doe import latin_hypercube, full_factorial
     from femtools.optimization.surrogate import fit_rsm, predict_rsm
@@ -30,6 +31,7 @@ from .multi import (
     pareto_weighted,
     simplex_lattice,
 )
+from .shape import ShapeResult, element_size_ratios, shape_optimize
 from .size import (
     Constraint,
     OptimizationResult,
@@ -44,6 +46,10 @@ __all__ = [
     "OptimizationResult",
     "Constraint",
     "finite_difference_gradient",
+    # shape
+    "shape_optimize",
+    "ShapeResult",
+    "element_size_ratios",
     "topology_simp",
     "TopologyResult",
     "element_stiffness_q4",

@@ -1,4 +1,4 @@
-"""Covariance-driven Stochastic Subspace Identification (SSI-COV).
+"""Stochastic Subspace Identification: covariance-driven and data-driven.
 
 Output-only (operational) modal analysis in the time domain.  A structure
 excited by broadband ambient forces is modelled as the stochastic state-space
@@ -36,25 +36,47 @@ Because the model order is not known in advance, the identification is repeated
 over a range of orders and the physical poles are the ones that *stabilise*
 (:func:`femtools.mpe.common.stabilization_diagram`).
 
+Data-driven SSI (``SSI-DATA``, :func:`ssi_data`)
+------------------------------------------------
+The covariances above are a *statistic* of the data.  The data-driven algorithm
+(Van Overschee & De Moor, *Subspace Identification for Linear Systems*, 1996,
+ch. 3; the N4SID family) skips them and works on the raw block Hankel matrix
+directly.  Splitting ``2i`` block rows of measurements into a "past" block
+:math:`Y_p` and a "future" block :math:`Y_f`, the orthogonal projection of the
+future row space onto the past row space
+
+.. math::
+    \\mathcal{P}_i = Y_f / Y_p = Y_f Y_p^T (Y_p Y_p^T)^\\dagger Y_p
+                  = \\mathcal{O}_i\\,\\hat{X}_i
+
+is again a rank-``n`` product of the observability matrix with a Kalman filter
+state sequence, so exactly the same truncated SVD and shift-invariance path
+recovers ``A`` and ``C``.  The projection is computed from an LQ factorisation
+of the stacked Hankel matrix: with :math:`[Y_p; Y_f] = L Q` the projection is
+:math:`L_{21}Q_1`, and because :math:`Q_1` has orthonormal rows the SVD of the
+much smaller block :math:`L_{21}` carries the same singular values and left
+singular vectors.  Compared with SSI-COV, SSI-DATA avoids forming the
+covariance estimates (so no lag/bias choice) at the price of factorising a
+matrix as wide as the record.
+
 Documented subset
 -----------------
-Implemented: covariance-driven SSI with unweighted (``weighting="none"``, the
-classic SSI-COV / "principal component" choice) and canonical-variate
-(``weighting="cva"``) weighting, reference-based reduction (``ref_channels``),
-a multi-order stabilisation sweep with frequency / damping / mode-shape
-criteria, and mode shapes from the observability matrix.
+Implemented: covariance-driven SSI (:func:`ssi_cov`) and data-driven SSI
+(:func:`ssi_data`), both with unweighted (``weighting="none"``, the classic
+"principal component" choice) and canonical-variate (``weighting="cva"``)
+weighting, reference-based reduction (``ref_channels``), a multi-order
+stabilisation sweep with frequency / damping / mode-shape criteria, and mode
+shapes from the observability matrix.
 
-Not implemented here: data-driven SSI (``SSI-DATA``, which projects raw block
-Hankel row spaces via an LQ decomposition instead of covariances), combined
-deterministic--stochastic identification with measured inputs, and uncertainty
-quantification of the identified poles.  ``SSI-COV`` is the variant that is
-cheapest, most robust on long ambient records, and standard for OMA.
+Not implemented here: combined deterministic--stochastic identification with
+measured inputs, and uncertainty quantification of the identified poles.
 """
 
 from __future__ import annotations
 
 import math
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 from numpy.typing import ArrayLike
@@ -66,7 +88,7 @@ from .common import (
     stabilization_diagram,
 )
 
-__all__ = ["ssi_cov", "output_covariances", "block_toeplitz"]
+__all__ = ["ssi_cov", "ssi_data", "output_covariances", "block_toeplitz", "block_hankel"]
 
 
 def _as_channels(data: ArrayLike) -> np.ndarray:
@@ -140,6 +162,37 @@ def block_toeplitz(R: np.ndarray, block_rows: int, *, shift: int = 0) -> np.ndar
                 i + shift + a - b
             ]
     return T
+
+
+def block_hankel(
+    data: ArrayLike,
+    block_rows: int,
+    *,
+    n_columns: int | None = None,
+    offset: int = 0,
+    channels: Sequence[int] | np.ndarray | None = None,
+) -> np.ndarray:
+    """Block Hankel matrix of outputs, ``H[a * n_ch + c, k] = y[c, offset + a + k]``.
+
+    ``block_rows`` stacked, one-sample-shifted copies of the record form the
+    row space that data-driven subspace identification projects.  ``offset=0``
+    with ``block_rows=i`` gives the "past" block :math:`Y_p`, ``offset=i`` the
+    "future" block :math:`Y_f`.
+    """
+    y = _as_channels(data)
+    if channels is not None:
+        y = y[np.asarray(channels, dtype=int)]
+    n_ch, n = y.shape
+    i = int(block_rows)
+    j = n - int(offset) - i + 1 if n_columns is None else int(n_columns)
+    if j < 1:
+        raise ValueError(
+            f"a record of {n} samples cannot fill {i} block rows at offset {offset}"
+        )
+    H = np.empty((i * n_ch, j))
+    for a in range(i):
+        H[a * n_ch : (a + 1) * n_ch, :] = y[:, offset + a : offset + a + j]
+    return H
 
 
 def _covariance_toeplitz(R: np.ndarray, block_rows: int) -> np.ndarray:
@@ -349,9 +402,296 @@ def ssi_cov(
         raise ValueError(f"unknown weighting {weighting!r}; expected 'none' or 'cva'")
 
     U, s, Vt = np.linalg.svd(T, full_matrices=False)
+
+    def _model(o: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return _state_space(U, s, Vt, o, n_ch, n_ref, W1_inv, W2_inv)
+
+    return _identify(
+        U,
+        s,
+        _model,
+        method="SSI-COV",
+        what="the block Toeplitz matrix",
+        step=step,
+        order=order,
+        orders=orders,
+        order_min=order_min,
+        order_step=order_step,
+        stabilization=stabilization,
+        f_range=f_range,
+        max_damping=max_damping,
+        min_damping=min_damping,
+        n_modes=n_modes,
+        stabilization_level=stabilization_level,
+        tol_freq=tol_freq,
+        tol_damp=tol_damp,
+        tol_mac=tol_mac,
+        min_count=min_count,
+        cluster_tol=cluster_tol,
+        mode_shapes=mode_shapes,
+        extras={"block_rows": i_blk, "weighting": weight, "ref_channels": ref},
+    )
+
+
+def _state_space_data(
+    U: np.ndarray,
+    s: np.ndarray,
+    Vt: np.ndarray,
+    order: int,
+    n_ch: int,
+    W1_inv: np.ndarray | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """``(A, C, X)`` for one model order of the data-driven algorithm.
+
+    The right factor is the Kalman filter state sequence (in the orthonormal
+    ``Q_1`` coordinates of the LQ factorisation) rather than a controllability
+    matrix, so it plays the role of ``G`` in the modal-contribution weight: the
+    RMS amplitude of a modal coordinate over the record.
+    """
+    n = int(order)
+    sq = np.sqrt(s[:n])
+    obs = U[:, :n] * sq[None, :]
+    state = sq[:, None] * Vt[:n, :]
+    if W1_inv is not None:
+        obs = W1_inv @ obs
+    C = obs[:n_ch, :]
+    A, *_ = np.linalg.lstsq(obs[:-n_ch, :], obs[n_ch:, :], rcond=None)
+    return A, C, state
+
+
+def ssi_data(
+    data: ArrayLike,
+    fs: float | None = None,
+    *,
+    dt: float | None = None,
+    order: int | None = None,
+    orders: Sequence[int] | None = None,
+    order_min: int = 2,
+    order_step: int = 2,
+    block_rows: int | None = None,
+    n_columns: int | None = None,
+    ref_channels: Sequence[int] | None = None,
+    weighting: str = "none",
+    detrend: bool = True,
+    n_modes: int | None = None,
+    f_range: tuple[float, float] | None = None,
+    max_damping: float = 0.25,
+    min_damping: float = 0.0,
+    stabilization: bool = True,
+    stabilization_level: str = "d",
+    tol_freq: float = 0.01,
+    tol_damp: float = 0.05,
+    tol_mac: float = 0.02,
+    min_count: int = 2,
+    cluster_tol: float = 0.01,
+    mode_shapes: bool = True,
+) -> ModalParameterResult:
+    """Data-driven stochastic subspace identification (SSI-DATA / N4SID class).
+
+    The future output block Hankel matrix is projected onto the row space of the
+    past one and the resulting rank-deficient product
+    :math:`\\mathcal{P}_i = \\mathcal{O}_i \\hat{X}_i` is split by a truncated
+    SVD, exactly as :func:`ssi_cov` splits the block Toeplitz matrix of
+    covariances.  Everything after the SVD -- the shift invariance estimate of
+    ``A``, the pole acceptance window, the stabilisation sweep and the mode
+    shapes -- is literally the same code, so the two functions return the same
+    :class:`~femtools.mpe.common.ModalParameterResult` and differ only in how
+    the subspace is obtained.
+
+    Parameters
+    ----------
+    data:
+        ``(n_channels, n_samples)`` output-only response time histories.
+    fs, dt:
+        Sampling frequency [Hz] or time step [s]; exactly one is required.
+    order:
+        Largest state-space model order.  Defaults to ``2 * n_modes + 10`` when
+        ``n_modes`` is given, otherwise 30.
+    block_rows:
+        Number of block rows ``i`` of the past (and future) Hankel matrix.
+    n_columns:
+        Number of Hankel columns ``j``; defaults to ``n_samples - 2 i + 1``,
+        i.e. the whole record.
+    ref_channels:
+        Reference channels used for the *past* block (SSI-DATA/ref), which
+        shrinks the projection without touching the identified mode shapes.
+    weighting:
+        ``"none"`` (default; the unweighted / principal-component projection,
+        which is what N4SID and MOESP-PC reduce to for output-only data) or
+        ``"cva"``, which pre-whitens the future block by the inverse Cholesky
+        factor of its own covariance.
+    detrend:
+        Remove the channel means before building the Hankel matrix (default).
+
+    Other parameters behave exactly as in :func:`ssi_cov`.
+
+    Returns
+    -------
+    ModalParameterResult
+        Same type and same ``extras`` keys as :func:`ssi_cov`, with
+        ``method="SSI-DATA"``; ``singular_values`` are those of the projection.
+
+    Notes
+    -----
+    The projection is evaluated through an LQ factorisation of the stacked
+    Hankel matrix rather than by forming :math:`Y_p^T(Y_pY_p^T)^{-1}Y_p`
+    explicitly, which is both cheaper and much better conditioned.  Because the
+    ``Q`` factor has orthonormal rows it can be dropped before the SVD.
+
+    Examples
+    --------
+    >>> import numpy as np
+    >>> from femtools.mpe.synthetic import synthetic_response
+    >>> from femtools.mpe.ssi import ssi_data
+    >>> syn = synthetic_response([5.0, 13.0], damping=0.02, n_out=4,
+    ...                          fs=256.0, duration=180.0, noise=0.01, seed=3)
+    >>> res = ssi_data(syn.data, fs=syn.fs, order=20, n_modes=2, f_range=(1.0, 60.0))
+    >>> bool(np.max(np.abs(res.freq_hz - syn.freq_hz) / syn.freq_hz) < 0.02)
+    True
+    """
+    if (fs is None) == (dt is None):
+        raise ValueError("exactly one of `fs` or `dt` must be given")
+    step = float(dt) if dt is not None else 1.0 / float(fs)  # type: ignore[arg-type]
+
+    y = _as_channels(data)
+    if detrend:
+        y = y - np.mean(y, axis=1, keepdims=True)
+    n_ch, n_samples = y.shape
+    ref = np.arange(n_ch) if ref_channels is None else np.asarray(ref_channels, dtype=int)
+    n_ref = int(ref.size)
+    if n_ref == 0:
+        raise ValueError("`ref_channels` selects no channel")
+
+    if order is None:
+        order = 2 * int(n_modes) + 10 if n_modes else 30
+    order = int(order)
+    if order < 2:
+        raise ValueError("order must be at least 2")
+
+    if block_rows is None:
+        block_rows = max(10, int(math.ceil(2.0 * order / n_ref)))
+    i_blk = int(block_rows)
+    if i_blk < 2:
+        raise ValueError("block_rows must be at least 2 for the shift invariance step")
+    if i_blk * n_ref < order:
+        raise ValueError(
+            f"block_rows={i_blk} with {n_ref} references gives a projection of rank at "
+            f"most {i_blk * n_ref}, below the requested order {order}"
+        )
+
+    j = n_samples - 2 * i_blk + 1 if n_columns is None else int(n_columns)
+    if j < i_blk * (n_ch + n_ref):
+        raise ValueError(
+            f"a record of {n_samples} samples gives only {j} Hankel columns, too few "
+            f"for {i_blk} block rows of {n_ch} channels"
+        )
+
+    weight = str(weighting).strip().lower()
+    want_cva = weight in ("cva", "canonical", "canonical-variate")
+    if not want_cva and weight not in ("none", "", "pc", "unweighted", "n4sid"):
+        raise ValueError(f"unknown weighting {weighting!r}; expected 'none' or 'cva'")
+
+    scale = 1.0 / math.sqrt(j)
+    Yp = block_hankel(y, i_blk, n_columns=j, offset=0, channels=ref) * scale
+    Yf = block_hankel(y, i_blk, n_columns=j, offset=i_blk) * scale
+
+    # LQ factorisation of [Y_p; Y_f].  The projection of the future row space
+    # onto the past one is L21 @ Q1, and Q1 (orthonormal rows) may be dropped
+    # before the SVD: it changes neither the singular values nor U.
+    n_past = i_blk * n_ref
+    _q, r = np.linalg.qr(np.vstack([Yp, Yf]).T)
+    L = r.T
+    L21 = L[n_past:, :n_past]
+
+    W1_inv: np.ndarray | None = None
+    P = L21
+    if want_cva:
+        Lf = L[n_past:, :]
+        Phi = Lf @ Lf.T
+        jitter = 1e-12 * np.trace(Phi) / Phi.shape[0]
+        try:
+            chol = np.linalg.cholesky(Phi + jitter * np.eye(Phi.shape[0]))
+            P = np.linalg.solve(chol, L21)
+            W1_inv = chol
+            weight = "cva"
+        except np.linalg.LinAlgError:  # pragma: no cover - singular future block
+            weight = "none (cva factorisation failed)"
+
+    U, s, Vt = np.linalg.svd(P, full_matrices=False)
+
+    def _model(o: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        return _state_space_data(U, s, Vt, o, n_ch, W1_inv)
+
+    return _identify(
+        U,
+        s,
+        _model,
+        method="SSI-DATA",
+        what="the projection matrix",
+        step=step,
+        order=order,
+        orders=orders,
+        order_min=order_min,
+        order_step=order_step,
+        stabilization=stabilization,
+        f_range=f_range,
+        max_damping=max_damping,
+        min_damping=min_damping,
+        n_modes=n_modes,
+        stabilization_level=stabilization_level,
+        tol_freq=tol_freq,
+        tol_damp=tol_damp,
+        tol_mac=tol_mac,
+        min_count=min_count,
+        cluster_tol=cluster_tol,
+        mode_shapes=mode_shapes,
+        extras={
+            "block_rows": i_blk,
+            "n_columns": j,
+            "weighting": weight,
+            "ref_channels": ref,
+        },
+    )
+
+
+# ----------------------------------------------------------------------
+def _identify(
+    U: np.ndarray,
+    s: np.ndarray,
+    make_model,
+    *,
+    method: str,
+    what: str,
+    step: float,
+    order: int,
+    orders: Sequence[int] | None,
+    order_min: int,
+    order_step: int,
+    stabilization: bool,
+    f_range: tuple[float, float] | None,
+    max_damping: float,
+    min_damping: float,
+    n_modes: int | None,
+    stabilization_level: str,
+    tol_freq: float,
+    tol_damp: float,
+    tol_mac: float,
+    min_count: int,
+    cluster_tol: float,
+    mode_shapes: bool,
+    extras: dict[str, Any],
+) -> ModalParameterResult:
+    """Modal parameters from a truncated subspace SVD, shared by both variants.
+
+    ``make_model(order) -> (A, C, G)`` supplies the state-space realisation of
+    one model order; everything downstream (the pole acceptance window, the
+    stabilisation sweep, the mode shapes and the result container) is identical
+    for SSI-COV and SSI-DATA, which is the point of the two algorithms sharing a
+    single shift-invariance path.
+    """
     max_order = min(order, int(np.sum(s > s[0] * 1e-14)), U.shape[1])
     if max_order < 2:  # pragma: no cover - degenerate data
-        raise RuntimeError("the block Toeplitz matrix is numerically rank deficient")
+        raise RuntimeError(f"{what} is numerically rank deficient")
 
     if orders is not None:
         order_list = sorted({int(o) for o in orders if 2 <= int(o) <= max_order})
@@ -371,7 +711,7 @@ def ssi_cov(
     models: dict[int, tuple[np.ndarray, np.ndarray]] = {}
     for o in order_list:
         try:
-            A, C, G = _state_space(U, s, Vt, o, n_ch, n_ref, W1_inv, W2_inv)
+            A, C, G = make_model(o)
             mu, psi = np.linalg.eig(A)
         except np.linalg.LinAlgError:  # pragma: no cover
             continue
@@ -395,7 +735,7 @@ def ssi_cov(
 
     if not pole_sets:
         raise RuntimeError(
-            "SSI-COV found no physical poles; check the frequency range, the "
+            f"{method} found no physical poles; check the frequency range, the "
             "model order, or whether the record is long enough"
         )
 
@@ -426,7 +766,7 @@ def ssi_cov(
     if n_modes is not None and reps.size > n_modes:
         # Persistence across orders decides first; ties (and the single-order
         # case, where every count is 1) are broken by how much each pole
-        # actually contributes to the measured output covariance.
+        # actually contributes to the measured output.
         contrib = _contribution_of(reps, pole_sets, weight_sets, used_orders)
         rank = np.lexsort((-contrib, -counts))
         keep_i = np.sort(rank[: int(n_modes)])
@@ -448,21 +788,19 @@ def ssi_cov(
         poles=lam,
         mode_shapes=shapes,
         order=top,
-        method="SSI-COV",
+        method=method,
         stabilization=diagram,
         extras={
             "dt": step,
             "orders": used_orders,
-            "block_rows": i_blk,
             "singular_values": s,
             "cluster_counts": counts,
             "modal_contribution": _contribution_of(
                 lam, pole_sets, weight_sets, used_orders
             ),
-            "weighting": weight,
             "A": models[top][0],
             "C": models[top][1],
-            "ref_channels": ref,
+            **extras,
         },
     )
 
