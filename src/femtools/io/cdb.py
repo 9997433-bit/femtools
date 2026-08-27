@@ -8,10 +8,13 @@ Supported records:
 record             use
 =================  ==========================================================
 NBLOCK             nodes (blocked, fixed-format; rotation angles ignored)
-EBLOCK             elements (blocked; SOLID and compact key)
+EBLOCK             elements (blocked; SOLID, COMPACT and default key --
+                   COMPACT records inherit the current TYPE/MAT/REAL/SECNUM)
 ET / ETBLOCK       element type number -> ANSYS element name
 MP / MPDATA        isotropic material data (EX, NUXY/PRXY, DENS, GXY, ALPX)
-R / RMORE/RLBLOCK  real constants (shell thickness, spring k, mass m, BEAM4)
+R / RMORE/RLBLOCK  real constants (shell thickness, spring k, mass m, BEAM4);
+                   both the interactive ``R,NSET,V1..V6`` and the archive
+                   ``R,NSET,LOC,STLOC,V1,V2,V3`` forms are read
 SECTYPE/SECDATA/   shell section thickness (layered sections are summed)
 SECBLOCK
 D                  single-point constraints (UX..ROTZ, ALL)
@@ -31,7 +34,9 @@ ANSYS               femtools  notes
 ==================  ========  =========================================
 LINK1               TRUSS2D   2-D spar
 LINK8, LINK180      BAR2
-BEAM3, BEAM4        BEAM2     BEAM4 section from real constants
+BEAM3               BEAM2     A/IZZ from real constants (2-D element:
+                              Iy=Iz, J=Iy+Iz fallbacks applied)
+BEAM4               BEAM2     section from real constants
 BEAM188             BEAM2     orientation node K honoured; section
                               values are NOT derived from SECDATA
 SHELL41/63/181      QUAD4     TRIA3 when degenerate (duplicate node)
@@ -79,11 +84,17 @@ class CdbError(FileFormatError):
 # Fortran fixed-format machinery
 # ---------------------------------------------------------------------------
 
-_FMT_ITEM = re.compile(r"(\d*)([iefg])(\d+)(?:\.\d+)?(?:e\d+)?", re.IGNORECASE)
+_FMT_ITEM = re.compile(r"(\d*)([iefga])(\d+)(?:\.\d+)?(?:e\d+)?", re.IGNORECASE)
+
+_Field = int | float | str | None
 
 
 def _parse_format(line: str, lineno: int) -> list[tuple[str, int]]:
-    """``(3i9,6e21.13e3)`` -> ``[('i', 9)]*3 + [('f', 21)]*6``."""
+    """``(3i9,6e21.13e3)`` -> ``[('i', 9)]*3 + [('f', 21)]*6``.
+
+    ``a`` (alphanumeric) descriptors are kept as kind ``'a'``: ETBLOCK is
+    written as ``(2i9,19a9)``, carrying the KEYOPT values as text fields.
+    """
     body = line.strip()
     if not (body.startswith("(") and body.endswith(")")):
         raise CdbError(f"expected a Fortran format line, got {line!r}", line=lineno)
@@ -93,7 +104,8 @@ def _parse_format(line: str, lineno: int) -> list[tuple[str, int]]:
         if m is None:
             raise CdbError(f"unsupported format item {part.strip()!r} in {body}", line=lineno)
         rep = int(m.group(1) or 1)
-        kind = "i" if m.group(2).lower() == "i" else "f"
+        code = m.group(2).lower()
+        kind = code if code in ("i", "a") else "f"
         fields.extend([(kind, int(m.group(3)))] * rep)
     return fields
 
@@ -102,9 +114,9 @@ def _to_float(tok: str) -> float:
     return float(tok.replace("D", "E").replace("d", "e"))
 
 
-def _fields(line: str, fmt: list[tuple[str, int]], lineno: int) -> list[int | float | None]:
+def _fields(line: str, fmt: list[tuple[str, int]], lineno: int) -> list[_Field]:
     """Slice one fixed-format line; blank fields become ``None``."""
-    out: list[int | float | None] = []
+    out: list[_Field] = []
     pos = 0
     for kind, width in fmt:
         raw = line[pos : pos + width].strip()
@@ -114,6 +126,8 @@ def _fields(line: str, fmt: list[tuple[str, int]], lineno: int) -> list[int | fl
                 out.append(None)
             elif kind == "i":
                 out.append(int(raw))
+            elif kind == "a":
+                out.append(raw)
             else:
                 out.append(_to_float(raw))
         except ValueError as exc:
@@ -123,8 +137,48 @@ def _fields(line: str, fmt: list[tuple[str, int]], lineno: int) -> list[int | fl
     return out
 
 
-def _first_int(fields: list[int | float | None]) -> int | None:
+def _first_int(fields: list[_Field]) -> int | None:
     return fields[0] if fields and isinstance(fields[0], int) else None
+
+
+def _n_present(fields: list[_Field]) -> int:
+    """Number of fields actually on the line (trailing blanks excluded)."""
+    n = len(fields)
+    while n and fields[n - 1] is None:
+        n -= 1
+    return n
+
+
+def _read_extra_nodes(
+    lines: list[str],
+    i: int,
+    fmt: list[tuple[str, int]],
+    node_fields: list[int],
+    needed: int,
+    full: bool,
+) -> int:
+    """Consume EBLOCK continuation lines carrying additional node numbers.
+
+    Per the CDB spec a record spills onto the next line only when the
+    previous line was full, so ``full`` gates the loop -- a record that
+    simply lists fewer nodes than the element's maximum (e.g. a BEAM188
+    without its orientation node) must not swallow the following record.
+    Returns the new line index.
+    """
+    n_lines = len(lines)
+    while full and len(node_fields) < needed and i < n_lines:
+        nxt = lines[i]
+        if re.match(r"\s*[A-Za-z]", nxt):  # next command reached
+            break
+        extra = _fields(nxt, fmt, i + 1)
+        first = _first_int(extra)
+        if first is None or first < 0:  # block terminator
+            break
+        i += 1
+        n = _n_present(extra)
+        node_fields += [v if isinstance(v, int) else 0 for v in extra[:n]]
+        full = n == len(fmt)
+    return i
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +263,9 @@ def read_cdb(path: str | Path) -> FEModel:
     mp: dict[int, dict[str, float]] = {}  # mat id -> label -> value
     rconst: dict[int, list[float]] = {}
     last_r_id: int | None = None
+    # current element attributes (TYPE/MAT/REAL/SECNUM commands); a COMPACT
+    # EBLOCK carries only node numbers and inherits these
+    cur_attr = {"TYPE": 1, "MAT": 1, "REAL": 1, "SECNUM": 0}
     sec_kind: dict[int, str] = {}
     shell_t: dict[int, float] = {}
     current_sec: int | None = None
@@ -260,7 +317,9 @@ def read_cdb(path: str | Path) -> FEModel:
 
         # ---- elements ------------------------------------------------------
         elif cmd == "EBLOCK":
-            solid = len(toks) > 2 and toks[2].upper().startswith("SOLID")
+            key = toks[2].upper() if len(toks) > 2 else ""
+            solid = key.startswith("SOLID")
+            compact = key.startswith("COMPACT")
             fmt = _parse_format(lines[i], i + 1)
             i += 1
             while i < n_lines:
@@ -270,30 +329,34 @@ def read_cdb(path: str | Path) -> FEModel:
                     i += 1
                     break
                 i += 1
+                present = _n_present(f)
+                full = present == len(fmt)
                 ints = [v if isinstance(v, int) else 0 for v in f]
                 ints += [0] * max(0, 19 - len(ints))
                 if solid:
                     mat, etype, real, sec = ints[0], ints[1], ints[2], ints[3]
                     nnodes, eid = ints[8], ints[10]
-                    nodes = [v for v in ints[11:] if v]
-                    while len(nodes) < nnodes and i < n_lines:
-                        extra = _fields(lines[i], fmt, i + 1)
-                        i += 1
-                        nodes += [v for v in extra if isinstance(v, int) and v]
-                    nodes = nodes[:nnodes]
+                    # zero placeholders kept so the field count matches nnodes
+                    node_fields = ints[11:present]
+                    i = _read_extra_nodes(lines, i, fmt, node_fields, nnodes, True)
+                    nodes = [v for v in node_fields[:nnodes] if v]
+                elif compact:
+                    # field 1 = element number, the rest are node numbers;
+                    # attributes come from the current TYPE/MAT/REAL/SECNUM
+                    eid = ints[0]
+                    etype, mat = cur_attr["TYPE"], cur_attr["MAT"]
+                    real, sec = cur_attr["REAL"], cur_attr["SECNUM"]
+                    node_fields = ints[1:present]
+                    expected = _ANSYS_ELEMENTS.get(et_map.get(etype, -1), (None, 0))[1]
+                    i = _read_extra_nodes(lines, i, fmt, node_fields, expected, full)
+                    nodes = [v for v in node_fields if v]
                 else:
                     eid, etype, real, mat = ints[0], ints[1], ints[2], ints[3]
                     sec = 0
-                    nodes = [v for v in ints[5:] if v]
+                    node_fields = ints[5:present]
                     expected = _ANSYS_ELEMENTS.get(et_map.get(etype, -1), (None, 0))[1]
-                    while 0 < len(nodes) < expected and i < n_lines:
-                        nxt = lines[i]
-                        if re.match(r"\s*[A-Za-z]", nxt) or _first_int(
-                            _fields(nxt, fmt, i + 1)
-                        ) in (None, -1):
-                            break
-                        nodes += [v for v in _fields(nxt, fmt, i + 1) if isinstance(v, int) and v]
-                        i += 1
+                    i = _read_extra_nodes(lines, i, fmt, node_fields, expected, full)
+                    nodes = [v for v in node_fields if v]
                 records.append(_ElemRecord(eid, etype, mat, real, sec, nodes))
 
         # ---- element types ---------------------------------------------------
@@ -345,14 +408,33 @@ def read_cdb(path: str | Path) -> FEModel:
 
         # ---- real constants ------------------------------------------------------
         elif cmd == "R":
-            rid = _int_tok(toks, 1)
+            args = toks[1:]
+            # CDWRITE inserts a revision token ("R5.0", newer "UNBL")
+            if args and re.fullmatch(r"R\d+(\.\d+)?|UNBL", args[0].upper()):
+                args = args[1:]
+            rtoks = [cmd, *args]
+            rid = _int_tok(rtoks, 1)
             if rid is not None:
-                vals = [_to_float(t) if t else 0.0 for t in toks[2:]]
-                rconst.setdefault(rid, []).extend(vals)
+                if len(args) > 1 and args[1].upper() == "LOC":
+                    # archive-file style: R,NSET,LOC,STLOC,VAL1,VAL2,VAL3
+                    stloc = _int_tok(rtoks, 3, 1) or 1
+                    vals = [_to_float(t) if t else 0.0 for t in args[3:]]
+                    table = rconst.setdefault(rid, [])
+                    table.extend([0.0] * (stloc - 1 + len(vals) - len(table)))
+                    for k, v in enumerate(vals):
+                        table[stloc - 1 + k] = v
+                else:  # interactive style: R,NSET,VAL1,...,VAL6
+                    vals = [_to_float(t) if t else 0.0 for t in args[1:]]
+                    rconst.setdefault(rid, []).extend(vals)
                 last_r_id = rid
         elif cmd == "RMORE":
             if last_r_id is not None:
-                rconst[last_r_id].extend(_to_float(t) if t else 0.0 for t in toks[1:])
+                # RMORE always continues at constants 7-12 (then 13-18, ...),
+                # even when the R line carried fewer than 6 values
+                table = rconst[last_r_id]
+                start = -(-len(table) // 6) * 6
+                table.extend([0.0] * (start - len(table)))
+                table.extend(_to_float(t) if t else 0.0 for t in toks[1:])
         elif cmd == "RLBLOCK":
             n_sets = _int_tok(toks, 1, 0) or 0
             fmt1 = _parse_format(lines[i], i + 1)
@@ -424,6 +506,12 @@ def read_cdb(path: str | Path) -> FEModel:
                 else:
                     notes.append(f"F load label {lab!r} at node {nid} not supported")
 
+        # ---- current element attributes (consumed by COMPACT EBLOCKs) --------------
+        elif cmd in ("TYPE", "MAT", "REAL", "SECNUM"):
+            val = _int_tok(toks, 1)
+            if val is not None:
+                cur_attr[cmd] = val
+
         # ---- things we refuse politely -----------------------------------------------
         elif cmd in _COUPLING_CMDS:
             coupling[cmd] = coupling.get(cmd, 0) + 1
@@ -468,6 +556,7 @@ def read_cdb(path: str | Path) -> FEModel:
     prop_ids: dict[tuple, int] = {}
     missing_mats: set[int] = set()
     beam_sections: set[int] = set()
+    beam3_reals: set[int] = set()
     missing_shell_t: set[int] = set()
 
     def _rc(rid: int, k: int) -> float:
@@ -497,14 +586,23 @@ def read_cdb(path: str | Path) -> FEModel:
             model.add_property(id=pid, type="shell", material_id=rec.mat, t=t,
                                check_refs=False, **extra)  # fmt: skip
         elif base == "beam":
-            if ansys_num in (3, 4):  # BEAM3/BEAM4: R = AREA, IZZ, IYY, ..., IXX(8th)
-                a, iz, iy, j = _rc(rec.real, 0), _rc(rec.real, 1), _rc(rec.real, 2), \
-                    _rc(rec.real, 7)  # fmt: skip
+            if ansys_num == 4:  # BEAM4: R = AREA, IZZ, IYY, ..., IXX(8th)
+                model.add_property(id=pid, type="beam", material_id=rec.mat,
+                                   A=_rc(rec.real, 0), Iy=_rc(rec.real, 2),
+                                   Iz=_rc(rec.real, 1), J=_rc(rec.real, 7),
+                                   check_refs=False, **extra)  # fmt: skip
+            elif ansys_num == 3:  # BEAM3 (2-D): R = AREA, IZZ, HEIGHT -- no IYY/IXX
+                beam3_reals.add(rec.real)
+                izz = _rc(rec.real, 1)
+                # BEAM2's own missing-inertia fallbacks (Iy=Iz, J=Iy+Iz),
+                # applied here because the model layer requires the fields
+                model.add_property(id=pid, type="beam", material_id=rec.mat,
+                                   A=_rc(rec.real, 0), Iy=izz, Iz=izz,
+                                   J=2.0 * izz, check_refs=False, **extra)  # fmt: skip
             else:  # BEAM188: section integration data, not derivable here
-                a = iz = iy = j = 0.0
                 beam_sections.add(rec.sec)
-            model.add_property(id=pid, type="beam", material_id=rec.mat, A=a, Iy=iy,
-                               Iz=iz, J=j, check_refs=False, **extra)  # fmt: skip
+                model.add_property(id=pid, type="beam", material_id=rec.mat, A=0.0,
+                                   Iy=0.0, Iz=0.0, J=0.0, check_refs=False, **extra)  # fmt: skip
         elif base == "bar":
             model.add_property(id=pid, type="bar", material_id=rec.mat,
                                A=_rc(rec.real, 0), check_refs=False, **extra)  # fmt: skip
@@ -623,6 +721,12 @@ def read_cdb(path: str | Path) -> FEModel:
         notes.append(
             f"no thickness found for shell section/real id(s) {sorted(missing_shell_t)}; "
             "t = 0.0 written (fix before solving)"
+        )
+    if beam3_reals:
+        notes.append(
+            f"BEAM3 real set(s) {sorted(beam3_reals)} carry A and IZZ only (2-D "
+            "element; RC 3 is the stress-recovery HEIGHT, not IYY); the BEAM2 "
+            "fallbacks Iy=Iz and J=Iy+Iz were applied"
         )
     if beam_sections:
         notes.append(

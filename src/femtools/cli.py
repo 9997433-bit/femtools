@@ -520,6 +520,29 @@ def _reduction_parts(result: Any) -> tuple[Any, Any, Any]:
     return T, Kr, Mr
 
 
+def _reduced_frequencies(Kr: Any, Mr: Any) -> Any:
+    """Natural frequencies [Hz] of the reduced pencil ``(Kr, Mr)``.
+
+    Solved inside the subspace the reduced mass actually spans: a SEREP
+    basis built from fewer modes than masters leaves ``M_red`` singular by
+    construction, so a plain ``eigh(Kr, Mr)`` fails outright.  The null
+    directions carry no inertia (infinite frequency) and are dropped, so
+    the returned vector can be shorter than ``Kr.shape[0]``.
+    """
+    import numpy as np
+
+    Ks = 0.5 * (Kr + Kr.T)
+    Ms = 0.5 * (Mr + Mr.T)
+    w, V = np.linalg.eigh(Ms)  # ascending
+    keep = w > max(float(w[-1]), 0.0) * Ms.shape[0] * 1.0e-14
+    if not keep.any():
+        raise np.linalg.LinAlgError("reduced mass matrix has no positive eigenvalues")
+    B = V[:, keep] / np.sqrt(w[keep])
+    KB = B.T @ Ks @ B
+    lam = np.linalg.eigvalsh(0.5 * (KB + KB.T))
+    return np.sqrt(np.clip(lam, 0.0, None)) / (2.0 * np.pi)
+
+
 @app.command("reduce")
 def reduce_cmd(
     model_file: Annotated[Path, typer.Argument(exists=True, help="Model file.")],
@@ -647,15 +670,16 @@ def reduce_cmd(
 
     freq_red = np.zeros(0)
     if compare:
-        import scipy.linalg as sla
-
         try:
-            w = sla.eigh(0.5 * (Kr + Kr.T), 0.5 * (Mr + Mr.T), eigvals_only=True)
+            freq_red = np.asarray(_reduced_frequencies(Kr, Mr))
         except (ValueError, np.linalg.LinAlgError) as exc:
             err_console.print(f"[yellow]warning:[/yellow] reduced eigensolve failed "
                               f"({exc}); skipping the frequency comparison")
         else:
-            freq_red = np.sqrt(np.clip(w, 0.0, None)) / (2.0 * np.pi)
+            if freq_red.size < n_red:
+                console.print(
+                    f"reduced mass has rank {freq_red.size} of {n_red}; comparing "
+                    f"the {freq_red.size} finite-frequency modes")
             freq_full = np.atleast_1d(np.asarray(modal_full.freq_hz, dtype=float))
             n_cmp = int(min(n_modes, freq_red.size, freq_full.size))
             table = Table(title=f"frequency comparison ({method_key})")
@@ -700,11 +724,13 @@ def _call_estimator(fn: Any, x: Any, y: Any, rate: float, **tuning: Any) -> Any:
     """Call a spectral estimator, adapting to its exact signature.
 
     The estimator kernels are developed independently; this keeps the CLI
-    working across signature variants: tuning keywords the function does
-    not accept (e.g. ``window=``) are dropped, and the sampling rate is
-    passed as the ``fs=`` keyword when the signature takes one (the
-    contract-test convention) or as the third positional argument
-    otherwise.
+    working across signature variants: an ``overlap=`` fraction is
+    translated to the ``noverlap=`` sample count when the function takes
+    only the latter (the scipy.signal convention), tuning keywords the
+    function does not accept (e.g. ``window=``) are dropped, and the
+    sampling rate is passed as the ``fs=`` keyword when the signature
+    takes one (the contract-test convention) or as the third positional
+    argument otherwise.
     """
     import inspect
 
@@ -712,6 +738,11 @@ def _call_estimator(fn: Any, x: Any, y: Any, rate: float, **tuning: Any) -> Any:
         params = inspect.signature(fn).parameters
     except (TypeError, ValueError):
         return fn(x, y, fs=rate, **tuning)
+    if ("overlap" in tuning and "overlap" not in params and "noverlap" in params
+            and tuning.get("nperseg")):
+        tuning = dict(tuning)
+        tuning["noverlap"] = int(round(float(tuning.pop("overlap"))
+                                       * int(tuning["nperseg"])))
     has_varkw = any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
     if not has_varkw:
         tuning = {k: v for k, v in tuning.items() if k in params}

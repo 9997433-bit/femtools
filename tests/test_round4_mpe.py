@@ -5,8 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-import pytest
 from scipy.signal import freqz, lfilter
+
+from femtools.mpe.frf_estimation import coherence, estimate_h1, estimate_h2
+from femtools.mpe.ssi import ssi_cov
+from femtools.mpe.synthetic import synthetic_response
 
 
 def _frequency_data(result: Any, value_names: tuple[str, ...]) -> tuple[np.ndarray, np.ndarray]:
@@ -35,13 +38,6 @@ def _curve(values: np.ndarray) -> np.ndarray:
 
 
 def test_h1_h2_recover_a_noise_free_linear_filter() -> None:
-    estimation = pytest.importorskip("femtools.mpe.frf_estimation")
-    estimate_h1 = getattr(estimation, "estimate_h1", None)
-    estimate_h2 = getattr(estimation, "estimate_h2", None)
-    estimate_coherence = getattr(estimation, "coherence", None)
-    if estimate_h1 is None or estimate_h2 is None or estimate_coherence is None:
-        pytest.skip("H1/H2/coherence APIs are not available")
-
     fs = 256.0
     nperseg = 1024
     rng = np.random.default_rng(4127)
@@ -55,7 +51,7 @@ def test_h1_h2_recover_a_noise_free_linear_filter() -> None:
 
     h1_result = estimate_h1(excitation, response, fs=fs, nperseg=nperseg)
     h2_result = estimate_h2(excitation, response, fs=fs, nperseg=nperseg)
-    coherence_result = estimate_coherence(excitation, response, fs=fs, nperseg=nperseg)
+    coherence_result = coherence(excitation, response, fs=fs, nperseg=nperseg)
     frequency, h1 = _frequency_data(h1_result, ("H", "h_complex", "frf", "values"))
     h2_frequency, h2 = _frequency_data(
         h2_result, ("H", "h_complex", "frf", "values")
@@ -77,13 +73,6 @@ def test_h1_h2_recover_a_noise_free_linear_filter() -> None:
 
 
 def test_ssi_cov_identifies_two_synthetic_ambient_modes() -> None:
-    ssi = pytest.importorskip("femtools.mpe.ssi")
-    ssi_cov = getattr(ssi, "ssi_cov", None)
-    if ssi_cov is None:
-        pytest.skip("covariance-driven SSI API is not available")
-
-    from femtools.mpe.synthetic import synthetic_response
-
     expected = np.array([6.0, 15.0])
     synthetic = synthetic_response(
         expected,

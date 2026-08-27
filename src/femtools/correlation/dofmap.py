@@ -614,6 +614,10 @@ def restrict(matrix: Any, index: ArrayLike, index_col: ArrayLike | None = None) 
 
     ``index`` holds positions or a boolean mask over the rows.  Used to build
     a test-DOF mass matrix for a cross-orthogonality check.
+
+    A 1-D ``matrix`` is a lumped diagonal and yields the sub-vector
+    ``matrix[index]``.  It has no off-diagonal block, so an ``index_col`` that
+    selects one is rejected rather than answered with the sub-vector.
     """
     shape = np.shape(matrix)
     rows = row_index(index, shape[0] if shape else None)
@@ -622,5 +626,10 @@ def restrict(matrix: Any, index: ArrayLike, index_col: ArrayLike | None = None) 
         return matrix.tocsr()[rows, :][:, cols]
     dense = np.asarray(matrix)
     if dense.ndim == 1:
+        if index_col is not None:
+            raise ValueError(
+                "a 1-D (lumped diagonal) operator has no row/column block; "
+                "expand it to a diagonal matrix to restrict rows and columns separately"
+            )
         return dense[rows]
     return dense[np.ix_(rows, cols)]

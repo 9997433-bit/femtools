@@ -171,6 +171,16 @@ def craig_bampton(
         i = np.unique(resolve_dofs(interior_dofs, ndof, "interior_dofs"))
         if np.intersect1d(b, i).size:
             raise ValueError("boundary_dofs and interior_dofs must be disjoint")
+        # A DOF in neither set gets a zero row in T, which silently reduces a *different*
+        # structure — the one with that DOF held at zero — while still reporting the
+        # parent's ndof. Refuse rather than hand back a stiffer model that looks right.
+        missing = np.setdiff1d(np.arange(ndof, dtype=int), np.union1d(b, i))
+        if missing.size:
+            raise ValueError(
+                f"boundary_dofs and interior_dofs must together cover all {ndof} DOFs; "
+                f"{missing.size} are in neither set (first: {missing[:8].tolist()}). "
+                "Slice K and M first if those DOFs are meant to be excluded."
+            )
     if b.size == 0:
         raise ValueError("at least one boundary DOF is required")
 

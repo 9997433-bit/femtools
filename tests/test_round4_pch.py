@@ -5,18 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
-import pytest
 
 from femtools.core.results import ModalResult
+from femtools.io.pch import read_pch, write_pch
 
 
 def test_pch_modal_roundtrip_preserves_eigenpairs(tmp_path: Path) -> None:
-    pch = pytest.importorskip("femtools.io.pch")
-    read_pch = getattr(pch, "read_pch", None)
-    write_pch = getattr(pch, "write_pch", None)
-    if read_pch is None or write_pch is None:
-        pytest.skip("PCH read/write API is not available")
-
     frequency = np.array([3.25, 11.5])
     modes = np.array(
         [

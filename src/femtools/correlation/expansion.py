@@ -309,6 +309,30 @@ def _pseudo_inverse(a: NDArray[Any], rcond: float) -> tuple[NDArray[Any], int]:
     return (vt.conj().T * inv) @ u.conj().T, rank
 
 
+def _as_operator(matrix: Any, n_full: int, name: str, *, like_sparse: bool) -> Any:
+    """Validate a full-size operator, expanding a 1-D lumped diagonal.
+
+    ``cross_orthogonality``, ``effective_mass`` and the rest of the package
+    read a 1-D array as a lumped diagonal, so ``expand_guyan`` does too — but
+    a diagonal cannot be partitioned into row/column blocks as it stands, and
+    restricting it as if it could yields a silently wrong expansion.  The
+    diagonal is therefore materialized here, sparse or dense to match the
+    stiffness it will be combined with.
+    """
+    if sp.issparse(matrix):
+        shape = matrix.shape
+    else:
+        matrix = np.asarray(matrix)
+        shape = matrix.shape
+        if matrix.ndim == 1:
+            if matrix.size != n_full:
+                raise ValueError(f"{name} has {matrix.size} entries but the model has {n_full} DOF")
+            return sp.diags(matrix) if like_sparse else np.diag(matrix)
+    if shape != (n_full, n_full):
+        raise ValueError(f"{name} has shape {shape}, expected ({n_full}, {n_full})")
+    return matrix
+
+
 def _solve(a: Any, b: NDArray[Any]) -> NDArray[Any]:
     """Solve ``a x = b`` for a dense or sparse ``a``, with a lstsq fallback."""
     rhs = np.asarray(b)
@@ -380,7 +404,8 @@ def expand_guyan(
         Measured DOFs: indices, a boolean mask, DOF keys, or ``None`` to
         match ``test_map`` against ``dof_map``.
     mass:
-        Full mass matrix, required for the dynamic expansion.
+        Full mass matrix, required for the dynamic expansion.  Dense, sparse,
+        or a 1-D lumped diagonal.
     freq_hz:
         Frequency of each measured mode [Hz].  With ``mass`` this selects the
         dynamic expansion; on its own it is only kept for reporting.
@@ -401,6 +426,8 @@ def expand_guyan(
     if len(shape) != 2 or shape[0] != shape[1]:
         raise ValueError(f"stiffness must be square, got shape {shape}")
     n_full = int(shape[0])
+    if mass is not None:
+        mass = _as_operator(mass, n_full, "mass", like_sparse=sp.issparse(stiffness))
 
     psi_raw = as_mode_matrix(phi_test, "phi_test")
     rows_full, rows_test, scale, dmap = _master_rows(

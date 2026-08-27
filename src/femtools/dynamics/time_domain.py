@@ -5,9 +5,19 @@ Each retained mode is an uncoupled SDOF oscillator
     q_r'' + 2 zeta_r w_r q_r' + w_r^2 q_r = phi_r^T f(t)
 
 integrated with the exact recurrence for a load that varies linearly inside a step
-(Nigam-Jennings). That recurrence is unconditionally stable and exact for piecewise-linear
-excitation, so ``dt`` only has to resolve the load and the highest retained mode. A
-Newmark average-acceleration variant is available for comparison.
+(the ramp-invariant / Nigam-Jennings recurrence). That recurrence is unconditionally
+stable and exact for piecewise-linear excitation, so ``dt`` only has to resolve the load
+and the highest retained mode. A Newmark average-acceleration variant is available for
+comparison.
+
+The recurrence coefficients are *evaluated* through the block matrix exponential of
+:func:`_ramp_coefficients` rather than through the textbook closed form in
+``sin``/``cos``/``exp``. The closed form is correct but not computable in floating point
+across the range of modes a real basis contains: its load coefficients divide by
+``omega^2`` a bracket that cancels to nothing as ``omega -> 0``, so a rigid-body mode that
+an eigensolver reports at 1e-7 Hz instead of exactly 0 — the normal outcome, since
+``eigh`` returns ``-1.8e-11`` for such an eigenvalue — loses every significant digit. See
+the docstring of :func:`_ramp_coefficients` for the measured breakdown.
 """
 
 from __future__ import annotations
@@ -18,6 +28,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
+import scipy.linalg as sla
 
 from ._utils import as_dense, resolve_dofs
 from .damping import DampingModel, as_damping
@@ -145,100 +156,93 @@ def _build_force(
     return np.ascontiguousarray(F, dtype=float), t
 
 
-def _nigam_jennings(
-    omega: np.ndarray, zeta: np.ndarray, dt: float
+def _ramp_coefficients(
+    omega: np.ndarray, c: np.ndarray, dt: float
 ) -> tuple[np.ndarray, ...]:
     """Exact piecewise-linear recurrence coefficients ``(A, B, C, D, Ap, Bp, Cp, Dp)``.
 
-    Evaluated in complex arithmetic so that over-damped modes (``zeta > 1``) work too; the
-    imaginary parts cancel and only the real part is kept.
+    For ``q'' + c q' + w^2 q = p`` with ``p`` linear across the step::
+
+        q_{n+1} = A q_n + B q'_n + C p_n + D p_{n+1}
+        q'_{n+1} = Ap q_n + Bp q'_n + Cp p_n + Dp p_{n+1}
+
+    The coefficients are the first-order-hold discretisation of the companion system
+    ``x' = Ac x + Bc p``, ``Ac = [[0, 1], [-w^2, -c]]``, ``Bc = [0, 1]^T``, and are read
+    off one block matrix exponential per mode (Van Loan, *Computing integrals involving
+    the matrix exponential*, IEEE TAC 23(3), 1978)::
+
+        expm(dt * [[Ac, Bc, 0 ],      [[ Ad, G1, G2 ],
+                   [0,  0,  1 ],  =    [ 0,  1,  dt ],
+                   [0,  0,  0 ]])      [ 0,  0,  1  ]]
+
+    with ``Ad`` the transition matrix, ``G1`` the step (zero-order-hold) load column and
+    ``G2 / dt`` the ramp one, so ``[C, Cp] = G1 - G2/dt`` and ``[D, Dp] = G2/dt``.
+
+    This is *not* how the recurrence is usually written. The textbook closed form in
+    ``exp(-zeta w dt)``, ``sin(w_d dt)`` and ``cos(w_d dt)`` is algebraically identical but
+    is not computable in floating point over the range of modes a real basis holds,
+    because its load coefficients divide a bracket that cancels to ``O((w dt)^2)`` by
+    ``w^2``. Measured against a 60-digit reference, the closed form loses (worst
+    coefficient, ``zeta = 0.02``) 5 digits at ``w dt = 1e-4``, 11 at ``1e-5`` and all of
+    them at ``1e-6``; with the heavy damping that Rayleigh ``alpha`` gives a near-rigid
+    mode it also overflows to ``nan``. The scaling-and-squaring Padé evaluation behind
+    ``expm`` stays at round-off across that whole range, and reproduces the ``w = 0``
+    limit (``C = dt^2/3``, ``D = dt^2/6``, ``Cp = Dp = dt/2``) and critical damping
+    exactly, so rigid-body and over-damped modes need no special case. The price is
+    ``1e-15`` instead of ``1e-16`` at moderate ``w dt`` and one small exponential per mode
+    at set-up, outside the time loop.
     """
-    w = np.asarray(omega, dtype=float)
-    z = np.asarray(zeta, dtype=float)
-    # Avoid the removable singularity at exactly critical damping.
-    z = np.where(np.abs(1.0 - z**2) < 1e-12, z * (1.0 - 1e-7) - 1e-9, z)
+    w = np.atleast_1d(np.asarray(omega, dtype=float))
+    cc = np.atleast_1d(np.asarray(c, dtype=float))
+    n = w.size
+    if n == 0:
+        empty = np.zeros(0)
+        return tuple(empty.copy() for _ in range(8))
 
-    zc = z.astype(complex)
-    root = np.sqrt(1.0 - zc**2)
-    wd = w * root
-    e = np.exp(-zc * w * dt)
-    s = np.sin(wd * dt)
-    c = np.cos(wd * dt)
-    w2 = (w**2).astype(complex)
+    blocks = np.zeros((n, 4, 4))
+    blocks[:, 0, 1] = 1.0
+    blocks[:, 1, 0] = -(w**2)
+    blocks[:, 1, 1] = -cc
+    blocks[:, 1, 2] = 1.0
+    blocks[:, 2, 3] = 1.0
+    E = np.asarray(sla.expm(blocks * float(dt)))
 
-    A = e * (zc / root * s + c)
-    B = e * (s / wd)
-    C = (1.0 / w2) * (
-        2.0 * zc / (w * dt)
-        + e * (((1.0 - 2.0 * zc**2) / (wd * dt) - zc / root) * s - (1.0 + 2.0 * zc / (w * dt)) * c)
+    Ad = E[:, :2, :2]
+    step = E[:, :2, 2]  # zero-order-hold load column
+    ramp = E[:, :2, 3] / float(dt)  # ramp load column
+    return (
+        Ad[:, 0, 0],
+        Ad[:, 0, 1],
+        step[:, 0] - ramp[:, 0],
+        ramp[:, 0],
+        Ad[:, 1, 0],
+        Ad[:, 1, 1],
+        step[:, 1] - ramp[:, 1],
+        ramp[:, 1],
     )
-    D = (1.0 / w2) * (
-        1.0 - 2.0 * zc / (w * dt)
-        + e * ((2.0 * zc**2 - 1.0) / (wd * dt) * s + 2.0 * zc / (w * dt) * c)
-    )
-    Ap = -e * (w / root * s)
-    Bp = e * (c - zc / root * s)
-    Cp = (1.0 / w2) * (
-        -1.0 / dt + e * ((w / root + zc / (root * dt)) * s + c / dt)
-    )
-    Dp = (1.0 / (w2 * dt)) * (1.0 - e * (zc / root * s + c))
-    return tuple(np.real(x) for x in (A, B, C, D, Ap, Bp, Cp, Dp))
-
-
-def _rigid_coefficients(c: np.ndarray, dt: float) -> tuple[np.ndarray, ...]:
-    """Exact coefficients for a zero-frequency mode ``q'' + c q' = p``.
-
-    Returns ``(E, phi1, phi2, phi3)`` such that
-
-    ``v1 = v0 E + dt (p0 phi1 + dp phi2)`` and
-    ``q1 = q0 + dt v0 phi1 + dt^2 (p0 phi2 + dp phi3)``
-
-    with ``dp = p1 - p0``. Small ``c dt`` uses the series expansion to avoid cancellation.
-    """
-    x = np.asarray(c, dtype=float) * dt
-    E = np.exp(-x)
-    small = x < 1e-3
-    with np.errstate(divide="ignore", invalid="ignore"):
-        xs = np.where(small, 1.0, x)
-        phi1 = np.where(small, 1.0 - x / 2 + x**2 / 6 - x**3 / 24, (1.0 - E) / xs)
-        phi2 = np.where(small, 0.5 - x / 6 + x**2 / 24, (1.0 - phi1) / xs)
-        phi3 = np.where(small, 1.0 / 6 - x / 24 + x**2 / 120, (0.5 - phi2) / xs)
-    return E, phi1, phi2, phi3
 
 
 def _integrate_exact(
     omega: np.ndarray, c: np.ndarray, P: np.ndarray, dt: float, q0: np.ndarray,
     qd0: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Exact piecewise-linear recurrence for all modes at once. ``P`` is ``(n_modes, n_t)``."""
+    """Exact piecewise-linear recurrence for all modes at once. ``P`` is ``(n_modes, n_t)``.
+
+    One code path covers rigid-body, under-, critically and over-damped modes; see
+    :func:`_ramp_coefficients` for why the zero-frequency limit needs no branch of its own.
+    """
     n_modes, n_steps = P.shape
     q = np.zeros((n_modes, n_steps))
     qd = np.zeros((n_modes, n_steps))
     q[:, 0] = q0
     qd[:, 0] = qd0
 
-    rigid = omega <= 0.0
-    flex = ~rigid
-    has_flex = bool(np.any(flex))
-    has_rigid = bool(np.any(rigid))
-    if has_flex:
-        zeta_f = c[flex] / (2.0 * omega[flex])
-        A, B, C, D, Ap, Bp, Cp, Dp = _nigam_jennings(omega[flex], zeta_f, dt)
-    if has_rigid:
-        E, p1c, p2c, p3c = _rigid_coefficients(c[rigid], dt)
-
+    A, B, C, D, Ap, Bp, Cp, Dp = _ramp_coefficients(omega, c, dt)
     for k in range(n_steps - 1):
-        if has_flex:
-            qk, qdk = q[flex, k], qd[flex, k]
-            pk, pk1 = P[flex, k], P[flex, k + 1]
-            q[flex, k + 1] = A * qk + B * qdk + C * pk + D * pk1
-            qd[flex, k + 1] = Ap * qk + Bp * qdk + Cp * pk + Dp * pk1
-        if has_rigid:
-            qk, qdk = q[rigid, k], qd[rigid, k]
-            pk = P[rigid, k]
-            dp = P[rigid, k + 1] - pk
-            q[rigid, k + 1] = qk + dt * qdk * p1c + dt**2 * (pk * p2c + dp * p3c)
-            qd[rigid, k + 1] = qdk * E + dt * (pk * p1c + dp * p2c)
+        qk, qdk = q[:, k], qd[:, k]
+        pk, pk1 = P[:, k], P[:, k + 1]
+        q[:, k + 1] = A * qk + B * qdk + C * pk + D * pk1
+        qd[:, k + 1] = Ap * qk + Bp * qdk + Cp * pk + Dp * pk1
     return q, qd
 
 
@@ -356,11 +360,11 @@ def time_history(
     qi = np.zeros(mm.n_modes)
     qdi = np.zeros(mm.n_modes)
     if q0 is not None:
-        qi = np.asarray(q0, dtype=float).reshape(-1)
+        qi = _modal_state(mm, q0, "q0")
     elif x0 is not None:
         qi = _project_state(mm, np.asarray(x0, dtype=float).reshape(-1), M)
     if qd0 is not None:
-        qdi = np.asarray(qd0, dtype=float).reshape(-1)
+        qdi = _modal_state(mm, qd0, "qd0")
     elif v0 is not None:
         qdi = _project_state(mm, np.asarray(v0, dtype=float).reshape(-1), M)
 
@@ -387,6 +391,20 @@ def time_history(
         method=method,
         meta={"n_modes": mm.n_modes, "dt": step, "damping": type(dmp).__name__},
     )
+
+
+def _modal_state(mm: ModalModel, value: Any, name: str) -> np.ndarray:
+    """Validate an initial modal state vector against the size of the basis.
+
+    A silent size mismatch here is worse than useless: a length-1 ``q0`` broadcasts over
+    every mode, so asking for "mode 0 displaced by one" starts *all* of them at one.
+    """
+    arr = np.atleast_1d(np.asarray(value, dtype=float)).reshape(-1)
+    if arr.size != mm.n_modes:
+        raise ValueError(
+            f"{name} must have one entry per retained mode ({mm.n_modes}), got {arr.size}"
+        )
+    return arr
 
 
 def _project_state(mm: ModalModel, x: np.ndarray, M: Any) -> np.ndarray:

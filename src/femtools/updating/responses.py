@@ -119,13 +119,22 @@ def solve_modal(
 # ----------------------------------------------------------------------
 # MAC helpers (local copy so this package does not depend on femtools.correlation)
 # ----------------------------------------------------------------------
+def _as_mode_columns(x: np.ndarray) -> np.ndarray:
+    """Return ``x`` as an ``(n_dof, n_modes)`` matrix.
+
+    A 1-D input is a *single* mode shape, so it becomes one column;
+    ``np.atleast_2d`` would instead make it a row of n single-DOF modes, whose
+    MAC matrix is all ones.
+    """
+    arr = np.asarray(x)
+    if arr.ndim == 1:
+        return arr[:, None]
+    return np.atleast_2d(arr)
+
+
 def _mac_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
-    a = np.atleast_2d(np.asarray(a))
-    b = np.atleast_2d(np.asarray(b))
-    if a.ndim == 1:
-        a = a[:, None]
-    if b.ndim == 1:
-        b = b[:, None]
+    a = _as_mode_columns(a)
+    b = _as_mode_columns(b)
     num = np.abs(a.conj().T @ b) ** 2
     na = np.real(np.sum(a.conj() * a, axis=0))
     nb = np.real(np.sum(b.conj() * b, axis=0))
@@ -142,8 +151,8 @@ def mac_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
 
 def mac_vector(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     """Diagonal MAC values between paired mode-shape columns of ``a`` and ``b``."""
-    a = np.atleast_2d(a)
-    b = np.atleast_2d(b)
+    a = _as_mode_columns(a)
+    b = _as_mode_columns(b)
     n = min(a.shape[1], b.shape[1])
     return np.array([_mac_matrix(a[:, [i]], b[:, [i]])[0, 0] for i in range(n)])
 

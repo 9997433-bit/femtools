@@ -319,15 +319,28 @@ def mount_stiffness_matrix(
     ref = np.asarray(reference_point, dtype=float).ravel()
     if isinstance(mounts, (int, float, np.floating, np.integer)):
         return np.diag([float(mounts)] * 3 + [0.0] * 3)
-    arr = np.asarray(mounts, dtype=object)
-    if arr.dtype != object:
+    # A physical mount list is ragged (3-vector, 3-vector, scalar) or holds
+    # dicts, so it cannot be coerced to a float array; anything that can be is
+    # one of the numeric spellings of the matrix itself.
+    try:
         num = np.asarray(mounts, dtype=float)
+    except (TypeError, ValueError):
+        num = None
+    if num is not None:
+        if num.size == 0:
+            return np.zeros((6, 6))
+        if num.size == 1:
+            return np.diag([float(num.ravel()[0])] * 3 + [0.0] * 3)
         if num.shape == (6, 6):
             return 0.5 * (num + num.T)
-        if num.size == 3:
-            return np.diag([*num.ravel().tolist(), 0.0, 0.0, 0.0])
-        if num.size == 6 and num.ndim == 1:
-            return np.diag(num.ravel())
+        if num.ndim == 1 and num.size == 3:
+            return np.diag([*num.tolist(), 0.0, 0.0, 0.0])
+        if num.ndim == 1 and num.size == 6:
+            return np.diag(num)
+        raise ValueError(
+            f"cannot interpret a numeric mount specification of shape {num.shape}; "
+            "expected a scalar, a 3- or 6-vector diagonal, or a 6x6 matrix"
+        )
 
     K = np.zeros((6, 6))
     for item in mounts:
@@ -819,7 +832,11 @@ def rigid_body_properties(
     if frf is None:
         raise ValueError("either `frf` or `mass_matrix` must be given")
     if freq_hz is None:
-        freq_hz = getattr(frf, "freq_hz", None) or getattr(frf, "frequencies", None)
+        for attr in ("freq_hz", "frequencies"):
+            carried = getattr(frf, attr, None)
+            if carried is not None:
+                freq_hz = carried
+                break
     if freq_hz is None:
         raise ValueError("freq_hz must be given (or carried by the FRF object)")
 

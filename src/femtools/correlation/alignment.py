@@ -138,6 +138,8 @@ class AlignmentResult:
             target=self.source,
             ids=self.ids,
             reflection=self.reflection,
+            rank=self.rank,
+            underdetermined=self.underdetermined,
         )
 
     def table(self) -> str:

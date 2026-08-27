@@ -437,6 +437,8 @@ DrivingPointResidues.normalized`).  Raw residues fall off as ``1/w``, so
     available = np.ones(n_cand, dtype=bool)
     if exclude is not None:
         available &= ~np.isin(ids, np.asarray(exclude).reshape(-1))
+    if not available.any():
+        raise ValueError("`exclude` rules out every candidate; nothing left to select")
     forced = _lookup_ids(ids, keep, "keep") if keep is not None else np.zeros(0, dtype=np.intp)
     if forced.size > target:
         raise ValueError(f"keep requests {forced.size} exciters but n_exciters={target}")

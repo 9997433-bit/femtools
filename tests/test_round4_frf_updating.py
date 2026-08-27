@@ -11,17 +11,13 @@ import pytest
 from femtools.dynamics.frf import modal_frf
 from femtools.fea.assemble import assemble_km
 from femtools.fea.eigen import solve_modes
+from femtools.updating.frf_updating import update_from_frf
 from femtools.updating.parameters import Parameter
 
 
 def test_update_from_frf_recovers_sdof_stiffness(
     axial_bar: tuple[Any, dict[str, float]],
 ) -> None:
-    frf_updating = pytest.importorskip("femtools.updating.frf_updating")
-    update_from_frf = getattr(frf_updating, "update_from_frf", None)
-    if update_from_frf is None:
-        pytest.skip("FRF updating API is not available")
-
     model, _ = axial_bar
     truth = copy.deepcopy(model)
     expected_scale = 1.21

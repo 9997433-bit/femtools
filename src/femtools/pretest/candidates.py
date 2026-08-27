@@ -197,11 +197,25 @@ def candidate_dofs(
         dof_map=kept,
         mode_index=cols,
         freq_hz=freqs,
-        coords=node_coordinates(
-            coords if coords is not None else source, kept, per_dof=True, missing="none"
-        ),
+        coords=_candidate_coords(coords if coords is not None else source, dmap, kept, rows),
         dropped=dropped.astype(np.intp),
     )
+
+
+def _candidate_coords(
+    source: Any, full: DOFMap, kept: DOFMap, rows: NDArray[np.intp]
+) -> NDArray[np.float64] | None:
+    """Coordinates of the retained candidate rows.
+
+    Resolved against the *whole* DOF map first and sliced afterwards: a bare
+    coordinate array carries no node ids, so its rows can only be read
+    positionally against the complete node list — matching it to the retained
+    subset would drop it silently as soon as one candidate is excluded.
+    """
+    whole = node_coordinates(source, full, per_dof=True, missing="none")
+    if whole is not None:
+        return whole[rows]
+    return node_coordinates(source, kept, per_dof=True, missing="none")
 
 
 def translational_dofs(source: Any, **kwargs: Any) -> CandidateSet:
@@ -227,12 +241,13 @@ def node_coordinates(
     ----------
     source:
         A model exposing ``nodes`` (``{id: node}`` with ``xyz``/``coords``),
-        a ``{node: xyz}`` mapping, an ``(n_node, 3)`` array or an object
-        carrying any of those (a ``ModalResult`` reaches its model through
-        ``assembly``).
+        a ``{node: xyz}`` mapping, an ``(ids, xyz)`` pair, an ``(n_node, 3)``
+        array or an object carrying any of those (a ``ModalResult`` reaches
+        its model through ``assembly``).
     dof_map:
         Target ordering.  Without it the coordinates come back in the
-        model's own node order.
+        model's own node order.  A bare array carries no node ids, so its
+        rows are then read in the order of ``np.unique(dof_map.nodes)``.
     per_dof:
         Return one row per DOF of ``dof_map`` instead of one per node, ready
         for :func:`~femtools.pretest.target_modes.rigid_body_modes`.
@@ -251,6 +266,17 @@ def node_coordinates(
 
     dmap = DOFMap.from_mapping(dof_map)
     wanted = dmap.nodes if per_dof else np.unique(dmap.nodes)
+    if ids is None:
+        # A bare array has no ids of its own: its rows are the map's nodes in
+        # ascending order, the convention `rigid_body_modes` already uses.
+        ids = np.unique(dmap.nodes)
+        if ids.size != xyz.shape[0]:
+            if missing == "none":
+                return None
+            raise ValueError(
+                f"coordinate array has {xyz.shape[0]} rows but the DOF map covers "
+                f"{ids.size} nodes; pass a {{node: xyz}} mapping or an (ids, xyz) pair"
+            )
     order = np.argsort(ids, kind="stable")
     pos = np.clip(np.searchsorted(ids[order], wanted), 0, max(ids.size - 1, 0))
     found = ids[order][pos] == wanted if ids.size else np.zeros(wanted.size, dtype=bool)
@@ -262,8 +288,11 @@ def node_coordinates(
     return xyz[order][pos]
 
 
-def _coordinate_table(source: Any) -> tuple[NDArray[np.int64], NDArray[np.float64]] | None:
-    """``(node_ids, xyz)`` recovered from a model-like object, if possible."""
+def _coordinate_table(source: Any) -> tuple[NDArray[np.int64] | None, NDArray[np.float64]] | None:
+    """``(node_ids, xyz)`` recovered from a model-like object, if possible.
+
+    The ids are ``None`` for a bare coordinate array, which carries none.
+    """
     if source is None:
         return None
     if isinstance(source, dict):
@@ -272,6 +301,17 @@ def _coordinate_table(source: Any) -> tuple[NDArray[np.int64], NDArray[np.float6
         ids = np.fromiter((int(k) for k in source), dtype=np.int64, count=len(source))
         xyz = np.array([np.asarray(v, dtype=float).reshape(-1)[:3] for v in source.values()])
         return ids, xyz
+    if isinstance(source, tuple) and len(source) == 2 and np.ndim(source[1]) == 2:
+        pair_ids = np.asarray(source[0], dtype=np.int64).reshape(-1)
+        pair_xyz = _xyz_array(source[1])
+        if pair_xyz is None:
+            return None
+        if pair_ids.size != pair_xyz.shape[0]:
+            raise ValueError(f"{pair_ids.size} node ids for {pair_xyz.shape[0]} coordinate rows")
+        return pair_ids, pair_xyz
+    if isinstance(source, (np.ndarray, list)):
+        bare = _xyz_array(source)
+        return None if bare is None else (None, bare)
     nodes = getattr(source, "nodes", None)
     if isinstance(nodes, dict) and nodes:
         ids = np.fromiter((int(k) for k in nodes), dtype=np.int64, count=len(nodes))
@@ -284,6 +324,19 @@ def _coordinate_table(source: Any) -> tuple[NDArray[np.int64], NDArray[np.float6
             if table is not None:
                 return table
     return None
+
+
+def _xyz_array(source: Any) -> NDArray[np.float64] | None:
+    """``(n_node, 3)`` coordinates from an array-like, or ``None`` if it is not one."""
+    try:
+        arr = np.asarray(source, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if arr.ndim != 2 or arr.shape[1] not in (2, 3):
+        return None
+    if arr.shape[1] == 2:  # a planar test geometry
+        arr = np.column_stack((arr, np.zeros(arr.shape[0])))
+    return arr
 
 
 def _node_xyz(node: Any) -> NDArray[np.float64]:

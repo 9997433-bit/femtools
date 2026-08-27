@@ -517,6 +517,12 @@ def as_parameters(spec: Any) -> ParameterSet:
 
 def _guess_kind(name: str) -> str:
     low = name.strip().lower()
+    # A name that already *is* a known kind (or one of its accepted spellings,
+    # e.g. "density", "stiffness", "modulus") names that kind exactly; only fall
+    # back to substring/prefix guessing for decorated names such as "E_beam".
+    canonical = _ALIASES.get(low, low)
+    if canonical in _KIND_ATTRS:
+        return canonical
     for kind in ("thickness", "spring_k", "damper_c", "rho", "area", "mass", "nu"):
         if low.startswith(kind) or kind in low:
             return kind

@@ -27,7 +27,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from ..correlation._linalg import as_mode_matrix, mode_frequencies
+from ..correlation._linalg import as_mode_matrix, mode_frequencies, row_index
 from ..correlation.mac import mac_matrix
 
 __all__ = ["MassLoadingResult", "mass_loading", "sensor_mass_limit"]
@@ -90,12 +90,7 @@ def _sensor_partition(
         else:
             raise ValueError(f"added_mass has {m.size} entries; pass `dofs` to say where they act")
     else:
-        idx = np.asarray(dofs)
-        rows = (
-            np.flatnonzero(idx).astype(np.intp)
-            if idx.dtype == bool
-            else idx.reshape(-1).astype(np.intp)
-        )
+        rows = row_index(dofs, n_dof)
         if m.size == 1:
             m = np.full(rows.size, float(m[0]))
         if m.size != rows.size:
@@ -227,20 +222,23 @@ def sensor_mass_limit(
     Inverts the first-order estimate: ``m_max = 2 * shift / max_j |phi_sj|^2``,
     divided by ``n_sensors`` when several equally-loaded sensors share the
     budget.  Returns one limit [kg] per sensor DOF.
+
+    ``dofs`` takes row indices or a boolean mask, as in :func:`mass_loading`.
     """
     p = as_mode_matrix(phi, "phi")
-    rows = (
-        np.arange(p.shape[0], dtype=np.intp)
-        if dofs is None
-        else np.asarray(dofs).reshape(-1).astype(np.intp)
-    )
+    rows = np.arange(p.shape[0], dtype=np.intp) if dofs is None else row_index(dofs, p.shape[0])
+    if rows.size and (rows.min() < -p.shape[0] or rows.max() >= p.shape[0]):
+        raise ValueError("dofs index outside the mode shape rows")
     if max_relative_shift <= 0.0:
         raise ValueError("max_relative_shift must be positive")
-    gen = (
-        np.ones(p.shape[1])
-        if generalized_mass is None
-        else np.asarray(generalized_mass, dtype=float).reshape(-1)
-    )
+    if generalized_mass is None:
+        gen = np.ones(p.shape[1])
+    else:
+        gen = np.asarray(generalized_mass, dtype=float).reshape(-1)
+        if gen.size != p.shape[1]:
+            raise ValueError(f"generalized_mass has {gen.size} entries, expected {p.shape[1]}")
+        if np.any(gen <= 0.0):
+            raise ValueError("generalized_mass must be positive")
     worst = (np.abs(p[rows, :]) ** 2 / gen[None, :]).max(axis=1)
     share = float(n_sensors) if n_sensors else 1.0
     limit = np.full(rows.size, np.inf)

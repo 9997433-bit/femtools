@@ -501,12 +501,20 @@ def lsfd(
             part[0, r] = 1.0
         else:
             U, S, Vh = np.linalg.svd(Ar, full_matrices=False)
+            # A_r = phi_r L_r^T, and the leading SVD term is (S_0 u_0) Vh[0, :],
+            # so the participation row is Vh[0, :] itself: conjugating it here
+            # would return the complex conjugate of the participation factors.
             shapes[:, r] = U[:, 0] * S[0]
-            part[:, r] = np.conj(Vh[0, :])
+            part[:, r] = Vh[0, :]
         nrm = np.max(np.abs(shapes[:, r]))
         if nrm > 0:
             k = int(np.argmax(np.abs(shapes[:, r])))
-            shapes[:, r] = shapes[:, r] / shapes[k, r]
+            # Scaling the shape to a unit driving component moves that factor
+            # into the participation, keeping the pair a factorisation of the
+            # residue: A_r == outer(mode_shapes[:, r], participation[:, r]).
+            scale = shapes[k, r]
+            shapes[:, r] = shapes[:, r] / scale
+            part[:, r] = part[:, r] * scale
 
     return {
         "residues": residues,

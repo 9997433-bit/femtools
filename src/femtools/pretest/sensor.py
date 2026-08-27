@@ -82,15 +82,20 @@ def _mac_from_gram(gram: NDArray[Any]) -> NDArray[np.float64]:
     return safe_divide(num, den)
 
 
-def _removal_scores(p: NDArray[Any], gram: NDArray[Any], criterion: str) -> NDArray[np.float64]:
-    """Score of the sensor set obtained by removing each row of ``p``.
+def _removal_scores(
+    p: NDArray[Any], gram: NDArray[Any], criterion: str
+) -> tuple[NDArray[np.float64], NDArray[np.float64]]:
+    """Score and worst off-diagonal MAC of the set left by removing each row.
 
     Uses the rank-one downdate ``G - phi_q phi_q^H`` so all candidates are
-    evaluated without recomputing any Gram matrix.
+    evaluated without recomputing any Gram matrix.  The worst off-diagonal is
+    returned alongside the criterion score because ``mac_limit`` constrains it
+    whatever the criterion ranks by; for ``"max"`` the two coincide.
     """
     k, m = p.shape
     off = ~np.eye(m, dtype=bool)
     scores = np.empty(k)
+    worst = np.empty(k)
     block = max(1, min(k, _MAX_BLOCK_ELEMENTS // max(m * m, 1)))
     for start in range(0, k, block):
         chunk = p[start : start + block]
@@ -99,8 +104,9 @@ def _removal_scores(p: NDArray[Any], gram: NDArray[Any], criterion: str) -> NDAr
         d = np.real(np.einsum("kii->ki", g_q))
         mac = _mac_from_gram(g_q)
         vals = mac[:, off].reshape(chunk.shape[0], -1)
+        top = vals.max(axis=1) if vals.size else np.zeros(chunk.shape[0])
         if criterion == "max":
-            s = vals.max(axis=1) if vals.size else np.zeros(chunk.shape[0])
+            s = top
         elif criterion in ("sum", "mean"):
             s = vals.sum(axis=1)
             if criterion == "mean" and vals.shape[1]:
@@ -108,9 +114,10 @@ def _removal_scores(p: NDArray[Any], gram: NDArray[Any], criterion: str) -> NDAr
         else:
             raise ValueError(f"unknown criterion {criterion!r}; use 'max', 'sum' or 'mean'")
         # A removal that annihilates a mode must never be chosen.
-        s = np.where((d > 0.0).all(axis=1), s, np.inf)
-        scores[start : start + chunk.shape[0]] = s
-    return scores
+        alive = (d > 0.0).all(axis=1)
+        scores[start : start + chunk.shape[0]] = np.where(alive, s, np.inf)
+        worst[start : start + chunk.shape[0]] = np.where(alive, top, np.inf)
+    return scores, worst
 
 
 def eliminate_by_mac(
@@ -144,7 +151,8 @@ def eliminate_by_mac(
         Candidate ids that must be retained.
     mac_limit:
         Stop early if removing one more sensor would push the largest
-        off-diagonal MAC above this value.
+        off-diagonal MAC above this value.  Applies to every criterion: the
+        limit is a property of the retained set, not of the search order.
 
     Returns
     -------
@@ -180,17 +188,22 @@ def eliminate_by_mac(
 
     alive = np.ones(n_cand, dtype=bool)
     gram = _gram(p)
+    off = ~np.eye(n_mode, dtype=bool)
     removed: list[int] = []
     history: list[tuple[int, float]] = []
 
     while int(alive.sum()) > target:
         rows = np.flatnonzero(alive)
-        scores = _removal_scores(p[rows], gram, criterion)
+        scores, worst = _removal_scores(p[rows], gram, criterion)
         scores = np.where(locked[rows], np.inf, scores)
+        if mac_limit is not None:
+            # The limit constrains the largest off-diagonal MAC of the set
+            # that would be left, not the score the criterion ranks by, so a
+            # candidate that breaches it is skipped rather than ranked.  The
+            # loop then ends only when no removal at all stays inside.
+            scores = np.where(worst > mac_limit, np.inf, scores)
         best = int(np.argmin(scores))
         if not np.isfinite(scores[best]):
-            break
-        if mac_limit is not None and criterion == "max" and scores[best] > mac_limit:
             break
         q = int(rows[best])
         gram = gram - np.outer(p[q].conj(), p[q])
@@ -200,7 +213,6 @@ def eliminate_by_mac(
 
     rows = np.flatnonzero(alive)
     mac = _mac_from_gram(_gram(p[rows]))
-    off = ~np.eye(n_mode, dtype=bool)
     score = float(mac[off].max()) if off.any() else 0.0
     return SensorSelection(
         dofs=ids[rows],

@@ -362,10 +362,18 @@ def modal_frf(
     if upper_residual is not None:
         H = H + _as_residual_block(upper_residual, H.shape[0], H.shape[1])[:, :, None]
     if lower_residual is not None:
-        inv_w2 = np.where(omega > 0, 1.0 / np.where(omega > 0, omega**2, 1.0), np.inf)
-        H = H - _as_residual_block(lower_residual, H.shape[0], H.shape[1])[:, :, None] * (
-            inv_w2[None, None, :]
-        )
+        block = _as_residual_block(lower_residual, H.shape[0], H.shape[1])
+        above_dc = omega > 0
+        # -LR / w^2 is unbounded at DC. Saying so beats the 0 * inf = nan that silently
+        # poisoned the line before; a zero residual is still the no-op it should be.
+        if not above_dc.all() and np.any(block != 0):
+            raise ValueError(
+                "lower_residual is a residual inertia term -LR/w^2, which is singular at "
+                "f = 0; drop the DC line from freq_hz or pass lower_residual=0 there"
+            )
+        inv_w2 = np.zeros(omega.shape)
+        inv_w2[above_dc] = 1.0 / omega[above_dc] ** 2
+        H = H - block[:, :, None] * inv_w2[None, None, :]
 
     scale = _response_scale(response, omega)
     H = H * scale[None, None, :]

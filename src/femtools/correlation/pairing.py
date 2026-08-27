@@ -7,10 +7,14 @@ Two strategies are provided:
     correlation-table behaviour: fast, order independent, and it never forces
     a poor pair when a mode has no counterpart.
 ``hungarian``
-    Globally optimal one-to-one assignment maximizing the total MAC (linear
-    sum assignment).  Preferable when several modes are close in shape, e.g.
-    for repeated or nearly repeated roots, where greedy can lock in a
-    locally-best but globally-inferior pair.
+    Globally optimal one-to-one assignment maximizing the total MAC over the
+    admissible pairs (linear sum assignment).  Preferable when several modes
+    are close in shape, e.g. for repeated or nearly repeated roots, where
+    greedy can lock in a locally-best but globally-inferior pair.
+
+A pair is admissible when it clears ``mac_threshold`` and ``freq_tol`` and
+its MAC value is finite; both strategies optimize over those pairs only and
+leave a mode with no admissible counterpart unpaired.
 """
 
 from __future__ import annotations
@@ -173,12 +177,20 @@ def _hungarian(
 ) -> list[tuple[int, int]]:
     if mac.size == 0:
         return []
-    # Forbidden pairs get a finite penalty (rather than inf) so the assignment
-    # stays feasible; they are dropped again after the solve.
-    penalty = mac.max(initial=1.0) + 1.0
-    cost = np.where(allowed, -mac, penalty)
+    # The threshold is part of the problem, not a filter applied to its
+    # answer: a pair below it cannot be reported, so maximizing the total MAC
+    # over all cells and discarding the weak ones afterwards optimizes the
+    # wrong objective and can end up worse than greedy.
+    usable = allowed & (mac >= threshold)
+    # The solver assigns every row, but a mode may legitimately have no
+    # counterpart.  Costing an unusable cell at 0 -- exactly what leaving the
+    # mode unpaired is worth -- keeps the problem feasible *and* makes the
+    # optimum the best matching over the usable cells alone.  A large finite
+    # penalty would not: rather than pay it once, the solver displaces a good
+    # pair onto a worthless cell, and that pair is then lost below.
+    cost = np.clip(np.where(usable, -mac, 0.0), None, 0.0)
     rows, cols = linear_sum_assignment(cost)
-    keep = allowed[rows, cols] & (mac[rows, cols] >= threshold)
+    keep = usable[rows, cols]
     return [(int(i), int(j)) for i, j in zip(rows[keep], cols[keep], strict=True)]
 
 
@@ -221,7 +233,8 @@ def pair_modes(
         Optional weighting (e.g. mass matrix) forwarded to
         :func:`~femtools.correlation.mac.mac_matrix`.
     mac:
-        Pre-computed MAC matrix ``(n_a, n_b)``; skips the recomputation.
+        Pre-computed MAC matrix ``(n_a, n_b)``; skips the recomputation.  A
+        non-finite entry marks a combination that must not be paired.
 
     Returns
     -------
@@ -244,7 +257,11 @@ def pair_modes(
     fa = _freqs(_inherited_freqs(phi_a, freq_a, n_a), n_a, "freq_a")
     fb = _freqs(_inherited_freqs(phi_b, freq_b, n_b), n_b, "freq_b")
 
-    allowed = np.ones_like(mac_mat, dtype=bool)
+    # A non-finite entry (only reachable through a supplied `mac`) is not a
+    # pairing candidate.  Left in, it aborts the greedy sweep at its first
+    # `argmax` — silently returning no pairs at all — and makes the
+    # assignment solver reject the whole matrix.
+    allowed = np.isfinite(mac_mat)
     if freq_tol is not None:
         if freq_tol < 0.0:
             raise ValueError("freq_tol must be non-negative")

@@ -5,17 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
-import pytest
 from scipy.linalg import eigh
 
-
-def _api(module_name: str, name: str) -> Any:
-    """Import an in-flight API, skipping until its implementation is present."""
-    module = pytest.importorskip(module_name)
-    function = getattr(module, name, None)
-    if function is None:
-        pytest.skip(f"{module_name}.{name} is not available")
-    return function
+from femtools.fea.eigen import ComplexModalResult, solve_complex_modes
+from femtools.fea.reduction import guyan, irs, serep
 
 
 def _transformation(result: Any) -> np.ndarray:
@@ -44,11 +37,6 @@ def _chain_matrices(n: int) -> tuple[np.ndarray, np.ndarray]:
 
 
 def test_guyan_recovers_static_slave_displacements() -> None:
-    reduction = pytest.importorskip("femtools.fea.reduction")
-    guyan = getattr(reduction, "guyan", None)
-    if guyan is None:
-        pytest.skip("femtools.fea.reduction.guyan is not available")
-
     stiffness = np.array(
         [
             [2.0, -1.0, 0.0],
@@ -76,12 +64,6 @@ def test_guyan_recovers_static_slave_displacements() -> None:
 
 
 def test_irs_improves_the_first_guyan_eigenvalue() -> None:
-    reduction = pytest.importorskip("femtools.fea.reduction")
-    guyan = getattr(reduction, "guyan", None)
-    irs = getattr(reduction, "irs", None)
-    if guyan is None or irs is None:
-        pytest.skip("Guyan and IRS reduction APIs are not both available")
-
     stiffness, mass = _chain_matrices(5)
     master = [0, 4]
     guyan_t = _transformation(guyan(stiffness, master))
@@ -104,7 +86,6 @@ def test_irs_improves_the_first_guyan_eigenvalue() -> None:
 
 
 def test_serep_exactly_reconstructs_the_retained_modal_subspace() -> None:
-    serep = _api("femtools.fea.reduction", "serep")
     modes = np.array(
         [
             [1.0, 0.0],
@@ -127,12 +108,6 @@ def test_serep_exactly_reconstructs_the_retained_modal_subspace() -> None:
 
 
 def test_complex_modes_recover_decoupled_frequency_and_damping() -> None:
-    eigen = pytest.importorskip("femtools.fea.eigen")
-    solve_complex_modes = getattr(eigen, "solve_complex_modes", None)
-    result_type = getattr(eigen, "ComplexModalResult", None)
-    if solve_complex_modes is None or result_type is None:
-        pytest.skip("complex modal API is not available")
-
     expected_frequency = np.array([3.0, 8.0])
     expected_damping = np.array([0.02, 0.05])
     omega = 2.0 * np.pi * expected_frequency
@@ -142,7 +117,7 @@ def test_complex_modes_recover_decoupled_frequency_and_damping() -> None:
 
     result = solve_complex_modes(stiffness, mass, damping)
 
-    assert isinstance(result, result_type)
+    assert isinstance(result, ComplexModalResult)
     np.testing.assert_allclose(result.freq_hz, expected_frequency, rtol=2.0e-6)
     np.testing.assert_allclose(result.zeta, expected_damping, rtol=2.0e-6)
     modes = np.asarray(result.modes_complex)

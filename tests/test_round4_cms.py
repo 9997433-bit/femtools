@@ -3,17 +3,12 @@
 from __future__ import annotations
 
 import numpy as np
-import pytest
 from scipy.linalg import eigh
+
+from femtools.dynamics.cms_free import FreeCMSResult, rubin
 
 
 def test_rubin_basis_retains_requested_free_interface_modes() -> None:
-    cms_free = pytest.importorskip("femtools.dynamics.cms_free")
-    rubin = getattr(cms_free, "rubin", None)
-    result_type = getattr(cms_free, "FreeCMSResult", None)
-    if rubin is None or result_type is None:
-        pytest.skip("Rubin free-interface CMS API is not available")
-
     n_dof = 6
     stiffness = np.diag(np.full(n_dof, 2.0))
     stiffness += np.diag(np.full(n_dof - 1, -1.0), 1)
@@ -22,7 +17,7 @@ def test_rubin_basis_retains_requested_free_interface_modes() -> None:
 
     result = rubin(stiffness, mass, [0, n_dof - 1], n_modes=2)
 
-    assert isinstance(result, result_type)
+    assert isinstance(result, FreeCMSResult)
     transformation = np.asarray(result.T)
     reduced_stiffness = np.asarray(result.K)
     reduced_mass = np.asarray(result.M)
