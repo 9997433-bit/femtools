@@ -191,6 +191,29 @@ modeling discrepancy:
 The concrete Round-1 tolerance table lives in `docs/CONTRACT_API.md` and is binding for all
 implementations; `docs/ACCEPTANCE.md` (owned by R1-F3) elaborates the golden cases.
 
+## 10. Merged-code gap (Round-1 reality vs. the references above)
+
+Known distances between the merged Round-1 code and the state of the art it targets.
+Status tags in `docs/PRODUCT_MAP.md` point here; a row tagged R1 is merged and tested but may
+still carry one of these defects.
+
+* **HEX8 shear locking.** The merged trilinear HEX8 with full 2×2×2 Gauss quadrature locks in
+  bending: a single-element-thick cantilever recovers only ~66% of the reference tip
+  deflection. The literature fix is selective/reduced integration with hourglass control or
+  incompatible (bubble) modes — Wilson, E.L., Taylor, R.L., Doherty, W.P., Ghaboussi, J.,
+  *Incompatible Displacement Models*, in *Numerical and Computer Methods in Structural
+  Mechanics*, Academic Press, 1973; Simo, J.C., Rifai, M.S., *A Class of Mixed Assumed Strain
+  Methods and the Method of Incompatible Modes*, IJNME, 29(8), 1990, pp. 1595–1638. Scheduled
+  R2 in `src/femtools/fea` (owner R2-O1).
+* **UNV material/property cards.** The UNV reader/writer round-trips nodes, elements, trace
+  lines, shapes and functions, but carries no material or property datasets, so a UNV
+  round-trip loses E/ν/ρ and section data (BDF and `.ftproj` do carry them). BDF import also
+  drops TET10/HEX20 midside nodes. Scheduled R2 in `src/femtools/io` (owner R2-F2).
+* **DAQ: hardware acquisition is N/A by design** (hardware and vendor-licensing scope, not an
+  algorithmic gap). The supported substitute is synthetic test data with controlled noise and
+  fixed seeds — `femtools.dynamics.synthetic` and `femtools.mpe.synthetic` — which is what the
+  MPE/OMA validation cases of §6 and §9.5 consume.
+
 ## Non-infringement note
 
 References above are public conference papers, journal articles, and textbooks. No text,
