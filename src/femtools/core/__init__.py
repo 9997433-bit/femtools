@@ -10,6 +10,15 @@ Re-exports the full public core API::
 from __future__ import annotations
 
 from .coords import CoordSys
+from .errors import (
+    AssemblyError,
+    CompatibilityError,
+    ConvergenceError,
+    FemtoolsError,
+    FileFormatError,
+    MeshError,
+    SolverError,
+)
 from .model import (
     DOF_LABELS,
     ELEMENT_NODE_COUNTS,
@@ -51,6 +60,14 @@ from .units import (
 from .validation import ValidationIssue, ValidationReport, validate_model
 
 __all__ = [
+    # errors (full hierarchy lives in femtools.core.errors)
+    "FemtoolsError",
+    "MeshError",
+    "FileFormatError",
+    "AssemblyError",
+    "SolverError",
+    "ConvergenceError",
+    "CompatibilityError",
     # model
     "FEModel",
     "Node",
