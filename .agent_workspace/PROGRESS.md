@@ -1,17 +1,16 @@
-# PROGRESS — femtools 1:1 SOTA
+# PROGRESS — remaining FEMtools capabilities
 
 ## Branch
 
-`cursor/femtools-sota-d551`  
-PR: https://github.com/9997433-bit/femtools/pull/1
+`cursor/femtools-remaining-d551`
 
-## Loop status
+## Loop
 
 | Round | Status | Notes |
 |-------|--------|--------|
-| Prep | done | Contract + seed |
-| Round 1 | done | kernels; pytest 17/3/0 |
-| Round 2 | done | HEX8 98.6%, retained FRF, examples 5/5 |
-| Round 3 | done | SOTA polish; pytest 21/3/0; ruff clean |
+| R1–R3 | done | merged to main |
+| Round 4 | in_flight | Guyan/IRS/SEREP, complex modes, Rubin CMS, H1/H2, SSI, FRF updating, … |
+| Round 5 | pending | |
+| Round 6 | pending | |
 
-See `ROUND3_BRIEF.md` and `FINAL_REPORT.md`.
+Backlog: `.agent_workspace/REMAINING.md`
