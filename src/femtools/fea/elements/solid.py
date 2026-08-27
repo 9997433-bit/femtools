@@ -187,13 +187,9 @@ _HEX8_ALIASES: dict[str, str] = {
 }
 
 #: Keys searched on the element / property record and in the assembly options.
-_HEX8_OPTION_KEYS = (
-    "hex8",
-    "hex8_formulation",
-    "solid_formulation",
-    "formulation",
-    "integration",
-)
+#: Deliberately specific: a bare ``integration`` field is exactly the kind of
+#: name a future ``PSOLID`` reader would use for something else.
+_HEX8_OPTION_KEYS = ("hex8", "hex8_formulation", "solid_formulation", "formulation")
 
 
 def hex8_formulation(spec: Any, *, default: str = "incompatible") -> str:
