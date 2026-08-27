@@ -385,7 +385,9 @@ def assemble_km(
     frames = NodalFrames(dof_map=dof_map)
     if nodal_frames and dofs_per_node >= 6:
         constrained_rotations = {
-            dof_map.dof_node(int(d)) for d in np.flatnonzero(spc_mask) if int(d) % dofs_per_node >= 3
+            dof_map.dof_node(int(d))
+            for d in np.flatnonzero(spc_mask)
+            if int(d) % dofs_per_node >= 3
         }
         frames = shell_nodal_frames(model, dof_map, index=index, skip=constrained_rotations)
     if not frames.is_identity:
