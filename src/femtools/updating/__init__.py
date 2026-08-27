@@ -7,6 +7,7 @@ Public entry points (see ``docs/CONTRACT_API.md``)::
     from femtools.updating.force_id import identify_harmonic_forces
     from femtools.updating.frf_updating import update_from_frf
     from femtools.updating.selection import select_parameters
+    from femtools.updating.uq import parameter_covariance, monte_carlo_update
 """
 
 from __future__ import annotations
@@ -52,6 +53,7 @@ from .sensitivity import (
     sensitivity_matrix,
 )
 from .updater import UpdateOptions, UpdateResult, update_model
+from .uq import UQResult, monte_carlo_update, parameter_covariance
 
 __all__ = [
     # sensitivity
@@ -69,6 +71,10 @@ __all__ = [
     "update_model",
     "UpdateResult",
     "UpdateOptions",
+    # uncertainty quantification
+    "parameter_covariance",
+    "monte_carlo_update",
+    "UQResult",
     # FRF-based updating
     "update_from_frf",
     "frf_sample_function",
