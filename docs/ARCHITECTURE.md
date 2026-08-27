@@ -129,6 +129,12 @@ code never branches on data origin.
      (auto-SPC, e.g. rotational DOFs on a pure TRUSS/solid mesh, drilling rotation of
      flat shell patches). Auto-SPC decisions are recorded in `AssemblyResult` so users can
      audit them; silent zero-pivot factorization failures are not acceptable.
+     *Round-6 direction (not yet merged):* per-node rotational frames whose local 3-axis is
+     the averaged shell normal, so the drilling rotation of a flat shell patch can be
+     auto-constrained for **arbitrary** plate orientation. Today drilling detection is tied
+     to the global axes: a free-free flat TRIA3/QUAD4 plate whose normal is not a global
+     axis keeps a fictitious seventh rigid-body mechanism (warned at assembly). See
+     `docs/PRODUCT_MAP.md` (R6-wip, R6-O1).
 * **Constraint elimination.** SPCs are applied by row/column elimination (slicing the CSR
   matrix to the active set), not by penalty terms, so eigenvalues are not polluted by penalty
   artifacts. MPCs/RBEs (planned R5+) will be applied by null-space transformation `u = T q`
@@ -256,10 +262,13 @@ Policy:
    Round 4 include Nastran punch (`.pch`) results (`read_pch`/`write_pch`) and the
    ANSYS CDB NBLOCK/EBLOCK mesh subset (`read_cdb`) alongside the Round-1 BDF/UNV
    read/write. Closed binary result dumps (Nastran OP2, ANSYS rst, Abaqus odb) are out
-   of scope (N/A) — the protocol is the extension point for third-party binary drivers;
-   remaining text formats (Abaqus inp, LS-DYNA k) are R5+ plug-ins. Only a driver may
-   depend on vendor formats; results always land as `ModalResult`/`FRFResult`, and a
-   failed external run raises `SolverError`.
+   of scope (N/A) — the protocol is the extension point for third-party binary drivers.
+   The remaining text formats are the *Round-6 direction (not yet merged)*: Abaqus INP
+   (`io.inp.read_inp`) and LS-DYNA K (`io.kfile.read_k`) translators over the publicly
+   documented card layouts, mapping mesh/material/section/boundary subsets into
+   `FEModel` (`docs/PRODUCT_MAP.md` R6-wip). Only a driver may depend on vendor
+   formats; results always land as `ModalResult`/`FRFResult`, and a failed external
+   run raises `SolverError`.
 3. **Parameters for updating/optimization.** Updatable quantities implement a `Parameter`
    protocol (`get(model)`, `set(model, value)`, `bounds`); Round 1 ships E, rho, shell
    thickness, spring stiffness. New parameter types plug in without changes to the estimator.

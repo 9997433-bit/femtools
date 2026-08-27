@@ -29,6 +29,14 @@ deviations.
   treatment in Heylen, W., Lammens, S., Sas, P., *Modal Analysis Theory and Testing*,
   KU Leuven, 1997. femtools implements FRAC per FRF pair, CSAC/CSF (cross-signature assurance
   criterion / scale factor) per frequency line.
+* **NMD / MACX (Round-6 target — `correlation.mac.nmd` / `macx`, PRODUCT_MAP R6-wip).**
+  Normalized modal difference: a MAC-derived distance metric from the MAC-extension family
+  reviewed in Allemang, R.J., *The Modal Assurance Criterion — Twenty Years of Use and Abuse*
+  (cited above); the Round-6 brief freezes the form `nmd = sqrt(1 − MAC)`. Extended MAC for
+  complex modes, correlating against both `φ` and `conj(φ)` so complex-conjugate pair
+  ambiguity does not depress the metric: Vacher, P., Jacquier, B., Bucharles, A., *Extensions
+  of the MAC criterion to complex modes*, Proc. ISMA 2010, pp. 2713–2725. The real-mode
+  `mac_matrix` / `fmac` numerics are unchanged by these additions.
 * **Mode pairing.** MAC-based assignment; femtools solves the rectangular assignment problem
   on `1 − MAC` (Hungarian algorithm via `scipy.optimize.linear_sum_assignment`) with a
   configurable frequency-deviation penalty, rather than greedy row-max, to avoid duplicate
@@ -69,6 +77,14 @@ deviations.
   and shape residual sensitivities). Finite-difference fallback is retained for verification.
 * **Regularization.** Tikhonov-type side constraints for ill-posed parameter sets; discussion
   in Friswell–Mottershead (1995) ch. on ill-conditioning and in the 2011 tutorial.
+* **Parameter uncertainty / first-order covariance (Round-6 target — `updating.uq`,
+  PRODUCT_MAP R6-wip).** First-order propagation of the residual covariance through the
+  weighted least-squares solution: with sensitivity `S` and residual covariance `Cov(ε)`, the
+  estimator gain `G = (SᵀW_ε S + W_θ)⁻¹ SᵀW_ε` gives `Cov(θ) = G Cov(ε) Gᵀ` — the linearized
+  parameter-uncertainty analysis of Friswell–Mottershead (1995), building on the statistical
+  identification framework of Collins–Hart–Hasselman–Kennedy (1974) cited above. Complemented
+  by seeded Monte Carlo re-updating over perturbed residuals (`monte_carlo_update`, explicit
+  `seed` per the determinism policy); no Bayesian samplers beyond this are in scope.
 * **Force identification.** Harmonic force reconstruction by pseudo-inversion of the FRF
   matrix at measured responses, with truncated-SVD regularization; classical treatment in
   Ewins (see §5) and the inverse-problem literature. femtools reports singular-value spectra
@@ -130,7 +146,14 @@ deviations.
   2015.
 * **SSI (merged Round 4 — `mpe.ssi.ssi_cov`, covariance-driven).** Van Overschee, P.,
   De Moor, B., *Subspace Identification for Linear Systems: Theory — Implementation —
-  Applications*, Kluwer, 1996.
+  Applications*, Kluwer, 1996. The same monograph is the basis for the **data-driven**
+  variant (Round-6 target — `mpe.ssi.ssi_data`, PRODUCT_MAP R6-wip): N4SID-class
+  identification by orthogonal projection of the future-output block-Hankel row space onto
+  the past-output row space, followed by the same SVD + shift-invariance realization step
+  as the covariance-driven path (and returning the same result type). Application to
+  output-only modal analysis: Peeters, B., De Roeck, G., *Reference-Based Stochastic
+  Subspace Identification for Output-Only Modal Analysis*, Mechanical Systems and Signal
+  Processing, 13(6), 1999, pp. 855–878.
 
 ## 7. Rigid-body property extraction
 
@@ -154,6 +177,14 @@ deviations.
   Compliant Mechanisms*, CMAME, 190(26–27), 2001, pp. 3443–3459.
 * **Size optimization.** Gradient-based NLP on the updating parameter protocol (scipy
   SLSQP/trust-constr), with the eigen-sensitivities of §3.
+* **Shape optimization (Round-6 target — `optimization.shape.shape_optimize`, PRODUCT_MAP
+  R6-wip).** Haftka, R.T., Grandhi, R.V., *Structural shape optimization — a survey*,
+  Computer Methods in Applied Mechanics and Engineering, 57(1), 1986, pp. 91–106; textbook
+  treatment: Haftka, R.T., Gürdal, Z., *Elements of Structural Optimization*, 3rd ed.,
+  Kluwer, 1992. Selected node coordinates as design variables on the same scipy
+  SLSQP/trust-constr backends as size optimization, with a mesh-quality safeguard
+  (Laplacian-smoothness / minimum-Jacobian barrier) against the element-distortion failure
+  mode that the survey literature identifies as the central difficulty of shape variables.
 * **DOE.** McKay, M.D., Beckman, R.J., Conover, W.J., *A Comparison of Three Methods for
   Selecting Values of Input Variables in the Analysis of Output from a Computer Code*,
   Technometrics, 21(2), 1979, pp. 239–245 (Latin hypercube sampling; femtools requires an
@@ -199,8 +230,8 @@ implementations; `docs/ACCEPTANCE.md` (owned by R1-F3) elaborates the golden cas
 
 Known distances between the merged code and the state of the art it targets. Status tags in
 `docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4 is merged and tested but may still carry
-one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+ and
-N/A rows of the product map, not repeated here.
+one of these caveats. Capabilities that are absent (rather than imperfect) are the R6-wip,
+R5+ and N/A rows of the product map, not repeated here.
 
 ### Closed in Round 2
 
