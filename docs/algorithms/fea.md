@@ -15,6 +15,10 @@ from femtools.fea.mpc import apply_rbe2, ConstraintTransform
 # Round-8 additions (REMAINING.md, owner R8-O1; pending on this tree) — see §12–§13:
 from femtools.fea.mpc import apply_rbe3
 from femtools.fea.recover import average_nodal
+# Round-10 additions (REMAINING.md, owner R10-O1; landed on this tree
+# 2026-08-28) — see §14–§15:
+from femtools.fea.elements import tet10   # registers etype "TET10"
+from femtools.fea.recover import recover_spr
 ```
 
 Notation: $K$, $M$ global stiffness/mass (`scipy.sparse.csr_matrix`, symmetric),
@@ -669,4 +673,113 @@ solve (Hinton & Campbell 1974). Those produce *better* nodal fields at real stre
 gradients; the Round-8 contract is the classical incidence average FE post-processors
 default to — $O(n_{elem})$ work, one pass over the connectivity, deterministic.
 References: Cook et al. ch. 6 (stress averaging and smoothing); Zienkiewicz & Zhu 1992
-(what this deliberately is not).
+(what this deliberately is not). As of Round 10 the SPR estimator exists as its own
+frozen entry point, `recover_spr` (§15) — `average_nodal` keeps this contract
+bit-identically.
+
+## 14. TET10 — 10-node quadratic tetrahedron (Round 10, owner R10-O1)
+
+Frozen entry point (REMAINING.md; landed on this tree 2026-08-28,
+`tests/test_round10_o1.py` green — the parent had seeded
+`core.model.ELEMENT_NODE_COUNTS["TET10"] = (10,)` and listed TET10 in
+`_ELEMENT_NEEDS_PROPERTY`):
+
+```python
+from femtools.fea.elements import tet10   # registered as etype "TET10"
+# aliases CTETRA10 / C3D10 acceptable if cheap; io maps them here (io.md §7)
+```
+
+Geometry and shape functions (Zienkiewicz & Taylor, *The Finite Element Method*,
+Vol. 1, ch. 5 — the family tables; Bathe, *Finite Element Procedures* §5.3; Cook,
+Malkus, Plesha & Witt ch. 3): 4 corner nodes plus 6 midside nodes, in the
+Nastran-CTETRA/textbook order — midsides 5..10 on edges (1,2), (2,3), (3,1), (1,4),
+(2,4), (3,4). In volume (barycentric) coordinates $L_1..L_4$,
+$\sum_i L_i = 1$:
+
+$$N_i = L_i (2 L_i - 1) \quad (\text{corners}), \qquad
+N_{ij} = 4 L_i L_j \quad (\text{midsides on edge } i\!-\!j).$$
+
+Isoparametric mapping $x = \sum N_a x_a$; when the midside nodes sit at the true edge
+midpoints (the recommended, and the meshes the goldens build) the mapping is affine and
+the Jacobian constant — curved edges are legal isoparametrically but push the
+quadrature error up and are not exercised by any golden. Each node carries the 3
+translational DOFs (30 per element); the strain interpolation is complete linear, so
+the element **contains the constant-strain state exactly** — the patch test of case 29
+holds to 1e-12 on distorted meshes, unlike anything that needs the §2.5 incompatible
+modes to get there.
+
+Quadrature: the stiffness integrand $B^\top D B \det J$ is quadratic (for the affine
+mapping), so the standard **4-point degree-2 tet rule** (points at barycentric
+$(\alpha, \beta, \beta, \beta)$, $\alpha = 0.5854102$, $\beta = 0.1381966$, weights
+$V/4$) integrates it exactly. The consistent-mass integrand $N^\top N$ is quartic — use
+a degree ≥ 4 rule (11-, 14- or 15-point; Zienkiewicz & Taylor's tables) or a
+well-documented diagonal lumping (HRZ row-sum scaling); an under-integrated consistent
+mass fails the $r^\top M r = \rho V$ identity of `examples/tet10_patch.py` and is the
+first thing to check when it does.
+
+Recovery (§10 conventions apply verbatim): `recover_stress` / `recover_strain`
+evaluate the element's own $B$ at the **centroid** ($L_i = 1/4$) or as the average over
+the 4 Gauss points — for TET10 the strain is linear inside the element, so the centroid
+value *is* the element mean, and under a constant state both choices are exact. The
+superconvergent points of the quadratic tet are the interior Gauss points (Barlow's
+argument, one polynomial degree down); centroid reporting stays within the §10
+contract. Add `"TET10"` to `verification.PATCH_TYPES` with a patch-mesh builder so the
+parametrized constant-strain tests cover it.
+
+Gates (ACCEPTANCE case 29, `tests/test_round10_o1.py`, `examples/tet10_patch.py`):
+constant-strain patch ≤ 1e-12 for strain and stress; free–free single TET10 exactly
+**6** rigid-body modes; HEX8 bending ratio still ≥ 0.98 and the tilted-shell 6-RBM
+contract untouched (TET10 must not perturb the registry defaults — in particular the
+HEX8 incompatible-modes default of §2.5 stays, and EAS-30 stays out of scope).
+Pitfalls: node-order mistakes put a midside on the wrong edge and show up as a patch
+failure, not a crash — check connectivity against the edge table above first; TET4's
+§2.6 locking caveats do *not* carry over (the quadratic field bends), which is exactly
+why the io translators stop midside-dropping CTETRA (io.md §7).
+
+## 15. Superconvergent patch recovery — `recover_spr` (Round 10, owner R10-O1)
+
+Frozen entry point (REMAINING.md; landed on this tree 2026-08-28,
+`tests/test_round10_o1.py` green):
+
+```python
+from femtools.fea.recover import recover_spr   # (stress: StressResult, model)
+# ZZ-SPR nodal stress/strain: patch-wise linear polynomial fit over the
+# superconvergent samples, evaluated at the node. average_nodal stays 1/n_adj.
+# -> NodalStressResult, same container as average_nodal (§13).
+```
+
+Reference: Zienkiewicz, O.C., Zhu, J.Z., *The superconvergent patch recovery and a
+posteriori error estimates. Part 1: The recovery technique*, IJNME 33(7), 1992,
+pp. 1331–1364. For the linear elements of the kernel the superconvergent sampling
+points are the element **centroids** (Barlow 1976) — exactly where §10 already
+recovers, so SPR consumes a centroid `StressResult` without recomputation. Per node
+$a$ and stress component $c$, over the patch $\mathrm{adj}(a)$ of recovered elements
+incident on $a$:
+
+$$\sigma_c^*(x) = \mathbf{p}(x)\, \mathbf{a}_c, \qquad \mathbf{p} = [1, x, y, z],
+\qquad \min_{\mathbf{a}_c} \sum_{e \in \mathrm{adj}(a)}
+\left( \mathbf{p}(x_e^{(c)})\, \mathbf{a}_c - \sigma_{e,c} \right)^2,$$
+
+then report $\sigma_c^*(x_a)$ — a small $4 \times 4$ normal-equation (or QR) solve per
+patch, $O(n_{nodes})$ total. Fit in the **basic frame** for the same reason
+`average_nodal` averages there (§13). Rank guards, all load-bearing: a boundary node
+whose patch has fewer than 4 non-coplanar centroids (or coplanar/collinear samples —
+surface and edge nodes of coarse meshes) makes $\mathbf{p}$-columns dependent — either
+borrow the patch of an adjacent *interior* node and evaluate at the boundary node (the
+ZZ paper's own recipe) or drop degenerate monomials / fall back to the incidence
+average, but **document which** and warn once. Skipped elements do not vote, exactly
+as in §13.
+
+Exactness gate (ACCEPTANCE case 30): a constant stress state lies inside the fitted
+polynomial space, so the LS fit reproduces it *regardless of sample positions* — SPR
+must return the exact tensor at **every** node of a constant-stress patch
+(BAR2/TET4/HEX8 suffice per the Round-10 brief; `examples/tet10_patch.py` drives the
+TET4 twin of its patch). TET10 in SPR may reuse the same centroid samples or skip
+TET10 with a documented message — both are contract-conforming, the example tolerates
+`NotImplementedError`; the landed kernel reuses the centroid samples, measured exact
+on the TET10 patch (5.1e-15). Scope guard, mirrored from §13: `average_nodal` stays the plain
+1/n_adj incidence average, bit-identical — SPR is the *better field at gradients*
+(that is its point: the fitted field is one order more accurate and feeds the ZZ error
+estimator later, if ever), the average is the cheap default. Pitfall: never fit
+higher-order polynomials than the element can support superconvergently — a quadratic
+fit over linear-element centroids is noise amplification dressed as accuracy.

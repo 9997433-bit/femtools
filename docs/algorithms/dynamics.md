@@ -11,6 +11,8 @@ from femtools.dynamics.time_domain import time_history
 from femtools.dynamics.residuals import residual_vectors
 # Round-4 additions (REMAINING.md, owner R4-O2) — see §9:
 from femtools.dynamics.cms_free import rubin, macneal, FreeCMSResult
+# Round-10 addition (REMAINING.md, owner R10-O2; landed on this tree) — see §4.1:
+from femtools.dynamics.residuals import residual_flexibility
 ```
 
 Inputs/outputs are DOF tuples `(node_id, dof_code)` resolved through
@@ -113,6 +115,55 @@ $\sqrt{\mu}/2\pi$, mass-normalized. The augmented `ModalResult` drops straight i
 Free–free structures: $K^{-1}$ does not exist — use the shifted operator
 $(K + \sigma M)^{-1}$ with small $\sigma > 0$ and project out rigid-body content (inertia-relief
 attachment modes). Pitfall: forgetting this makes residual vectors silently explode along RBMs.
+
+### 4.1 Public upper-residual block — `residual_flexibility` (Round 10, owner R10-O2)
+
+Frozen entry point (REMAINING.md; landed on this tree, `tests/test_round10_o2.py`
+green). The quantity above, taken one step earlier: the residual $R$ *before* the
+pseudo-mode eigen-solve is exactly the frequency-independent compliance the truncated
+modal sum is missing — well above their own resonances the omitted modes respond
+statically, like springs. That is the MacNeal / Ewins **upper residual** (MacNeal, "A
+hybrid method of component mode synthesis", *Computers & Structures* 1(4), 1971;
+Ewins, *Modal Testing: Theory, Practice and Application*, 2nd ed., §4.2 —
+residual terms in modal synthesis):
+
+$$UR \;=\; K^{-1} F \;-\; \Phi\, \Lambda^{-1} \Phi^\top F
+\qquad (\Phi, \Lambda\ \text{the retained basis}),$$
+
+which `modal_frf` adds as its `upper_residual=` term (§2's `+UR`), completing the
+classical two-term correction $H \approx \sum_r \frac{\phi_r \phi_r^\top}{d_r(\omega)}
+- \frac{LR}{\omega^2} + UR$.
+
+```python
+residual_flexibility(K, M, modal, force_dofs=None, *, forces=None,
+                     outputs=None, inputs=None, tol=1e-10,
+                     rigid_tol_hz=1e-4) -> np.ndarray   # (n_out, n_in), real
+# When neither force_dofs nor forces is given, `inputs` doubles as the unit
+# load directions, so the call mirrors modal_frf's own inputs/outputs:
+UR = residual_flexibility(K, M, kept, inputs=[drive], outputs=[tip, mid])
+H  = modal_frf(kept, [drive], [tip, mid], f, damping, upper_residual=UR)
+# A ResidualVectorResult passed as the only positional argument is re-sliced
+# (ResidualVectorResult.upper_residual) without a second static solve.
+```
+
+`modal` must be the *same truncated basis* handed to `modal_frf` — stripping the
+content of a mode the sum does carry is what makes this a residual and not a second
+copy of the static response (a complete basis leaves $|UR| < 10^{-12}$ of the static
+compliance, pinned by test). Free–free models inherit §4's inertia relief: loads are
+purged of their rigid-body resultant and the static solve pins the RBM subspace, so
+$UR$ carries no rigid-body content. A drive-point residual is strictly positive (the
+omitted modes are a positive-definite stack of springs).
+
+Gate (ACCEPTANCE case 33): few retained modes (4 on the case-2/7b cantilever), band =
+retained band, identical Rayleigh damping both sides — the corrected truncated
+`modal_frf` must beat the plain one against `direct_frf` by better than **4×**
+(corrected/plain rel-L2 ratio < 0.25; measured 1.90e-2 → 1.31e-3, 14.5×, one static
+solve instead of 16 extra eigenpairs). The 20-mode 5 % golden of case 7b and the Rubin
+0.028 % golden are contractually untouched — §9.1's `G_res` is the same physics on the
+boundary columns, but this function does not replace it. Pitfall: $UR$ is a *static*
+correction — it flattens the error only below the first omitted resonance; if the band
+climbs past $\omega_{m+1}$ the correction under-shoots and the fix is more modes (or
+residual *vectors*, §4, which carry their own pseudo-dynamics), not a bigger $UR$.
 
 ## 5. Craig–Bampton — `craig_bampton(model, boundary, n_modes) -> CBResult`
 

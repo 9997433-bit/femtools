@@ -12,6 +12,8 @@ from femtools.mpe.frf_estimation import estimate_h1, estimate_h2, coherence
 from femtools.mpe.ssi import ssi_cov
 # Round-6 addition (REMAINING.md, owner R6-O4) — see §7:
 from femtools.mpe.ssi import ssi_data
+# Round-10 addition (REMAINING.md, owner R10-O4; landed on this tree) — see §8:
+from femtools.mpe.era import era
 ```
 
 Common conventions: FRFs `H (n_out, n_in, n_f)` on `freq_hz`; continuous-time poles
@@ -364,7 +366,79 @@ not); never materialize $Q$ ($ (2il) \times j$ — economy-mode `scipy.linalg.qr
 transposed data returns only the triangular factor needed); memory scales with $j \cdot il$
 for the Hankel itself — build it as a strided view, not a copy, for long records.
 
-## 8. Complexity summary
+## 8. ERA — `femtools.mpe.era` (Round 10, owner R10-O4)
+
+Eigensystem Realization Algorithm: Juang, J.N., Pappa, R.S., *An Eigensystem
+Realization Algorithm for Modal Parameter Identification and Model Reduction*,
+J. Guidance, Control, and Dynamics, 8(5), 1985, pp. 620–627 (see also Juang, *Applied
+System Identification*, Prentice Hall, 1994). The deterministic, impulse-driven member
+of the same subspace family as §6–§7: where SSI compresses output-only *correlations*
+(§6) or raw-data *projections* (§7), ERA realizes a minimal discrete state space
+directly from **Markov parameters** — sampled impulse responses
+$h_k = C A^{k-1} B$ (no feedthrough for sampled IRFs; `first=1` skips a leading $D$
+term when a true Markov sequence is supplied).
+
+Stack the Markov parameters into the two block-Hankel matrices ($r$ block rows, $c$
+block columns; the generalized Hankel of the paper):
+
+$$H(0) = \begin{bmatrix} h_1 & h_2 & \cdots \\ h_2 & h_3 & \cdots \\ \vdots \end{bmatrix}
+= \mathcal O_r\, \mathcal C_c, \qquad
+H(1) = \begin{bmatrix} h_2 & h_3 & \cdots \\ h_3 & h_4 & \cdots \\ \vdots \end{bmatrix}
+= \mathcal O_r A\, \mathcal C_c .$$
+
+SVD $H(0) = U S V^\top$, truncate to `order` states ($2\times$ the number of mode
+pairs — the Hankel singular-value drop marks the true order and is returned in
+`extras["singular_values"]`), then the balanced minimal realization
+
+$$A = S_1^{-1/2} U_1^\top H(1)\, V_1 S_1^{-1/2}, \qquad
+B = S_1^{1/2} V_1^\top E_i, \qquad C = E_o^\top U_1 S_1^{1/2},$$
+
+with $E_i, E_o$ the first block-column/row selectors. Poles from
+$\mathrm{eig}(A)$: $\lambda_r = f_s \ln z_r$ (+ conjugate-pair/ζ-window filtering
+exactly as §1/§3/§6); shapes $\phi_r = C \psi_r$, participation from
+$\psi_r^{-1} B$. Modal amplitude coherence (the paper's accuracy indicator) is
+returned per pole (`extras["amplitude_coherence"]`, filter with `min_coherence=`).
+
+```python
+era(data, dt=None, *, fs=None, freq_hz=None, order=None, orders=None,
+    block_rows=None, block_cols=None, first=0, n_samples=None, n_modes=None,
+    f_range=None, stabilization=True, mode_shapes=True,
+    window="exponential", window_factor=0.01, ...) -> ModalParameterResult
+# data: real IRFs / Markov parameters (n_out, n_in, n_t) with dt or fs — or a
+# complex FRF matrix with freq_hz, in which case irf_from_frf runs internally.
+# Same result container as LSCE/SSI, method="ERA"; extras carry the Hankel
+# singular values, amplitude coherence and the top-order (A, B, C).
+```
+
+Two input routes, both pinned by `examples/era_2dof.py` (ACCEPTANCE case 31):
+
+- **Clean pulse responses** (analytic or measured hammer IRFs): a sampled LTI response
+  *is* a discrete system with poles $z_r = e^{\lambda_r \Delta t}$, so a single-order
+  realization (`stabilization=False`, the documented clean-pulse path) recovers
+  frequencies, damping and shapes to round-off — measured $|\Delta f| \le$ 3.6e-15 Hz,
+  ζ exact, MAC 1.0 on the noiseless 2-DOF chain.
+- **FRF input** (`freq_hz=` given): `irf_from_frf` (§3's helper) runs internally with
+  the exponential window; the window multiplies the pulse response by $\rho^k$, which
+  scales the realized $A$ by exactly $\rho$, so the bias is removed **analytically from
+  the realization** rather than corrected on the poles — damping stays unbiased
+  (measured ζ err ≤ 0.02 %). Callers who run `irf_from_frf` themselves must correct
+  $\zeta_{est}\omega_r$ by the window decay themselves (§3).
+
+With `stabilization=True` (default) the realization sweeps `orders` and keeps poles
+that stabilize, sharing `stabilization_diagram` with §1/§3/§6 — use it on noisy data,
+with the usual 2–3× order overspecification; on clean short pulses prefer the single
+order (the sweep's clustering can merge close poles there). Gates (ACCEPTANCE case 31,
+`tests/test_round10_o4.py`): synthetic 2-DOF frequencies within one spectral line
+$df = 1/T$ of truth, shape MAC vs truth > 0.99; the existing `poly_lscf` / `ssi_data`
+/ `lsce` / `parameter_covariance` goldens unchanged. Pitfalls: `block_rows` must give
+the Hankel room for the order ($r \cdot n_{out} \ge$ order, default
+$r = \max(10, \lceil 2\,\mathrm{order}/n_{out}\rceil)$); FRF-derived IRFs carry
+wrap-around in the tail — truncate with `n_samples` rather than feeding the wrap
+back into $H(1)$; shapes are input-scaled like every estimator here (no mass
+normalization without known input scaling); harmonics masquerade as ζ ≈ 0 poles,
+same as §2/§6.
+
+## 9. Complexity summary
 
 | Kernel | Cost |
 |---|---|
@@ -375,4 +449,5 @@ for the Hankel itself — build it as a strided view, not a copy, for long recor
 | `estimate_h1/h2`, `coherence` | Welch $O(n_o n_i n_t \log n_{seg})$ |
 | `ssi_cov` | correlations $O(n_o^2\, i\, n_t)$ + SVD $O((i\, n_o)^3)$ |
 | `ssi_data` | LQ $O(j\,(2 i n_o)^2)$ + SVD $O((i\, n_o)^3)$ — LQ dominates |
+| `era` | Hankel SVD $O(\min(r n_o, c n_i)^2 \max(\cdot))$ + eig $O(\mathrm{order}^3)$ |
 | `rigid_body_properties` | $O(n_f n_i (n_o \cdot 6 + 6 \cdot 10))$ LS stacks |

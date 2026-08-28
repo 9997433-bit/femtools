@@ -14,6 +14,10 @@ from femtools.io.bdf import read_bdf      # INCLUDE + RBE2, §4
 from femtools.io.bdf import read_bdf, write_bdf   # grow RBE3, §5
 from femtools.drivers.ansys import AnsysCdbDriver
 from femtools.drivers.abaqus import AbaqusInpDriver
+# Round-10 (REMAINING.md, owner R10-F2; pending on this tree as of 2026-08-28)
+# — see §7–§8:
+from femtools.io.bdf import read_bdf, write_bdf   # 10-node CTETRA -> TET10, §7
+from femtools.io.pch import read_pch_stress       # punch $STRESSES text, §8
 ```
 
 Scope guard (REMAINING.md): **public text card layouts only** — the card grammars below are
@@ -296,3 +300,60 @@ emits a canned text result file — so `is_available`/`run`/`read_modal` are exe
 end-to-end, and the `SolverError` paths (missing executable, nonzero exit, timeout, RST/
 ODB refusal) are pinned without any commercial binary. Translation losses in
 `write_input` follow the io convention: aggregated `UserWarning`s, never silent.
+
+## 7. 10-node CTETRA → TET10 (Round 10, owner R10-F2)
+
+Frozen in REMAINING.md — pending on this tree as of 2026-08-28. Until Round 10,
+`read_bdf` accepted a 10-node `CTETRA` only by **midside-dropping** it to `TET4` with
+one aggregated `UserWarning` (accuracy loss + orphaned midside grids). With the TET10
+element registered (`fea.md` §14; the parent has already seeded
+`core.model.ELEMENT_NODE_COUNTS["TET10"]`), that lossy path closes for CTETRA:
+
+- **Read**: a `CTETRA` carrying 10 grid ids maps to `type="TET10"` with **all 10
+  node ids kept**, in card order — which is the registry order by construction
+  (public MSC/NX layout: G1–G4 corners, then G5–G10 on edges (G1,G2), (G2,G3),
+  (G3,G1), (G1,G4), (G2,G4), (G3,G4), continuing over standard continuation lines).
+  No renumbering, no midside synthesis. The 4-node `CTETRA` stays `TET4` exactly as
+  before.
+- **Write**: `write_bdf` emits the 10-node `CTETRA` for `TET10` elements, so
+  `read_bdf(write_bdf(model))` round-trips the element table exactly — the invariant
+  `io.bdf` already pins for every other card.
+- **HEX20 still warn+drops to HEX8**: femtools registers no 20-node brick, so the
+  20-node `CHEXA` keeps the aggregated midside-drop warning verbatim. The asymmetry is
+  deliberate and documented — only cards with a first-class target type stop dropping.
+- **CDB / K siblings** (if the same owner touches them): ANSYS `SOLID187`-style and
+  LS-DYNA 10-node tet cards keep their 10 nodes as `TET10` under the same rule; the
+  existing K-file *degenerate-connectivity* retyping of §2.3 (collapsed 8-node solid →
+  `TET4`) is unchanged — that path detects topology, not order.
+
+The Round-6 acceptance assertions that pinned `TET10 -> TET4` dropping in
+`tests/test_round6_io.py` are R10-G1's to flip (skip/xfail until this lands); this
+section is the normative target they flip to.
+
+## 8. Punch `$STRESSES` text — `read_pch_stress` (Round 10, owner R10-F2)
+
+Frozen in REMAINING.md — pending on this tree as of 2026-08-28. The SOL 101/103 punch
+sibling of `read_pch` / `read_pch_static`: `STRESS(PUNCH) = ALL` emits 80-column text
+blocks (72 data characters + optional sequence numbers in columns 73–80) headed by
+`$STRESSES` / `$ELEMENT STRESSES`, one block per subcase, element rows continuing over
+`-CONT-` lines. `read_pch_stress` parses them into a small container — element ids plus
+Voigt stress tensors (`(xx, yy, zz, xy, yz, zx)`, the `fea.recover.COMPONENTS` order),
+or a `StressResult` if that type fits the punched components — following every
+convention the two existing punch readers froze:
+
+- whitespace-split fields inside the fixed 18-character columns, Fortran `D` exponents
+  accepted, sequence numbers optional;
+- **tolerant block skipping**: `$DISPLACEMENTS`, `$EIGENVECTOR`, complex
+  (`$REAL-IMAGINARY` / `$MAGNITUDE-PHASE`) and any other non-stress blocks are skipped
+  with one warning per kind — never an error — exactly the way `read_pch` skips
+  `$DISPLACEMENTS` and `read_pch_static` skips eigenvectors;
+- element rows that punch fewer components than a full tensor (bar/beam resultant
+  punches) are either mapped to the matching `extras`-style entries or skipped with an
+  aggregated warning naming the element type — no silent zero-filling of components
+  the deck never wrote.
+
+**No OP2, ever** — this is text-punch only, same scope guard as §ACCEPTANCE and the
+PRODUCT_MAP N/A row. Tests must not require a Nastran install: stub the executable and
+canned punch text exactly like the R7 (`NastranPunchDriver`) and R9 (SOL 101
+`$DISPLACEMENTS`) test conventions. UNV dataset 2414 (analysis data at nodes/elements,
+public UFF) is an optional cheap sibling; datasets 55/58/2412/30000 must not change.

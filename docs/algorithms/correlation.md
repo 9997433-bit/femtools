@@ -7,6 +7,10 @@ from femtools.correlation.mac import mac_matrix, comac, poc
 from femtools.correlation.pairing import pair_modes
 from femtools.correlation.frf_corr import frac, csac, csf
 from femtools.correlation.orthogonality import cross_orthogonality
+# Round-4 expansion operators (owner R4-O3) and the Round-10 composition
+# (owner R10-O3; landed on this tree) — see §6:
+from femtools.correlation.expansion import expand_guyan, expand_serep
+from femtools.correlation.expansion import expanded_mac
 ```
 
 All mode-shape arguments are column-major: `phi` is `(n_dof, n_modes)`, complex allowed
@@ -157,7 +161,69 @@ missing from the test set (always post-filter); complex test shapes should be
 phase-normalized (rotate each column so its largest component is real-positive) before any
 report meant for humans.
 
-## 6. Complexity summary
+## 6. Expansion and expanded MAC — `expand_serep` / `expanded_mac` (Round 10, owner R10-O3)
+
+Shape expansion moves a mode set measured on a sensor subset back onto the full FE DOF
+set so correlation runs where the model lives, not where the sensors happened to be.
+The Round-4 operators (`expand_guyan`, `expand_serep`, both →
+`ExpansionResult`) implement the two classical transformations — Guyan's static
+recovery (fea.md §9.1) and SEREP (O'Callahan, Avitabile & Riemer, *System Equivalent
+Reduction Expansion Process*, Proc. 7th IMAC, 1989; fea.md §9.3):
+
+$$\psi_{full} = \Phi\, \Phi_m^{+}\, \psi_m, \qquad \Phi_m = \Phi[\text{master rows}, :],$$
+
+i.e. fit the measured shape in least squares by the FE basis restricted to the
+measured DOFs, then evaluate the fit everywhere. `ExpansionResult.residual` reports
+the per-mode misfit at the masters — the part of the measurement the truncated basis
+cannot represent; keep the basis well *smaller* than the sensor count, or the fit is
+square, the residual is zero by construction and the noise gets expanded along with
+the shape.
+
+The Round-10 composition (landed on this tree, `tests/test_round10_o3.py` green):
+
+```python
+expanded_mac(phi_test, modes, master, *, reference=None, weights=None,
+             n_modes=None, rcond=1e-12, ...) -> ExpandedMACResult
+# expand_serep + mac_matrix in one call: MAC of the expanded test shapes
+# against the full-DOF FE modes (or an explicit `reference` set).
+# Unpacks as (mac, expansion); np.asarray(result) is the MAC table.
+```
+
+Why compose at all: a MAC on the measured DOFs alone saturates under spatial aliasing
+(§1 pitfall ii) — with a few dozen sensors, genuinely different shapes look collinear.
+Expanding first moves the comparison onto the complete model. The result carries the
+MAC table, the underlying `ExpansionResult` (so `residual` stays readable alongside
+the correlation), and the diagnostics `diagonal_error`, `max_off_diagonal`,
+`identity_error`.
+
+**The identity fixed point** (ACCEPTANCE case 32) is what makes the composition
+trustworthy: feed the FE modes *restricted to the master rows* back in —
+`expanded_mac(fe_modes[master], fe_modes, master)` — and, for a full-column-rank
+$\Phi_m$, SEREP reproduces them exactly ($\Phi \Phi_m^{+} \Phi_m = \Phi$), so the MAC
+diagonal is 1 to round-off: `diagonal_error` ≤ 1e-10, SEREP `residual` = 0. Two
+distinct claims hide in "the table is the identity", and the result type separates
+them deliberately:
+
+- `diagonal_error` — the SEREP self-check, reference-independent. A departure is a
+  defect of the master set (too few sensors, rank-deficient $\Phi_m$, basis truncated
+  below the modes being fitted), never a correlation result.
+- `identity_error` — additionally requires the reference modes to be mutually
+  uncorrelated *under the MAC weighting*. True for an orthonormal basis and for
+  mass-normalized FE modes with `weights=M` (the mass-weighted MAC); the **unweighted**
+  table instead collapses onto the plain AutoMAC of the FE modes, whose off-diagonal
+  belongs to the mode set, not to the expansion (§1 pitfall i — MAC is not an
+  orthogonality check). Measured on the case-2 cantilever (6 modes, 18 random
+  masters): `diagonal_error` 2.2e-16, `weights=M` `identity_error` 4.4e-16,
+  unweighted off-diagonal 0.240 = the AutoMAC.
+
+What the fixed point does *not* prove: SEREP can only produce shapes inside
+$\mathrm{span}(\Phi)$, so expanded *test* shapes are filtered onto the basis and their
+MAC against the FE modes is optimistic by construction — read `residual` alongside the
+table before believing a diagonal. `expand_serep` / `expand_guyan` numerics are
+contractually unchanged by Round 10 (the composition adds no formula); `mac_matrix`
+stays §1's.
+
+## 7. Complexity summary
 
 | Kernel | Cost |
 |---|---|
@@ -166,3 +232,4 @@ report meant for humans.
 | `poc` / `cross_orthogonality` | $O(nnz(M_r)\, m + n\, m^2)$ (+reduction cost upstream) |
 | `frac` / `csac` / `csf` | $O(n_{out} n_{in} n_f)$ |
 | `pair_modes` | MAC + $O(m^3)$ assignment (+SVDs of cluster size, negligible) |
+| `expand_serep` / `expanded_mac` | pinv $O(n_m m^2)$ + $O(n\, m\, n_m)$ + MAC |

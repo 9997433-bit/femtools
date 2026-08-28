@@ -266,6 +266,67 @@ bringing the example set to **13/13 PASS** (2026-08-28, this tree). Both skip wh
 (`raise SystemExit(0) from None`) when their kernels are absent, so the suite stays
 green on partial trees.
 
+### Round-10 status (2026-08-28 — rows unchecked until the parent measures the merged tree)
+
+Round-10 frozen APIs (`REMAINING.md` Round-10 section / `ROUND10_BRIEF.md`) open
+Cycle D. Audited on the shared Cycle-D tree by R10-F3 (2026-08-28, re-probed after the
+cloud kernels landed mid-round): `tet10` + `recover_spr` (R10-O1), `era` (R10-O4),
+`residual_flexibility` (R10-O2) and `expanded_mac` (R10-O3) all import and their
+exclusive test files are green (`tests/test_round10_o1.py` + `test_round10_o2.py` +
+`test_round10_o3.py` + `test_round10_o4.py`: **81 passed**); only
+`io.pch.read_pch_stress` / 10-node CTETRA (R10-F2) does **not** import yet.
+Numbers quoted below are R10-F3 measurements on this tree, flagged provisional;
+every row stays unchecked until the parent re-measures the fully merged tree.
+
+- [ ] **29** TET10 constant-strain patch + rigid modes — `femtools.fea.elements.tet10`
+      imports; `tests/test_round10_o1.py` green. Gates (§12.1) measured provisionally
+      by `examples/tet10_patch.py` (2026-08-28, PASS): four distorted TET10 around a
+      buried node under $u = a + A x$ recover strain $\mathrm{sym}(A)$ to **3.2e-15**
+      and stress $D\,\mathrm{sym}(A)$ to **8.6e-16** (tol 1e-12); free–free single
+      TET10: exactly **6** rigid-body modes (first elastic 21 187.9 Hz); consistent
+      mass closes $r^\top M r = \rho V$ to **3.2e-16**.
+- [ ] **30** ZZ-SPR nodal recovery — `femtools.fea.recover.recover_spr` imports;
+      `tests/test_round10_o1.py` green. Gate (§12.2) measured provisionally by the
+      kernel-gated section of `examples/tet10_patch.py` (2026-08-28): constant-stress
+      patch exact at **every** node — TET4 twin **4.1e-15**, TET10 patch **5.1e-15**
+      (tol 1e-10), all 5 patch nodes carrying values; distinct from `average_nodal`,
+      which stays the 1/n_adj incidence average.
+- [ ] **31** ERA synthetic 2-DOF — `femtools.mpe.era.era` imports on this tree;
+      `tests/test_round10_o4.py` green and `examples/era_2dof.py` measured PASS
+      provisionally (2026-08-28): analytic-IRF single-order path
+      $|\Delta f| \le$ **3.6e-15 Hz** (gate: one line, 0.125 Hz), rel ζ err **0.0 %**,
+      MAC **1.000000**; FRF route (internal `irf_from_frf`, exponential window unbiased
+      analytically in the realization) $|\Delta f| \le$ **6.8e-5 Hz** (one line,
+      0.0625 Hz), rel ζ err ≤ **0.02 %**, MAC **1.000000**.
+- [ ] **32** expanded MAC identity — `femtools.correlation.expansion.expanded_mac`
+      imports; `tests/test_round10_o3.py` green. Probe (2026-08-28, case-2 cantilever,
+      6 modes, 18 random master rows): SEREP fixed point `diagonal_error` **2.2e-16**,
+      mass-weighted (`weights=M`) `identity_error` **4.4e-16**, SEREP fit residual
+      **1.0e-15**; the *unweighted* off-diagonal collapses onto the plain AutoMAC of
+      the FE modes (0.240 here — a property of the mode set, not of the expansion;
+      see §12.4).
+- [ ] **33** residual-flexibility FRF correction —
+      `femtools.dynamics.residuals.residual_flexibility` imports;
+      `tests/test_round10_o2.py` green. Probe (2026-08-28, case-2 cantilever, 4 kept
+      modes, retained band 7.9–31.4 Hz, Rayleigh ζ = 2 %): rel L2 vs `direct_frf`
+      **1.90e-2 → 1.31e-3** with `upper_residual=residual_flexibility(...)` — a
+      **14.5×** improvement (gate: ratio < 0.25). The 20-mode 5 % golden (case 7b)
+      and Rubin 0.028 % are untouched.
+- [ ] **R10 CTETRA10 / punch `$STRESSES`** — `io.pch.read_pch_stress` not importable
+      yet, and `read_bdf` still midside-drops 10-node CTETRA on this tree. Gates
+      (§12.6): 10-node `CTETRA` → `type="TET10"` with all 10 node ids, round-tripped
+      by `write_bdf`; 4-node CTETRA stays TET4; HEX20 still warn+drops to HEX8;
+      `$STRESSES` / `$ELEMENT STRESSES` punch text parsed into element ids + Voigt
+      tensors with `$DISPLACEMENTS`/eigenvector blocks skipped the tolerant way;
+      **no OP2**, stub-tested like R7/R9 (no Nastran binary required).
+
+Consequence for examples: Round 10 adds `examples/tet10_patch.py` (TET10 patch +
+6 RBM + kernel-gated SPR section — numbers in rows 29–30) and `examples/era_2dof.py`
+(numbers in row 31), growing the example set to **15/15 PASS** measured on this tree
+(2026-08-28, after the R10-O1/O4 kernels landed mid-round). Both new examples
+`raise SystemExit(0)` with a clear message when their kernels are absent, so the
+suite stays green on partial trees; the existing 13 examples are unchanged.
+
 ## 0. Master table
 
 | # | Case | Exact reference | Metric | Tol |
@@ -306,10 +367,16 @@ green on partial trees.
 | 26 | NMD / MACX identities (§10.5) | $\mathrm{nmd} = \sqrt{1 - \mathrm{MAC}}$ (brief-frozen); MACX = MAC on real modes | max dev | 1e-12 |
 | 27 | Modal strain/kinetic energy (§10.6) | $\mathrm{MSE}_r = \mathrm{MKE}_r = \lambda_r / 2$ (mass-normalized); element sums = totals | rel dev | 1e-10 |
 | 28 | Shell drilling 6-RBM contract (§10.7) | oblique free–free flat plate: 6 zero modes; elastic spectrum orientation-invariant | zero count / rel $f_{el}$ dev / goldens | = 6 / 1e-8 / unchanged |
+| 29 | TET10 constant-strain patch + rigid modes (§12.1) | quadratic tet contains the complete linear field; solid nodes carry 3 DOFs | max rel dev (strain and stress) / zero-mode count | 1e-12 / = 6 |
+| 30 | ZZ-SPR constant-stress patch (§12.2) | a constant field lies inside the linear patch-fit space | max rel dev at every node | 1e-10 |
+| 31 | ERA synthetic 2-DOF (§12.3) | sampled IRF is a discrete LTI with $z_r = e^{\lambda_r \Delta t}$ | $|\Delta f|$ vs one spectral line $df$ / shape MAC | $\le df$ / > 0.99 |
+| 32 | Expanded MAC identity (§12.4) | SEREP fixed point: FE modes through a master subset return unchanged | `diagonal_error` / `weights=M` `identity_error` | 1e-10 / 1e-10 |
+| 33 | Residual-flexibility FRF correction (§12.5) | MacNeal/Ewins upper residual $UR = K^{-1}F - \Phi \Lambda^{-1} \Phi^\top F$ | rel L2 vs `direct_frf`, corrected / plain | ratio < 0.25 |
 
 Rows 21–28 are Round-6 contracts; as of the 2026-08-28 R7-F3 re-audit their kernels all
 import on this tree and every row is **measured passing** (status block above) —
-constructions in §10.
+constructions in §10. Rows 29–33 are Round-10 contracts, unchecked in the Round-10
+status block until the parent measures the merged tree — constructions in §12.
 
 ## 1. Axial bar
 
@@ -647,3 +714,92 @@ pinned by `tests/test_round6_o1.py` (31 tests).
 Fixed seeds via `np.random.default_rng(seed)` only; eigenvector sign convention per
 `fea.md` §6.2; degenerate-subspace comparisons via MAC/S2MAC, never entrywise; no test may
 depend on ARPACK iteration counts or wall time.
+
+## 12. Round-10 golden constructions (rows 29–33 unchecked until the parent measures)
+
+Formulas live in the matching `docs/algorithms/` files (fea.md §14–§15, mpe_rbpe.md §8,
+correlation.md §6, dynamics.md §4.1, io.md §7–§8). Status and provisional probe numbers
+are in the Round-10 status block above.
+
+### 12.1 TET10 constant-strain patch + rigid modes (case 29, `examples/tet10_patch.py`)
+
+Patch: an irregular parent tetrahedron split into **4 distorted TET10** by a strictly
+interior point (one fully buried node, 15 nodes, midside nodes at the true edge
+midpoints so the mapping stays affine). Impose the linear field $u = a + A x$ at every
+node with a deliberately **non-symmetric** $A$ — the recovery must report
+$\mathrm{sym}(A)$, i.e. the rotation must drop out. Gates: `recover_strain` returns
+$\mathrm{sym}(A)$ and `recover_stress` returns $D\,\mathrm{sym}(A)$ at every centroid
+to **1e-12** relative (quadratic contains linear — this holds on distorted patches);
+a single free–free TET10 keeps exactly **6** rigid-body modes (solid nodes carry 3
+translational DOFs, count zero modes against $10^{-4} f_{max}$); the consistent mass
+closes the rigid-translation identity $r^\top M r = \rho V_{parent}$ to 1e-10
+(measured 3.2e-16 for the same helpers driven with TET4 on this tree). HEX8 98.6 % /
+MITC4 / drilling-6-RBM goldens must stay untouched (regression, R10-O1 gates).
+
+### 12.2 ZZ-SPR nodal recovery (case 30, kernel-gated section of `examples/tet10_patch.py`)
+
+Zienkiewicz–Zhu superconvergent patch recovery (IJNME 33(7), 1992): per node, fit a
+linear polynomial per stress component over the **centroid** samples (the Barlow points
+of linear elements) of the incident-element patch and evaluate at the node. Sharp gate:
+a constant stress state lies inside the fitted polynomial space, so it survives at
+**every** node exactly (≤ 1e-10 rel; the example drives the TET4 twin of the §12.1
+patch, whose buried node has a full interior patch around it). `recover_spr` is a
+different estimator from `average_nodal` — the 1/n_adj incidence average of case R8
+stays bit-identical. TET10 in SPR may reuse the centroid samples or skip TET10 with a
+documented message (the example tolerates `NotImplementedError`).
+
+### 12.3 ERA synthetic 2-DOF (case 31, `examples/era_2dof.py`)
+
+2-DOF chain ($m = 1$ kg, $k = 1000$ N/m ground–1–2 → 3.1105 / 8.1434 Hz), modal
+$\zeta = 2\%$, truth via dense `eigh`. Part 1: the exactly sampled analytic receptance
+IRF (64 Hz, 8 s → one line $df = 0.125$ Hz), single-order realization
+(`stabilization=False`, the documented clean-pulse path, `order=8` for 4 physical
+states) — the sampled response of an LTI system *is* a discrete system with poles
+$z_r = e^{\lambda_r \Delta t}$, so frequencies, damping and shapes return to round-off.
+Part 2: a synthesized FRF handed to `era` directly (`freq_hz=` grid, $df = 0.0625$ Hz),
+which runs `irf_from_frf` internally and removes the exponential-window bias
+analytically from the realization — damping stays checkable, stabilization sweep left
+on. Gates per identified mode, both parts: $|\Delta f| \le df$ (nearest-frequency
+match), rel ζ err < 50 %, shape MAC vs truth > 0.99. Existing `poly_lscf` / `lsce` /
+`ssi_data` goldens unchanged (R10-O4 gates).
+
+### 12.4 Expanded MAC identity (case 32)
+
+`expanded_mac(phi_test, modes, master)` composes `expand_serep` with `mac_matrix`
+(O'Callahan, Avitabile & Riemer 1989 + Allemang's MAC). The self-check fixed point:
+feeding the FE modes **restricted to a master subset** back in, the SEREP expansion
+$\Phi\,\Phi_m^{+}\Phi_m$ reproduces them exactly (full column rank $\Phi_m$), so the MAC
+diagonal is 1 to round-off — `diagonal_error` ≤ 1e-10 — and the SEREP `residual` is 0.
+The **full** identity $\mathrm{MAC} = I$ additionally needs the reference modes to be
+orthogonal under the MAC weighting: gate `identity_error` ≤ 1e-10 with `weights=M`
+(mass-weighted MAC of mass-normalized modes) or on an orthonormal basis; the
+*unweighted* table instead collapses onto the plain AutoMAC of the FE modes, whose
+off-diagonal belongs to the mode set, not the expansion (measured 0.240 on the case-2
+cantilever with 18 masters). `expand_serep` / `expand_guyan` numerics unchanged
+(R10-O3 gates, `tests/test_round10_o3.py`).
+
+### 12.5 Residual-flexibility FRF correction (case 33)
+
+On the case-2/7b cantilever (or the 24-DOF chain of `tests/test_round10_o2.py`): keep
+**4** modes, band = retained band (`retained_band_lines`), identical Rayleigh damping
+on both sides. The truncated modal sum is missing the static compliance of every mode
+it left out; `residual_flexibility(K, M, kept, inputs=..., outputs=...)` returns
+exactly that block, $UR = K^{-1}F - \Phi \Lambda^{-1} \Phi^\top F$ restricted to the
+requested DOFs (MacNeal 1971; Ewins, *Modal Testing*, §4.2), ready for
+`modal_frf(..., upper_residual=UR)`. Gates: rel L2 vs `direct_frf` strictly improves
+and the corrected/plain error ratio is < **0.25** (measured 1.90e-2 → 1.31e-3, a 14.5×
+improvement, on this tree); free–free inputs are inertia-relieved (no rigid-body
+content in $UR$); the 20-mode 5 % golden (case 7b) and Rubin 0.028 % stay untouched.
+
+### 12.6 CTETRA10 and punch `$STRESSES` (Round-10 io, unnumbered)
+
+BDF: a 10-node `CTETRA` (public MSC/NX layout, midsides G5–G10 on edges
+(G1,G2), (G2,G3), (G3,G1), (G1,G4), (G2,G4), (G3,G4)) maps to `type="TET10"` with all
+10 node ids — the Round-6 midside-*drop* behavior is closed for CTETRA; the 4-node card
+stays `TET4`, and 20-node HEX still warn+drops to HEX8 (aggregated warning).
+`write_bdf` emits the 10-node card so the `model.elements` table round-trips exactly.
+`read_pch_stress` parses the public 80-column punch `$STRESSES` / `$ELEMENT STRESSES`
+text blocks into element ids + Voigt tensors (or a `StressResult`), skipping
+`$DISPLACEMENTS` / eigenvector / complex blocks with one warning per kind — the same
+tolerant conventions as `read_pch` / `read_pch_static`. **No OP2**, ever; tests are
+stubbed like R7/R9 and require no Nastran binary.
