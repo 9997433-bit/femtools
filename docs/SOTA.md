@@ -41,8 +41,8 @@ deviations.
   on `1 − MAC` (Hungarian algorithm via `scipy.optimize.linear_sum_assignment`) with a
   configurable frequency-deviation penalty, rather than greedy row-max, to avoid duplicate
   pairings on closely spaced modes.
-* **Nearest-node FE↔test geometry mapping (Round-7 target —
-  `correlation.dofmap.map_nearest_nodes`, PRODUCT_MAP R7-wip).**
+* **Nearest-node FE↔test geometry mapping (Round 7 —
+  `correlation.dofmap.map_nearest_nodes`, PRODUCT_MAP R7).**
   Nearest-neighbor search over node coordinates
   via k-d trees: Bentley, J.L., *Multidimensional Binary Search Trees Used for Associative
   Searching*, Communications of the ACM, 18(9), 1975, pp. 509–517; expected-logarithmic
@@ -197,8 +197,8 @@ deviations.
   SLSQP/trust-constr backends as size optimization, with a mesh-quality safeguard
   (Laplacian-smoothness / minimum-Jacobian barrier) against the element-distortion failure
   mode that the survey literature identifies as the central difficulty of shape variables.
-* **Topometry — element-wise sizing on a fixed mesh (Round-7 target —
-  `optimization.topometry.topometry_optimize`, PRODUCT_MAP R7-wip).** Bendsøe–Sigmund
+* **Topometry — element-wise sizing on a fixed mesh (Round 7 —
+  `optimization.topometry.topometry_optimize`, PRODUCT_MAP R7).** Bendsøe–Sigmund
   (2003, cited above) organize structural optimization into sizing, shape, and topology
   design: *topometry* keeps the mesh and connectivity fixed and treats a per-element
   thickness (or density) as the design variable — element-by-element sizing in the
@@ -255,9 +255,9 @@ implementations; `docs/ACCEPTANCE.md` (owned by R1-F3) elaborates the golden cas
 ## 10. Merged-code gap (Round-2 closure and residual distances)
 
 Known distances between the merged code and the state of the art it targets. Status tags in
-`docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4/R6 is merged and tested but may still carry
-one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+,
-R7-wip (frozen for Round 7 but not yet merged — §11), and N/A rows of the product map,
+`docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4/R6/R7 is merged and tested but may still carry
+one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+
+and N/A rows of the product map,
 not repeated here.
 
 ### Closed in Round 2
@@ -302,11 +302,11 @@ not repeated here.
   (`TYPE_CHECKING` re-exports), but mypy still reports a few dozen informational findings in
   internal modules; the CI mypy step is non-blocking.
 
-## 11. FEA kernels — Round-7 targets (stress recovery, rigid constraints)
+## 11. FEA kernels — Round 7 (stress recovery, rigid constraints)
 
-Round 7 (Cycle C's first round) freezes two fea-layer additions in
-`.agent_workspace/REMAINING.md`; both are tagged **R7-wip** in `docs/PRODUCT_MAP.md` until
-their modules merge. References are textbooks and journal/conference papers only.
+Round 7 (Cycle C's first round) merged two fea-layer additions frozen in
+`.agent_workspace/REMAINING.md`; both are tagged **R7** in `docs/PRODUCT_MAP.md`.
+References are textbooks and journal/conference papers only.
 
 * **Linear stress/strain recovery (`fea.recover.recover_stress` / `recover_strain` →
   `StressResult`).** Element stress from the displacement solution, `σ = D B u` evaluated at

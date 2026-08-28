@@ -140,31 +140,36 @@ deliberately stays at the same eight this round — the only new examples sancti
 Round-7 brief (`examples/rbe2_rigid.py`, `examples/topometry_plate.py`) are blocked on
 kernels that do not import yet (Round-7 status below).
 
-### Round-7 status (2026-08-28, R7-F3 audit)
+### Round-7 status (2026-08-28, Cycle-C close-out)
 
-Round-7 frozen APIs (`REMAINING.md` / `ROUND7_BRIEF.md`), checked by import on this tree.
-The R7-O2 kernels already import locally (`dynamics.superelement.dump_cms` / `load_cms`,
-`psd_response(base_accel=)`); the rows below are **pending**, none importable yet:
+Round-7 frozen APIs (`REMAINING.md` / `ROUND7_BRIEF.md`) are merged on
+`cursor/femtools-cycle-c-d551` and importable. Measurements:
 
-- [ ] **R7 stress recovery** — `femtools.fea.recover` (`recover_stress`,
-      `recover_strain`, `StressResult`; BAR2/BEAM2/QUAD4/TRIA3/HEX8/TET4 centroids;
-      constant-strain patch ≤ 1e-12, `fea.md` §10) — **pending**, module absent
-- [ ] **R7 RBE2 condensation** — `femtools.fea.mpc` (`apply_rbe2`,
-      `ConstraintTransform`; `assemble_km` honoring `model.rbe2`; welded free–free pair
-      keeps 6 RBM; a rigid offset beam carries moment, `fea.md` §11) — **pending**,
-      module absent (the `core.model.RBE2` container and `FEModel.add_rbe2` are merged
-      and stable)
-- [ ] **R7 write_cdb / write_k** — `femtools.io.cdb.write_cdb` /
-      `femtools.io.kfile.write_k` (round-trip the Round-6 HEX8/QUAD4/BEAM2 acceptance
-      decks through `assemble_km`) — **pending**, symbols absent (both readers import)
-- [ ] **R7 topometry** — `femtools.optimization.topometry` (`topometry_optimize`,
-      `TopometryResult`; element-wise thickness/density field on an *existing* mesh,
-      min compliance under a volume/mean-thickness constraint; a cantilever plate must
-      beat the uniform start with no inverted elements, `optimization.md` §5) —
-      **pending**, module absent
-- [ ] **R7 map_nearest_nodes** — `femtools.correlation.dofmap.map_nearest_nodes`
-      (two translated copies of the same 8-node cube match 1–1 with
-      distance = translation) — **pending**, symbol absent (module imports)
+- [x] **R7 stress recovery** — `femtools.fea.recover` (`recover_stress`,
+      `recover_strain`, `StressResult`; BAR2/BEAM2/QUAD4/TRIA3/HEX8/TET4 centroids).
+      Constant-strain patch worst error 7.9e-16 (`TET4`); HEX8 cantilever mean `szx`
+      vs `P/A` 2.5e-12; plate top fibre matches `6M/t²` (`tests/test_round7_o1.py`)
+- [x] **R7 RBE2 condensation** — `femtools.fea.mpc` (`apply_rbe2`,
+      `ConstraintTransform`; `assemble_km` honoring `model.rbe2`). Welded free–free
+      pair keeps 6 RBM and `max|Kff| = 0`; rigid-arm tip matches the equivalent
+      force+moment field bit-identically (`tests/test_round7_o1.py`)
+- [x] **R7 write_cdb / write_k** — `femtools.io.cdb.write_cdb` /
+      `femtools.io.kfile.write_k` round-trip the Round-6 HEX8/QUAD4/BEAM2 acceptance
+      decks through `assemble_km` (`tests/test_round7_io.py`)
+- [x] **R7 BDF INCLUDE + RBE2** — `read_bdf` follows `INCLUDE` (relative, depth ≤ 8,
+      cycle-safe) and parses `RBE2` via `FEModel.add_rbe2`; `write_bdf` emits RBE2
+- [x] **R7 NastranPunchDriver** — SOL 103 via `write_bdf` / `read_pch`; missing
+      executable raises `SolverError` (no Nastran binary required)
+- [x] **R7 topometry** — `femtools.optimization.topometry` (`topometry_optimize`,
+      `TopometryResult`) on an existing mesh; cantilever plate compliance drop vs
+      uniform start with volume held (`tests/test_round7_o4.py`)
+- [x] **R7 map_nearest_nodes / mac_contribution** — translated cube 1–1 match;
+      per-DOF MAC contributions (`femtools.correlation`)
+- [x] **R7 static_displacement_response** — `solve_static` displacements as
+      `update_model` residuals; 10% E recovery invariant holds
+- [x] **R7 base_accel PSD / dump_cms** — SDOF vs Miles; CMS npz bit-identical K/M
+
+The eight examples remain the Round-6 set until Round 8 adds kernel-backed demos.
 
 ## 0. Master table
 

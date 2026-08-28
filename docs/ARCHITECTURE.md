@@ -143,8 +143,7 @@ code never branches on data origin.
   `fea.mpc.apply_rbe2` / `ConstraintTransform`, consuming the merged `FEModel.rbe2` table
   (`core.model.RBE2`, shared with the BDF `RBE2` card): the dependent node follows the
   independent one by the small-rotation rigid-body relation, and `assemble_km` honors
-  `model.rbe2` (or an explicit `mpc=` transform). The transform module is not yet merged on
-  this branch — `docs/PRODUCT_MAP.md` R7-wip; references `docs/SOTA.md` §11.
+  `model.rbe2` (or an explicit `mpc=` transform). References: `docs/SOTA.md` §11.
 
 ## 6. Sparse assembly
 
@@ -188,13 +187,13 @@ ever formed by the framework (dense paths are allowed inside tests and for n < ~
   SEREP as explicit transformation-matrix builders (`ReductionResult` carries `T` with
   `K_r = TᵀKT`, `M_r = TᵀMT`) reused by pretest (test-DOF reduction) and correlation
   (shape expansion via `correlation.expansion.expand_guyan` / `expand_serep`).
-* **Stress recovery (Round 7, in progress — `fea.recover`, `docs/PRODUCT_MAP.md` R7-wip):**
+* **Stress recovery (Round 7 — `fea.recover`, `docs/PRODUCT_MAP.md` R7):**
   `recover_stress` / `recover_strain` evaluate element strain and stress from a displacement
   solution at the element centroid (or averaged Gauss points) through the same element
   kernels the assembler uses, returning a `StressResult`. Recovery is an fea-layer
   capability: it consumes `StaticResult` / `ModalResult` displacement fields and never
-  re-solves. Linear elasticity only, no nodal smoothing; the module does not import from
-  this branch yet. References: `docs/SOTA.md` §11 (Cook et al.; Bathe; Barlow points).
+  re-solves. Linear elasticity only, no nodal smoothing.
+  References: `docs/SOTA.md` §11 (Cook et al.; Bathe; Barlow points).
 
 ## 8. Result objects
 
@@ -270,9 +269,8 @@ Policy:
        def read_modal(self, result_file: str | Path) -> ModalResult: ...
    ```
 
-   femtools ships the contract and — once the Round-7 module `drivers.nastran` merges
-   (`docs/PRODUCT_MAP.md` R7-wip; it does not import from this branch yet) — one optional
-   concrete **text** driver, `NastranPunchDriver`: `write_input` emits the model through
+   femtools ships the contract and one optional concrete **text** driver,
+   `NastranPunchDriver` (`docs/PRODUCT_MAP.md` R7): `write_input` emits the model through
    the public `write_bdf` translator plus a SOL 103 case control requesting punch output,
    `read_modal` parses the `.pch` text with `read_pch`, `is_available()` probes for a
    local executable (never raises), and `run()` raises `SolverError` when no installation
@@ -283,8 +281,8 @@ Policy:
    ANSYS CDB NBLOCK/EBLOCK mesh subset (`read_cdb`) alongside the Round-1 BDF/UNV
    read/write. Round 6 added Abaqus INP (`io.inp.read_inp`/`write_inp`) and LS-DYNA K
    (`io.kfile.read_k`) text-subset translators over publicly documented card layouts;
-   Round 7 freezes the matching writers (`io.cdb.write_cdb`, `io.kfile.write_k`) and
-   BDF `INCLUDE`/`RBE2` reading, all R7-wip until merged.
+   Round 7 added the matching writers (`io.cdb.write_cdb`, `io.kfile.write_k`) and
+   BDF `INCLUDE`/`RBE2` reading.
    Closed binary result dumps (Nastran OP2, ANSYS rst, Abaqus odb) remain out
    of scope (N/A) — Round 7 changes nothing there: still no OP2. The protocol stays the
    extension point for third-party binary drivers.

@@ -31,6 +31,9 @@ Round 5: every module is merged, so they live in ``_EXPORTS`` (with ``TYPE_CHECK
 re-exports) like the rest of the contract, and the provisional machinery is retired.
 Round-6 names (``read_inp``, ``read_k``, ``shape_optimize``, ``ssi_data``, ``nmd``,
 ``macx``, ``parameter_covariance``, ``modal_strain_energy``, …) are stable the same way.
+Round-7 names (``recover_stress``, ``apply_rbe2``, ``write_cdb``, ``write_k``,
+``NastranPunchDriver``, ``dump_cms``, ``map_nearest_nodes``, ``topometry_optimize``,
+``static_displacement_response``, …) follow after the Cycle-C kernels merged.
 """
 
 from __future__ import annotations
@@ -41,8 +44,9 @@ from typing import TYPE_CHECKING
 __version__ = "0.1.0"
 
 # Top-level name -> defining module (contract API of docs/CONTRACT_API.md, the frozen
-# Round-4 API of .agent_workspace/REMAINING.md — docs/PRODUCT_MAP.md tag R4 — plus the
-# exception hierarchy promised at package root by docs/ARCHITECTURE.md §9).
+# Round-4 / Round-6 / Round-7 APIs of .agent_workspace/REMAINING.md — docs/PRODUCT_MAP.md
+# tags R4 / R6 / R7 — plus the exception hierarchy promised at package root by
+# docs/ARCHITECTURE.md §9).
 _EXPORTS: dict[str, str] = {
     # error hierarchy
     "FemtoolsError": "femtools.core.errors",
@@ -76,13 +80,16 @@ _EXPORTS: dict[str, str] = {
     "read_pch": "femtools.io.pch",
     "write_pch": "femtools.io.pch",
     "read_cdb": "femtools.io.cdb",
+    "write_cdb": "femtools.io.cdb",
     "read_inp": "femtools.io.inp",
     "write_inp": "femtools.io.inp",
     "read_k": "femtools.io.kfile",
+    "write_k": "femtools.io.kfile",
     "save_project": "femtools.io.project",
     "load_project": "femtools.io.project",
     # solver drivers
     "SolverDriver": "femtools.drivers.base",
+    "NastranPunchDriver": "femtools.drivers.nastran",
     # FEA
     "assemble_km": "femtools.fea.assemble",
     "AssemblyResult": "femtools.fea.assemble",
@@ -97,6 +104,11 @@ _EXPORTS: dict[str, str] = {
     "irs": "femtools.fea.reduction",
     "serep": "femtools.fea.reduction",
     "ReductionResult": "femtools.fea.reduction",
+    "recover_stress": "femtools.fea.recover",
+    "recover_strain": "femtools.fea.recover",
+    "StressResult": "femtools.fea.recover",
+    "apply_rbe2": "femtools.fea.mpc",
+    "ConstraintTransform": "femtools.fea.mpc",
     # dynamics
     "modal_frf": "femtools.dynamics.frf",
     "direct_frf": "femtools.dynamics.frf",
@@ -109,6 +121,8 @@ _EXPORTS: dict[str, str] = {
     "FreeCMSResult": "femtools.dynamics.cms_free",
     "psd_response": "femtools.dynamics.random",
     "PSDResult": "femtools.dynamics.random",
+    "dump_cms": "femtools.dynamics.superelement",
+    "load_cms": "femtools.dynamics.superelement",
     "modal_strain_energy": "femtools.dynamics.energy",
     "modal_kinetic_energy": "femtools.dynamics.energy",
     "time_history": "femtools.dynamics.time_domain",
@@ -120,6 +134,8 @@ _EXPORTS: dict[str, str] = {
     "fmac": "femtools.correlation.mac",
     "nmd": "femtools.correlation.mac",
     "macx": "femtools.correlation.mac",
+    "mac_contribution": "femtools.correlation.mac",
+    "map_nearest_nodes": "femtools.correlation.dofmap",
     "pair_modes": "femtools.correlation.pairing",
     "frac": "femtools.correlation.frf_corr",
     "csac": "femtools.correlation.frf_corr",
@@ -146,6 +162,7 @@ _EXPORTS: dict[str, str] = {
     "monte_carlo_update": "femtools.updating.uq",
     "UQResult": "femtools.updating.uq",
     "identify_harmonic_forces": "femtools.updating.force_id",
+    "static_displacement_response": "femtools.updating.responses",
     # optimization
     "size_optimize": "femtools.optimization.size",
     "topology_simp": "femtools.optimization.topology",
@@ -156,6 +173,8 @@ _EXPORTS: dict[str, str] = {
     "pareto_weighted": "femtools.optimization.multi",
     "shape_optimize": "femtools.optimization.shape",
     "ShapeResult": "femtools.optimization.shape",
+    "topometry_optimize": "femtools.optimization.topometry",
+    "TopometryResult": "femtools.optimization.topometry",
     # MPE / RBPE
     "poly_lscf": "femtools.mpe.p_lscf",
     "fdd": "femtools.mpe.fdd",
@@ -272,6 +291,7 @@ if TYPE_CHECKING:
     from femtools.core.units import UnitSystem as UnitSystem
     from femtools.core.validation import validate_model as validate_model
     from femtools.correlation.alignment import align_geometry as align_geometry
+    from femtools.correlation.dofmap import map_nearest_nodes as map_nearest_nodes
     from femtools.correlation.expansion import (
         expand_guyan as expand_guyan,
     )
@@ -283,6 +303,7 @@ if TYPE_CHECKING:
     from femtools.correlation.frf_corr import frac as frac
     from femtools.correlation.mac import comac as comac
     from femtools.correlation.mac import fmac as fmac
+    from femtools.correlation.mac import mac_contribution as mac_contribution
     from femtools.correlation.mac import mac_matrix as mac_matrix
     from femtools.correlation.mac import macx as macx
     from femtools.correlation.mac import nmd as nmd
@@ -290,6 +311,7 @@ if TYPE_CHECKING:
     from femtools.correlation.orthogonality import cross_orthogonality as cross_orthogonality
     from femtools.correlation.pairing import pair_modes as pair_modes
     from femtools.drivers.base import SolverDriver as SolverDriver
+    from femtools.drivers.nastran import NastranPunchDriver as NastranPunchDriver
     from femtools.dynamics.cms_free import (
         FreeCMSResult as FreeCMSResult,
     )
@@ -324,6 +346,8 @@ if TYPE_CHECKING:
         psd_response as psd_response,
     )
     from femtools.dynamics.residuals import residual_vectors as residual_vectors
+    from femtools.dynamics.superelement import dump_cms as dump_cms
+    from femtools.dynamics.superelement import load_cms as load_cms
     from femtools.dynamics.time_domain import time_history as time_history
     from femtools.fea.assemble import AssemblyResult as AssemblyResult
     from femtools.fea.assemble import assemble_km as assemble_km
@@ -340,6 +364,11 @@ if TYPE_CHECKING:
         solve_modes as solve_modes,
     )
     from femtools.fea.elements import available_elements as available_elements
+    from femtools.fea.mpc import ConstraintTransform as ConstraintTransform
+    from femtools.fea.mpc import apply_rbe2 as apply_rbe2
+    from femtools.fea.recover import StressResult as StressResult
+    from femtools.fea.recover import recover_strain as recover_strain
+    from femtools.fea.recover import recover_stress as recover_stress
     from femtools.fea.reduction import (
         ReductionResult as ReductionResult,
     )
@@ -357,9 +386,11 @@ if TYPE_CHECKING:
     from femtools.io.bdf import read_bdf as read_bdf
     from femtools.io.bdf import write_bdf as write_bdf
     from femtools.io.cdb import read_cdb as read_cdb
+    from femtools.io.cdb import write_cdb as write_cdb
     from femtools.io.inp import read_inp as read_inp
     from femtools.io.inp import write_inp as write_inp
     from femtools.io.kfile import read_k as read_k
+    from femtools.io.kfile import write_k as write_k
     from femtools.io.pch import read_pch as read_pch
     from femtools.io.pch import write_pch as write_pch
     from femtools.io.project import load_project as load_project
@@ -398,6 +429,8 @@ if TYPE_CHECKING:
         predict_rsm as predict_rsm,
     )
     from femtools.optimization.topology import topology_simp as topology_simp
+    from femtools.optimization.topometry import TopometryResult as TopometryResult
+    from femtools.optimization.topometry import topometry_optimize as topometry_optimize
     from femtools.pretest.efi import effective_independence as effective_independence
     from femtools.pretest.exciter import (
         driving_point_residues as driving_point_residues,
@@ -421,6 +454,9 @@ if TYPE_CHECKING:
     from femtools.script.engine import ScriptEngine as ScriptEngine
     from femtools.updating.force_id import identify_harmonic_forces as identify_harmonic_forces
     from femtools.updating.frf_updating import update_from_frf as update_from_frf
+    from femtools.updating.responses import (
+        static_displacement_response as static_displacement_response,
+    )
     from femtools.updating.selection import select_parameters as select_parameters
     from femtools.updating.sensitivity import sensitivity_matrix as sensitivity_matrix
     from femtools.updating.updater import UpdateResult as UpdateResult

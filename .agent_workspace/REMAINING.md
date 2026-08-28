@@ -4,6 +4,10 @@ Continue the original 1:1 functional equivalent of FEMtools. **Do not** implemen
 
 Round 7 freezes the APIs below. Existing `docs/CONTRACT_API.md` still holds; do not break it. Goldens (HEX8 98.6%, Rubin 0.028%, H1/H2=γ², 6 RBM on tilted shells) must stay.
 
+**Round 7 landed** on `cursor/femtools-cycle-c-d551` (PR #3). The names below import and are
+stable top-level exports. Round 8/9 still thicken workflows (examples, GUI, interface
+polish) without reopening N/A rows.
+
 ## Round 7 frozen APIs
 
 ```python

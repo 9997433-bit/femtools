@@ -1,9 +1,19 @@
 # Round 7 任务简报（Cycle C 第一轮）
 
-Base: `cursor/femtools-cycle-c-d551` from `main` (post R6, pytest 183/3).  
+Base: `cursor/femtools-cycle-c-d551` from `main` (post R6, pytest 183/3).
 Do not regress goldens. No DAQ, no OP2/RST/ODB.
 
 Frozen names: `.agent_workspace/REMAINING.md`.
+
+## Close-out
+
+All ten Round-7 agents delivered. Kernels and tests are merged on
+`cursor/femtools-cycle-c-d551`. Parent glue: top-level `_EXPORTS` (128 names),
+PRODUCT_MAP R7-wip → R7, `build_load_vector` reads `FEModel.Load.force`/`moment`
+via `as_dof_values()`. Goldens unchanged (HEX8 98.6%, Rubin 0.028%, H1/H2=γ²,
+tilted-shell 6 RBM). DAQ / OP2 / RST / ODB remain N/A.
+
+The per-agent briefs below are historical.
 
 ## R7-O1 — stress recovery + RBE2 (cloud)
 

@@ -37,6 +37,25 @@ def _apply_record(vector: np.ndarray, dof_map: DofMap, record: Any) -> bool:
         return False
     scale = as_float(get_any(record, ("scale", "magnitude", "mag", "f", "factor"), None), None)
 
+    expand = getattr(record, "as_dof_values", None)
+    if callable(expand):
+        factor = 1.0 if scale is None else float(scale)
+        for comp, value in expand():
+            _add(vector, dof_map, node_id, int(comp), factor * float(value))
+        return True
+
+    force = get_any(record, ("force", "fxyz"), None)
+    moment = get_any(record, ("moment", "mxyz"), None)
+    if force is not None or moment is not None:
+        factor = 1.0 if scale is None else float(scale)
+        if force is not None:
+            for i, value in enumerate(np.asarray(force, dtype=float).ravel()[:3]):
+                _add(vector, dof_map, node_id, i, factor * float(value))
+        if moment is not None:
+            for i, value in enumerate(np.asarray(moment, dtype=float).ravel()[:3]):
+                _add(vector, dof_map, node_id, 3 + i, factor * float(value))
+        return True
+
     vec = get_any(record, ("vector", "components", "xyz", "direction", "n", "comp_vector"), None)
     if vec is not None and not isinstance(vec, (str, int, float)):
         arr = np.asarray(vec, dtype=float).ravel()
@@ -86,7 +105,8 @@ def build_load_vector(
       such as ``"uz"``/``"fz"``;
     * ``{node_id: [fx, fy, fz, mx, my, mz]}`` (shorter sequences are padded);
     * a sequence of load records exposing ``node_id`` plus either
-      ``dof``/``value``, ``fx..mz`` or a ``vector``.
+      ``as_dof_values()`` (the ``FEModel.Load`` protocol), ``force``/``moment``
+      vectors, ``dof``/``value``, ``fx..mz`` or a ``vector``.
     """
     n = dof_map.n_dof
     if loads is None:
