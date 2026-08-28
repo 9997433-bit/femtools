@@ -5,6 +5,11 @@ response ``K^-1 F`` is stripped of the content already carried by the retained m
 leaving the *residual flexibility*. Mass-orthonormalising what remains and solving the
 small eigenproblem on that subspace yields residual vectors that can simply be appended
 to the modal basis (they behave like extra high-frequency modes).
+
+:func:`residual_flexibility` is the same quantity taken one step earlier and handed
+straight to :func:`~femtools.dynamics.frf.modal_frf` as its ``upper_residual``: the
+frequency-independent compliance of every mode the basis does not carry (Ewins, *Modal
+Testing*, §4; Craig & Kurdila, *Fundamentals of Structural Dynamics*, ch. 21).
 """
 
 from __future__ import annotations
@@ -17,7 +22,7 @@ import numpy as np
 from ._utils import TWO_PI, as_dense, factorized_solver, resolve_dofs, symmetrize
 from .modal import ModalModel, as_modal
 
-__all__ = ["ResidualVectorResult", "residual_vectors"]
+__all__ = ["ResidualVectorResult", "residual_flexibility", "residual_vectors"]
 
 
 @dataclass
@@ -196,6 +201,84 @@ def residual_vectors(
             "n_rigid": int(rigid.sum()),
         },
     )
+
+
+def residual_flexibility(
+    K: Any,
+    M: Any = None,
+    modal: Any = None,
+    force_dofs: Any = None,
+    *,
+    forces: Any = None,
+    outputs: Any = None,
+    inputs: Any = None,
+    tol: float = 1e-10,
+    rigid_tol_hz: float = 1e-4,
+) -> np.ndarray:
+    """Static (upper) residual flexibility block for a truncated modal FRF.
+
+    A modal sum over a truncated basis is missing the compliance of every mode it left
+    out. Well above their own resonances those modes respond statically, so what they are
+    missing is frequency-independent — the MacNeal / Ewins *upper residual*
+
+    ``UR = K^-1 F - sum_retained phi_r phi_r^T F / w_r^2``
+
+    which this function returns, restricted to the requested response and excitation
+    DOFs, ready to be added to the modal FRF::
+
+        UR = residual_flexibility(K, M, truncated, inputs=[drive], outputs=[tip])
+        H = modal_frf(truncated, [drive], [tip], f, damping, upper_residual=UR)
+
+    The numbers come from :func:`residual_vectors`, i.e. from
+    :attr:`ResidualVectorResult.residual_flexibility` selected by
+    :meth:`ResidualVectorResult.upper_residual`; on a free-free model the loads are
+    inertia-relieved and the static solve pins the rigid-body subspace the same way.
+    Pass an already-computed :class:`ResidualVectorResult` as the only positional
+    argument to select a block out of it without solving again.
+
+    Parameters
+    ----------
+    K, M:
+        Stiffness and mass matrices, shape ``(ndof, ndof)``. ``K`` may instead be a
+        :class:`ResidualVectorResult`, in which case ``M`` and ``modal`` are unused.
+    modal:
+        The *retained* basis — the same truncated model that will be passed to
+        :func:`~femtools.dynamics.frf.modal_frf`. Removing the content of a mode the
+        modal sum does carry is what makes the correction a residual rather than a
+        second copy of the static response.
+    force_dofs, forces:
+        Load directions, as in :func:`residual_vectors`. When neither is given,
+        ``inputs`` doubles as the set of unit load directions, so the call mirrors
+        :func:`~femtools.dynamics.frf.modal_frf`'s own ``inputs``/``outputs``.
+    outputs, inputs:
+        Response and excitation DOF selection, defaulting to every DOF and to every
+        computed load column. The result has shape ``(n_out, n_in)``, which is what
+        ``upper_residual`` must be for that block of FRFs.
+    tol, rigid_tol_hz:
+        Passed through to :func:`residual_vectors`.
+
+    Returns
+    -------
+    numpy.ndarray
+        Real ``(n_out, n_in)`` residual flexibility.
+    """
+    if isinstance(K, ResidualVectorResult):
+        if M is not None or modal is not None or force_dofs is not None or forces is not None:
+            raise TypeError(
+                "a ResidualVectorResult already carries K, M, the basis and the loads; "
+                "pass only outputs/inputs alongside it"
+            )
+        return K.upper_residual(outputs, inputs)
+    if M is None or modal is None:
+        raise TypeError("residual_flexibility(K, M, modal, ...) needs both M and modal")
+
+    cols: Any = inputs
+    if force_dofs is None and forces is None and inputs is not None:
+        force_dofs, cols = inputs, None
+    result = residual_vectors(
+        K, M, modal, force_dofs, forces=forces, tol=tol, rigid_tol_hz=rigid_tol_hz
+    )
+    return result.upper_residual(outputs, cols)
 
 
 def _shifted(K: np.ndarray, M: np.ndarray, phi_rb: np.ndarray) -> np.ndarray:

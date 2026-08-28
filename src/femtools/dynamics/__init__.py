@@ -8,7 +8,7 @@ Public entry points (see ``docs/CONTRACT_API.md``)::
     from femtools.dynamics.craig_bampton import craig_bampton
     from femtools.dynamics.cms_free import rubin, macneal, free_interface_assembly
     from femtools.dynamics.time_domain import time_history
-    from femtools.dynamics.residuals import residual_vectors
+    from femtools.dynamics.residuals import residual_flexibility, residual_vectors
     from femtools.dynamics.random import psd_response, dump_psd, load_psd
     from femtools.dynamics.superelement import dump_cms, load_cms
     from femtools.dynamics.frf import dump_frf, load_frf
@@ -81,7 +81,7 @@ from .mba import (
 )
 from .modal import ModalModel, as_modal
 from .random import PSDResult, dump_psd, load_psd, miles_rms, psd_response
-from .residuals import ResidualVectorResult, residual_vectors
+from .residuals import ResidualVectorResult, residual_flexibility, residual_vectors
 from .superelement import Superelement, dump_cms, load_cms
 from .synthetic import SyntheticTest, synthetic_frf, synthetic_time_response
 from .system import SystemMatrices, as_system
@@ -137,6 +137,7 @@ __all__ = [
     "modal_strain_energy",
     "psd_response",
     "rayleigh_coefficients",
+    "residual_flexibility",
     "residual_vectors",
     "retained_band",
     "rubin",
