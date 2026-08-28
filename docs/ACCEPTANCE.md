@@ -13,7 +13,8 @@ Round-4 kernels landed. The three Round-4 examples (`guyan_serep.py`, `cms_rubin
 `h1_ssi.py`) now run against `femtools.fea.reduction`, `femtools.dynamics.cms_free`,
 `femtools.mpe.frf_estimation` and `femtools.mpe.ssi` — see the Round-4 block below.
 Checked = measured passing with the quoted numbers; unchecked = not yet exercised by a
-test or example on this tree.
+test or example on this tree. The list below is kept current as later rounds close the
+debt — the per-round status blocks that follow record when each batch was measured.
 
 - [x] **1a** axial bar, 2-node discrete — `tests/test_golden_fea.py::test_two_node_axial_bar_frequency` green
 - [ ] **1b** axial bar N-element dispersion — no test/example yet
@@ -23,11 +24,17 @@ test or example on this tree.
       `tests/test_golden_fea.py::test_euler_bernoulli_cantilever_first_three_modes_per_bending_plane` green
 - [x] **3a** mass normalization — `examples/cantilever_beam.py`:
       $\max|\Phi^\top M \Phi - I|$ = **2.22e-16** (tol 1e-8); `tests/test_mass_normalization.py` green
-- [ ] **3b** stiffness orthogonality — not asserted separately yet
+- [x] **3b** stiffness orthogonality — `tests/test_round11_o5f_acceptance.py::test_modes_are_stiffness_orthogonal_to_the_eigenvalue_diagonal`:
+      16×BEAM2 cantilever, 6 modes, $\Phi^\top K \Phi$ vs $\Lambda$ diagonal rel dev
+      **3.2e-12**, off-diagonal **9.0e-15** of $\max\lambda$ (tol 1e-6)
 - [x] **4a–4c** MAC identities — `examples/mac_demo.py`: identity/scale-invariance dev
       **2.22e-16** (tol 1e-12/1e-10); `tests/test_mac.py` (2 tests) green; Hungarian pairing
       recovers a shuffled+perturbed set 5/5 (`tests/test_pairing.py` green)
-- [ ] **5** cantilever effective mass — no test/example yet
+- [x] **5** cantilever effective mass — `tests/test_round11_o5f_acceptance.py`
+      (2 tests): 20×BEAM2 cantilever transverse fractions **0.61308 / 0.18830 / 0.06473**
+      vs the §5 table 0.6131 / 0.1883 / 0.0647, max abs dev **3.2e-5** (tol 1e-2);
+      completeness $\sum_r L_r L_r^\top = R^\top M R$ on a complete free–free rod
+      mode set, rel dev **2.8e-16** (tol 1e-6)
 - [x] **6** updating: recover E (+10 %) — `examples/update_youngs.py`: relative E error
       **1.76e-10** in 3 iterations (tol 2e-2), converged, WLS/Gauss–Newton;
       `tests/test_updating.py` green
@@ -41,12 +48,29 @@ test or example on this tree.
       `tests/test_efi.py` green
 - [ ] **9** free–free beam rigid modes — no test/example yet
 - [ ] **10** Craig–Bampton exactness — no test/example yet
-- [ ] **11** static bar/cantilever tip — no test/example yet
+- [x] **11** static bar/cantilever tip — `examples/update_static.py`: the measured tip
+      deflection of the 8×BEAM2 truth cantilever matches $F L^3 / 3EI$ to rel dev
+      **2.31e-13** (re-run 2026-08-28, tol 1e-9 in the example) before any updating
+      happens; both halves are also asserted at 1e-12 in
+      `tests/test_round11_o5f_acceptance.py` — BAR2 chain tip vs $FL/EA$ **0.0**
+      (exact), BEAM2 tip vs $FL^3/3EI$ **1.8e-13**
 - [ ] **12** Newmark SDOF period error — no test/example yet
-- [ ] **13** force identification — no test/example yet
+- [x] **13** force identification — `tests/test_round11_o5f_acceptance.py::test_force_identification_is_exact_on_noiseless_two_dof_data`:
+      noiseless 2-DOF chain, 33 lines, seeded complex $F_{true}$, $X = H F_{true}$ →
+      $\hat F = H^{+} X$ rel error **1.1e-15** (tol 1e-8)
 - [x] **14** LHS stratification — `tests/test_doe.py` (bounded, stratified, seeded) green
-- [ ] **15** RBPE synthetic rigid body — no test/example yet
-- [ ] **16** FDD synthetic 2-DOF — no test/example yet
+- [x] **15** RBPE synthetic rigid body — `tests/test_round11_o5f_acceptance.py`
+      (2 tests): the §8 block ($m = 10$ kg, $c = (0.1, 0.05, 0.2)$ m,
+      $J = \mathrm{diag}(0.5, 0.8, 1.0)$ kg·m²) on 6 soft springs, 24 sensors /
+      6 drives, analytic accelerance over 6–15 Hz → mass rel **1.2e-15**, CoG max abs
+      **2.8e-16**, inertia max abs **6.1e-15** (tol 1e-8), $J_G$ SPD and the triangle
+      inequalities hold; ignoring `mount_k` on the same data reads **15.99** kg, which
+      is the apparent negative mass $K/\omega^2$ the correction removes
+- [x] **16** FDD synthetic 2-DOF — `tests/test_round11_o5f_acceptance.py::test_fdd_recovers_a_synthetic_two_dof_record`:
+      seeded white-noise 2-DOF record (5 / 13 Hz, ζ = 1 %, 6 channels, 256 Hz, 600 s),
+      Welch `nperseg` 2048 → $df$ 0.125 Hz, peaks **4.99927 / 12.97986** Hz
+      ($|\Delta f|$ **7.3e-4** / **2.0e-2** Hz ≤ $df$), shape MAC **0.99999** / **0.99984**
+      (tol > 0.99)
 - [x] **SIMP** (small-mesh smoke level only) — `tests/test_topology.py` green; the full
       60×20 MBB criteria of §8 remain unmeasured
 - [x] **HEX8 anti-locking** (`fea.md` §2.5/§8, not in the master table) —
@@ -320,6 +344,17 @@ Consequence for examples: Round 10 adds `examples/tet10_patch.py` (TET10 patch +
 (2026-08-28). Both new examples `raise SystemExit(0)` with a clear message when their
 kernels are absent; the existing 13 examples are unchanged.
 
+### Round-11 status (2026-08-28 — acceptance test debt, R11-O5F)
+
+No new kernel and no new frozen name: `tests/test_round11_o5f_acceptance.py` closes the
+six master-table rows whose kernels were merged in Round 1 but had never been checked
+numerically — **3b**, **5**, **11**, **13**, **15** and **16**, whose measured numbers
+are quoted in the status list at the top of this file. `tests/`: **599 passed /
+3 skipped**. Examples: **15/15 PASS**. Boundary probes: **39/39 pass**. `_EXPORTS`
+stays at **149**, and the HEX8 0.9855 / Rubin / H1-H2 / 6-RBM / 10 %-E goldens are
+untouched. Rows **1b**, **1c**, **7a**, **9**, **10**, **12** and the full 60×20 MBB
+SIMP criteria remain open test debt.
+
 ## 0. Master table
 
 | # | Case | Exact reference | Metric | Tol |
@@ -369,8 +404,7 @@ kernels are absent; the existing 13 examples are unchanged.
 Rows 21–28 are Round-6 contracts; as of the 2026-08-28 R7-F3 re-audit their kernels all
 import on this tree and every row is **measured passing** (status block above) —
 constructions in §10. Rows 29–33 are Round-10 contracts, parent-measured on the
-merged Cycle-D tree (status block above).
-status block until the parent measures the merged tree — constructions in §12.
+merged Cycle-D tree (status block above) — constructions in §12.
 
 ## 1. Axial bar
 
