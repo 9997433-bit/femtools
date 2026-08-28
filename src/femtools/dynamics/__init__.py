@@ -10,6 +10,7 @@ Public entry points (see ``docs/CONTRACT_API.md``)::
     from femtools.dynamics.time_domain import time_history
     from femtools.dynamics.residuals import residual_vectors
     from femtools.dynamics.random import psd_response
+    from femtools.dynamics.superelement import dump_cms, load_cms
     from femtools.dynamics.frf import verify_modal_vs_direct, retained_band
     from femtools.dynamics.energy import modal_strain_energy, modal_kinetic_energy
 
@@ -78,6 +79,7 @@ from .mba import (
 from .modal import ModalModel, as_modal
 from .random import PSDResult, miles_rms, psd_response
 from .residuals import ResidualVectorResult, residual_vectors
+from .superelement import Superelement, dump_cms, load_cms
 from .synthetic import SyntheticTest, synthetic_frf, synthetic_time_response
 from .system import SystemMatrices, as_system
 from .time_domain import TimeHistoryResult, time_history
@@ -104,6 +106,7 @@ __all__ = [
     "ResidualVectorResult",
     "SpringModification",
     "StructuralDamping",
+    "Superelement",
     "SyntheticTest",
     "SystemMatrices",
     "TimeHistoryResult",
@@ -113,10 +116,12 @@ __all__ = [
     "as_system",
     "craig_bampton",
     "direct_frf",
+    "dump_cms",
     "element_modal_energy",
     "free_interface_assembly",
     "frf_based_assembly",
     "harmonic_response",
+    "load_cms",
     "macneal",
     "miles_rms",
     "modal_based_assembly",

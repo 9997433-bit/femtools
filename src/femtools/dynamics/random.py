@@ -25,6 +25,33 @@ trapezoidal integral converges as ``df^2``: on a 5 %-damped SDOF, 8 k uniform li
 100 ``f_n`` leave 6e-4 relative error in the RMS while 40 k geometrically spaced lines
 reach 1e-8. Log spacing is the cheap fix. :func:`miles_rms` is the closed-form SDOF answer
 to check a single-mode case against.
+
+Support (base) acceleration
+---------------------------
+A random-vibration test specification is almost never a force PSD: it is the acceleration
+of the shaker head, and the structure is bolted to it. Writing the motion of the structure
+as ``u_abs = r x_g + u`` — the rigid ride along with the support plus the deformation
+relative to it — turns the support motion into an equivalent force on the *relative*
+coordinates,
+
+    M u'' + C u' + K u = -M r a_g(t),
+
+so nothing new is needed: the excitation is the ordinary force PSD of ``-L a_g`` with
+``L = (M r)`` restricted to the excited DOFs, and ``psd_response(..., base_accel=S_aa)``
+assembles exactly that. What comes out is then the **relative** response (deformation, and
+so stress) unless ``base_absolute=True`` adds the support motion back, which is what an
+accelerometer on the structure would read.
+
+The SDOF closed forms both sides of that switch, for a flat one-sided ``S_a`` and a
+mass-normalised mode, are
+
+    sigma_rel = sqrt(S_a / (8 zeta omega_n^3))      (relative displacement)
+    sigma_abs = sqrt(pi f_n S_a / (4 zeta)) * sqrt(1 + 4 zeta^2)   (absolute acceleration)
+
+The first is :func:`miles_rms` evaluated on the acceleration level; the second is Miles'
+number ``sqrt(pi/2 f_n Q S_a)`` times the ``sqrt(1 + 4 zeta^2)`` that the damper's own
+force contributes and that the usual quotation of the equation drops (0.08 % at 2 %
+damping, 2 % at 10 %).
 """
 
 from __future__ import annotations
@@ -183,8 +210,8 @@ class PSDResult:
         return int(np.argmin(np.abs(self.freq_hz - float(freq_hz))))
 
 
-def _as_force_psd(spec: Any, n_in: int, n_freq: int) -> np.ndarray:
-    """Broadcast a force-PSD specification to ``(n_in, n_in, n_freq)`` complex.
+def _as_force_psd(spec: Any, n_in: int, n_freq: int, name: str = "force_psd") -> np.ndarray:
+    """Broadcast a PSD specification to ``(n_in, n_in, n_freq)`` complex.
 
     Accepted forms, in the order they are tried:
 
@@ -196,11 +223,13 @@ def _as_force_psd(spec: Any, n_in: int, n_freq: int) -> np.ndarray:
     * ``(n_in, n_in, n_freq)`` — the general correlated case.
 
     With ``n_in == n_freq`` the shapes collide; the per-frequency reading wins, so pass
-    the 3-D form when that is not what you meant.
+    the 3-D form when that is not what you meant. ``name`` only labels the diagnostics;
+    :func:`psd_response` reuses this for ``base_accel``, whose columns are support
+    directions rather than input DOFs.
     """
     arr = np.asarray(spec)
     if arr.dtype.kind not in "fiuc":
-        raise TypeError(f"force_psd must be numeric, got dtype {arr.dtype}")
+        raise TypeError(f"{name} must be numeric, got dtype {arr.dtype}")
     arr = arr.astype(complex, copy=False)
     eye = np.eye(n_in)
 
@@ -213,7 +242,7 @@ def _as_force_psd(spec: Any, n_in: int, n_freq: int) -> np.ndarray:
             S = (np.diag(arr))[:, :, None] * np.ones(n_freq)
         else:
             raise ValueError(
-                f"1-D force_psd must have {n_freq} entries (one per frequency line) or "
+                f"1-D {name} must have {n_freq} entries (one per frequency line) or "
                 f"{n_in} (one per input), got {arr.size}"
             )
     elif arr.ndim == 2:
@@ -225,49 +254,153 @@ def _as_force_psd(spec: Any, n_in: int, n_freq: int) -> np.ndarray:
             S = arr[:, :, None] * np.ones(n_freq)
         else:
             raise ValueError(
-                f"2-D force_psd must be {(n_in, n_freq)} (auto-spectra) or "
+                f"2-D {name} must be {(n_in, n_freq)} (auto-spectra) or "
                 f"{(n_in, n_in)} (constant cross-spectra), got {arr.shape}"
             )
     elif arr.ndim == 3:
         if arr.shape[:2] != (n_in, n_in) or arr.shape[2] not in (1, n_freq):
-            raise ValueError(
-                f"3-D force_psd must be {(n_in, n_in, n_freq)}, got {arr.shape}"
-            )
+            raise ValueError(f"3-D {name} must be {(n_in, n_in, n_freq)}, got {arr.shape}")
         S = arr * np.ones(n_freq) if arr.shape[2] == 1 else arr
     else:
-        raise ValueError(f"force_psd must be at most 3-D, got shape {arr.shape}")
+        raise ValueError(f"{name} must be at most 3-D, got shape {arr.shape}")
 
     S = np.ascontiguousarray(S, dtype=complex)
     diag = np.einsum("iif->if", S)
     if np.any(np.abs(diag.imag) > 1e-9 * (np.abs(diag).max() or 1.0)):
-        raise ValueError("the auto-spectra on the diagonal of force_psd must be real")
+        raise ValueError(f"the auto-spectra on the diagonal of {name} must be real")
     if np.any(diag.real < 0.0):
-        raise ValueError("force_psd has a negative auto-spectrum; a PSD cannot be negative")
+        raise ValueError(f"{name} has a negative auto-spectrum; a PSD cannot be negative")
     if n_in > 1:
         asym = np.abs(S - np.conj(np.swapaxes(S, 0, 1))).max()
         if asym > 1e-8 * (np.abs(S).max() or 1.0):
-            raise ValueError(
-                "force_psd must be Hermitian at every line: S_jk = conj(S_kj)"
-            )
+            raise ValueError(f"{name} must be Hermitian at every line: S_jk = conj(S_kj)")
     return S
+
+
+def _as_base_matrix(
+    value: Any, n_rows: int, name: str, n_dir: int | None = None
+) -> np.ndarray:
+    """Broadcast a participation / influence specification to ``(n_rows, n_dir)`` real.
+
+    A scalar fills the column, a ``(n_rows,)`` vector *is* the single column, and a 2-D
+    array is taken as-is with one column per support direction.
+    """
+    arr = np.asarray(value, dtype=float)
+    if arr.ndim == 0:
+        return np.full((n_rows, 1 if n_dir is None else n_dir), float(arr))
+    if arr.ndim == 1:
+        if arr.size != n_rows:
+            raise ValueError(
+                f"a 1-D {name} describes a single support direction, so it needs one "
+                f"entry per DOF ({n_rows} here), got {arr.size}"
+            )
+        return arr.reshape(n_rows, 1)
+    if arr.ndim == 2:
+        if arr.shape[0] != n_rows:
+            raise ValueError(f"{name} must have {n_rows} rows, got shape {arr.shape}")
+        if n_dir is not None and arr.shape[1] != n_dir:
+            raise ValueError(
+                f"{name} has {arr.shape[1]} support directions but the excitation has "
+                f"{n_dir}"
+            )
+        return arr
+    raise ValueError(f"{name} must be at most 2-D, got shape {arr.shape}")
+
+
+def _base_ride_scale(response: str, omega: np.ndarray) -> np.ndarray:
+    """Multiplier turning the support *acceleration* into the requested response kind.
+
+    The support rides at ``a_g``; its velocity is ``a_g / (i w)`` and its displacement
+    ``-a_g / w^2``. Both are singular at ``f = 0``, where a stationary acceleration
+    spectrum carries no information about the displacement of the support at all, so the
+    DC line is refused rather than returned as an infinity.
+    """
+    if response == "accelerance":
+        return np.ones(omega.shape, dtype=complex)
+    if np.any(omega <= 0.0):
+        raise ValueError(
+            f"the absolute {response} response needs the support displacement or "
+            "velocity, which is the acceleration divided by w^2 or i w and is unbounded "
+            "at f = 0; drop the DC line, ask for response='accelerance', or leave "
+            "base_absolute off and read the relative response"
+        )
+    if response == "mobility":
+        return 1.0 / (1j * omega)
+    return -1.0 / omega**2 + 0j
+
+
+def _base_transfer(
+    H: np.ndarray,  # noqa: N803
+    response: str,
+    omega: np.ndarray,
+    base_accel: Any,
+    base_participation: Any,
+    base_influence: Any,
+    base_absolute: bool,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Support-acceleration transfer ``G``, its input spectrum and the provenance meta.
+
+    The support motion enters the relative coordinates as the equivalent force
+    ``-L a_g``, so ``G_rel = -H L``; the absolute response adds the rigid ride ``r a_g``,
+    scaled from acceleration to whatever ``response`` asks for. On an SDOF with
+    ``L = r = 1`` and a mass-normalised mode this reproduces the textbook
+    transmissibility ``(w_n^2 + 2 i zeta w_n w) / (w_n^2 - w^2 + 2 i zeta w_n w)``
+    exactly, which is the check the closed forms in the module docstring rest on.
+    """
+    n_out, n_in, n_freq = H.shape
+    L = _as_base_matrix(
+        1.0 if base_participation is None else base_participation,
+        n_in,
+        "base_participation",
+    )
+    n_dir = int(L.shape[1])
+    S_aa = _as_force_psd(base_accel, n_dir, n_freq, "base_accel")
+
+    G = -np.einsum("oif,id->odf", H, L.astype(complex), optimize=True)
+    if base_absolute:
+        R = _as_base_matrix(  # noqa: N806
+            1.0 if base_influence is None else base_influence,
+            n_out,
+            "base_influence",
+            n_dir,
+        )
+        ride = _base_ride_scale(response, omega)
+        G = G + R.astype(complex)[:, :, None] * ride[None, None, :]
+
+    return (
+        np.ascontiguousarray(G, dtype=complex),
+        S_aa,
+        {
+            "excitation": "base_accel",
+            "base_frame": "absolute" if base_absolute else "relative",
+            "n_base_dir": n_dir,
+            "base_participation": L.copy(),
+        },
+    )
 
 
 def psd_response(
     modal: Any,
-    force_psd: Any,
+    force_psd: Any = None,
     freq_hz: Any = None,
     damping: Any = None,
     *,
+    base_accel: Any = None,
+    base_participation: Any = None,
+    base_influence: Any = None,
+    base_absolute: bool = False,
     inputs: Any = None,
     outputs: Any = None,
     response: str = "receptance",
     cross: bool = False,
 ) -> PSDResult:
-    """Stationary response PSD and RMS of a modal model under a force PSD.
+    """Stationary response PSD and RMS of a modal model under a force or base-motion PSD.
 
-    ``S_uu(f) = H(f) S_ff(f) H(f)^H`` with ``H`` synthesised by
-    :func:`~femtools.dynamics.frf.modal_frf`, followed by
-    ``rms_o = sqrt(integral S_oo df)`` over the supplied band.
+    ``S_uu(f) = G(f) S(f) G(f)^H`` followed by ``rms_o = sqrt(integral S_oo df)`` over the
+    supplied band. For a force PSD ``G`` is the FRF ``H`` synthesised by
+    :func:`~femtools.dynamics.frf.modal_frf`; for a support acceleration it is the
+    base-to-response transfer built from the same ``H`` (see below and the module
+    docstring). Exactly one of ``force_psd`` and ``base_accel`` is given.
 
     Parameters
     ----------
@@ -282,6 +415,31 @@ def psd_response(
         auto-spectra — all four uncorrelated — a constant ``(n_in, n_in)`` cross-spectral
         matrix, or the general ``(n_in, n_in, n_freq)`` correlated case. Where the shapes
         collide (``n_in == n_freq``) the per-frequency reading wins.
+    base_accel:
+        One-sided acceleration spectral density of the *support*, in ``accel^2/Hz``, in
+        place of ``force_psd``. The same six shapes are accepted, but their leading
+        dimension counts **support directions** (``n_dir``, the number of columns of
+        ``base_participation``, one by default), not input DOFs — a single rigid support
+        drives every excited DOF perfectly coherently, which the rank-one force spectrum
+        ``L S_aa L^H`` expresses and a per-input reading would not.
+    base_participation:
+        ``L``, the load-participation block ``(M r)`` restricted to the ``inputs`` DOFs,
+        shape ``(n_in,)`` or ``(n_in, n_dir)``; a scalar fills it. It converts a support
+        acceleration into the equivalent force ``-L a_g``, so for a lumped-mass model it
+        is simply the mass at each excited DOF in each support direction. Defaults to
+        ones, which is the SDOF / unit-modal-mass case and is what the closed forms in the
+        module docstring assume.
+    base_influence:
+        ``r`` restricted to the response DOFs, shape ``(n_out,)`` or ``(n_out, n_dir)``:
+        how far each output moves when the support moves one unit and the structure does
+        not deform. Only used when ``base_absolute`` is set; defaults to ones, i.e. every
+        output rides along with the support one for one.
+    base_absolute:
+        Return the *absolute* response (the support motion plus the deformation, which is
+        what an accelerometer on the structure reads) instead of the relative one. Off by
+        default, because the relative motion is what carries the stress. With
+        ``response="receptance"`` or ``"mobility"`` this needs the support displacement or
+        velocity and therefore refuses a line at ``f = 0``.
     freq_hz:
         Frequency lines in Hz. They set both the synthesis grid and the integration
         band, so they must resolve the resonances (see the module docstring).
@@ -301,7 +459,30 @@ def psd_response(
     Returns
     -------
     PSDResult
+        ``meta["excitation"]`` says which path was taken and, for a support acceleration,
+        ``meta["base_frame"]`` whether the spectra are relative or absolute.
     """
+    if (force_psd is None) == (base_accel is None):
+        raise ValueError(
+            "exactly one of force_psd and base_accel is required; they are two "
+            "descriptions of the excitation, not two excitations"
+        )
+    if base_accel is None:
+        unused = [
+            name
+            for name, value in (
+                ("base_participation", base_participation),
+                ("base_influence", base_influence),
+                ("base_absolute", base_absolute or None),
+            )
+            if value is not None
+        ]
+        if unused:
+            raise ValueError(
+                f"{', '.join(unused)} only applies to a base_accel excitation; a force "
+                "PSD has no support motion to ride on"
+            )
+
     if isinstance(modal, FRFResult):
         clashes = [
             name
@@ -329,17 +510,31 @@ def psd_response(
     H = frf.H
     n_out, n_in, n_freq = H.shape
     f = frf.freq_hz
-    S_ff = _as_force_psd(force_psd, n_in, n_freq)
 
-    # H S_ff, then close it with H^H — once for the full matrix, contracted for the
+    if base_accel is None:
+        G = H
+        S_ee = _as_force_psd(force_psd, n_in, n_freq)
+        meta_excitation: dict[str, Any] = {"excitation": "force"}
+    else:
+        G, S_ee, meta_excitation = _base_transfer(
+            H,
+            frf.response,
+            TWO_PI * f,
+            base_accel,
+            base_participation,
+            base_influence,
+            base_absolute,
+        )
+
+    # G S, then close it with G^H — once for the full matrix, contracted for the
     # diagonal so that the common case never allocates (n_out, n_out, n_freq).
-    HS = np.einsum("ojf,jkf->okf", H, S_ff, optimize=True)
+    GS = np.einsum("ojf,jkf->okf", G, S_ee, optimize=True)
     if cross:
-        S_uu = np.einsum("okf,pkf->opf", HS, np.conj(H), optimize=True)
+        S_uu = np.einsum("okf,pkf->opf", GS, np.conj(G), optimize=True)
         auto = np.real(np.einsum("oof->of", S_uu))
     else:
         S_uu = None
-        auto = np.real(np.einsum("okf,okf->of", HS, np.conj(H), optimize=True))
+        auto = np.real(np.einsum("okf,okf->of", GS, np.conj(G), optimize=True))
     auto = np.clip(auto, 0.0, None)  # round-off can push a near-zero line negative
 
     rms = np.sqrt(np.clip(_integrate(auto, f), 0.0, None))
@@ -350,6 +545,7 @@ def psd_response(
         "band_hz": (float(f[0]), float(f[-1])) if f.size else (0.0, 0.0),
         "frf_method": frf.method,
         "frf_meta": dict(frf.meta),
+        **meta_excitation,
     }
     if f.size < 2:
         meta["warning"] = "a single frequency line carries no bandwidth, so rms is zero"
