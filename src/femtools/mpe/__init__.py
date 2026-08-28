@@ -5,6 +5,7 @@ Public entry points (see ``docs/CONTRACT_API.md``)::
     from femtools.mpe.p_lscf import poly_lscf     # PolyMAX-class, FRF based
     from femtools.mpe.fdd import fdd, efdd        # output-only, frequency domain
     from femtools.mpe.lsce import lsce            # time domain (IRF based)
+    from femtools.mpe.era import era              # time domain (Markov/IRF, realization)
     from femtools.mpe.ssi import ssi_cov, ssi_data  # output-only, subspace
     from femtools.mpe.frf_estimation import estimate_h1, estimate_h2, coherence
 """
@@ -21,6 +22,7 @@ from .common import (
     stabilization_diagram,
     synthesize_frf,
 )
+from .era import era, era_realization, markov_hankel
 from .fdd import cross_spectral_density, efdd, fdd
 from .frf_estimation import (
     FRFEstimate,
@@ -45,6 +47,9 @@ __all__ = [
     "cross_spectral_density",
     "lsce",
     "irf_from_frf",
+    "era",
+    "era_realization",
+    "markov_hankel",
     "ssi_cov",
     "ssi_data",
     "output_covariances",
