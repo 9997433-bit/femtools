@@ -21,7 +21,10 @@ solved model — ``ModalResult.dof_map``, ``AssemblyResult.dof_map``,
 Which node of the model a test channel belongs to is a *geometric* question,
 answered before any of the above: :func:`map_nearest_nodes` matches a digitized
 test point cloud against the mesh and returns the FE node id nearest to each
-measurement point together with its distance.
+measurement point together with its distance.  :func:`mapped_mode_matrix` then
+does the bookkeeping those ids exist for — it pulls the FE mode rows of the
+matched nodes, in the order of the measurement points, so the analysis shapes
+land on the test grid and can go straight into :func:`~femtools.correlation.mac_matrix`.
 """
 
 from __future__ import annotations
@@ -34,7 +37,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from ._assignment import linear_sum_assignment
-from ._linalg import coordinate_table, mode_source, row_index
+from ._linalg import as_mode_matrix, coordinate_table, mode_source, row_index
 
 __all__ = [
     "DOFMap",
@@ -45,6 +48,7 @@ __all__ = [
     "parse_dof_label",
     "match_dofs",
     "map_nearest_nodes",
+    "mapped_mode_matrix",
     "align_modes",
     "restrict",
 ]
@@ -959,3 +963,206 @@ def map_nearest_nodes(
         matched &= dist <= tol
     out = np.where(matched, ids[np.where(pos >= 0, pos, 0)], -1).astype(np.int64)
     return NearestNodeMap(out, dist.astype(float, copy=False))
+
+
+# -- mode shapes on the mapped node order ---------------------------------
+
+#: Policies for a test point that :func:`map_nearest_nodes` left unmatched.
+_MISSING_POLICIES = ("raise", "zero", "drop")
+
+
+def _mapped_components(
+    dofs: Iterable[Any] | None, dof_map: DOFMap | None, dofs_per_node: int
+) -> tuple[NDArray[np.int8], NDArray[np.float64]]:
+    """``(components, signs)`` pulled at every mapped node, in the given order."""
+    if dofs is None:
+        if dof_map is None:
+            comps = np.arange(1, dofs_per_node + 1, dtype=np.int8)
+        else:
+            comps = np.unique(dof_map.components).astype(np.int8)
+        return comps, np.ones(comps.size)
+    comps, signs = parse_components(dofs)
+    if comps.size == 0:
+        raise ValueError("dofs is empty: no component to pull at each node")
+    seen, counts = np.unique(comps, return_counts=True)
+    if seen.size != comps.size:
+        dup = int(seen[counts > 1][0])
+        raise ValueError(f"dofs asks for component {COMPONENT_NAMES[dup - 1]} twice")
+    return comps, signs
+
+
+def _mapped_rows(
+    dof_map: DOFMap, nodes: NDArray[np.int64], comps: NDArray[np.int8]
+) -> NDArray[np.intp]:
+    """Rows of ``dof_map`` holding ``comps`` at each of ``nodes``, node-major.
+
+    :meth:`DOFMap.common` cannot serve here: a node repeated in ``nodes`` is
+    legitimate — two measurement points may share their nearest FE node when
+    the match is not one-to-one — and a DOF that is absent has to be named
+    rather than dropped.
+    """
+    want_nodes = np.repeat(nodes, comps.size)
+    want_comps = np.tile(comps, nodes.size)
+    have = _codes(dof_map.nodes, dof_map.components)
+    want = _codes(want_nodes, want_comps)
+    if have is None or want is None:  # pragma: no cover - astronomic node ids
+        lookup = dof_map._index()
+        keys = zip(want_nodes.tolist(), want_comps.tolist(), strict=True)
+        found = [(lookup.get(key, -1), key) for key in keys]
+        for row, key in found:
+            if row < 0:
+                raise ValueError(f"the FE DOF map has no DOF {key}")
+        return np.asarray([row for row, _ in found], dtype=np.intp)
+    order = np.argsort(have, kind="stable")
+    pos = np.clip(np.searchsorted(have[order], want), 0, have.size - 1)
+    rows = order[pos]
+    bad = np.flatnonzero(have[rows] != want)
+    if bad.size:
+        node, comp = int(want_nodes[bad[0]]), int(want_comps[bad[0]])
+        raise ValueError(
+            f"the FE DOF map has no DOF ({node}, {COMPONENT_NAMES[comp - 1]}); it is "
+            f"missing a requested component at {np.unique(want_nodes[bad]).size} of "
+            f"the {nodes.size} mapped nodes"
+        )
+    return rows.astype(np.intp)
+
+
+def _positional_rows(
+    nodes: NDArray[np.int64], comps: NDArray[np.int8], dofs_per_node: int, n_row: int
+) -> NDArray[np.intp]:
+    """Rows of a node-major matrix with ``dofs_per_node`` rows per node."""
+    top = int(comps.max())
+    if top > dofs_per_node:
+        raise ValueError(
+            f"component {COMPONENT_NAMES[top - 1]} is beyond the {dofs_per_node} "
+            f"DOFs per node of the mode matrix"
+        )
+    rows = (nodes[:, None] * dofs_per_node + (comps[None, :] - 1)).reshape(-1)
+    if int(rows.max()) >= n_row:
+        raise ValueError(
+            f"node id {int(nodes.max())} needs row {int(rows.max())} of a mode matrix "
+            f"with {n_row} rows; without a DOF map the ids are read as 0-based node "
+            f"positions with {dofs_per_node} DOFs per node, so pass dof_map= (or a "
+            f"ModalResult, which carries its own) when they are model node ids"
+        )
+    return rows.astype(np.intp)
+
+
+def mapped_mode_matrix(
+    modes: Any,
+    fe_ids: Any,
+    *,
+    dof_map: Any = None,
+    dofs: Iterable[Any] | None = None,
+    dofs_per_node: int | None = None,
+    missing: str = "raise",
+) -> NDArray[Any]:
+    """Analysis mode shapes gathered on the nodes matched to the test points.
+
+    :func:`map_nearest_nodes` answers *which* FE node each measurement point
+    sits on; this performs the gather that answer is for.  For every id it
+    returns, the rows of ``modes`` belonging to that node are copied into the
+    output in the order of the test points, so the result is a
+    ``(n_point * n_component, n_mode)`` matrix on the *test* grid.  A mode set
+    written on the model can then be compared with one written on the test
+    geometry without either side being renumbered::
+
+        fit = align_geometry(test_xyz, model)        # test frame -> FE frame
+        ids, dist = map_nearest_nodes(fit.apply(test_xyz), model)
+        phi_a = mapped_mode_matrix(modal, ids, dofs=("x", "y", "z"))
+        mac = mac_matrix(phi_test, phi_a)
+
+    Parameters
+    ----------
+    modes:
+        FE mode shapes ``(n_dof, n_mode)`` over the model's own DOF ordering,
+        or a modal result carrying them (its ``dof_map`` is then used).
+    fe_ids:
+        The node ids the test points were matched to: a
+        :class:`NearestNodeMap`, or the ``ids`` array itself.  A ``-1``
+        (unmatched, or beyond ``tol``) is handled per ``missing``.
+    dof_map:
+        DOF ordering of ``modes`` — anything :meth:`DOFMap.from_mapping`
+        understands, including the kernel DOF map of a solved model.  When it
+        is omitted and ``modes`` carries none, the ids are read as 0-based
+        node positions of a node-major matrix instead.
+    dofs:
+        Components to pull at each node, in output order; ints ``1..6`` or
+        labels, and a leading ``-`` flips that row's sign the way a reversed
+        sensor does.  The default takes all six, or the components the DOF map
+        actually holds.
+    dofs_per_node:
+        Row block size of the positional fallback (default 6).  Rejected
+        together with ``dof_map``, which already fixes the layout; to pull
+        fewer components from a 6-DOF model use ``dofs``.
+    missing:
+        What to do with an unmatched test point: ``'raise'`` (default),
+        ``'zero'`` to keep its rows as zeros, or ``'drop'`` to leave them out
+        — ``NearestNodeMap.matched`` then selects the surviving test rows.
+
+    Returns
+    -------
+    ndarray
+        ``(n_kept * n_component, n_mode)``, node-major: all components of the
+        first test point, then of the second, and so on.  The dtype of
+        ``modes`` is preserved, so complex modes stay complex.
+
+    Notes
+    -----
+    Only rows are gathered; no value is interpolated and no shape is scaled,
+    so a mapped mode is the FE mode itself and correlating a model against a
+    relabelled copy of itself returns an exact unit MAC diagonal.  Whether the
+    gather is *meaningful* is what ``NearestNodeMap.distance`` reports: a
+    point sitting 10 mm from its node gets that node's motion regardless.
+    """
+    if missing not in _MISSING_POLICIES:
+        raise ValueError(f"unknown missing policy {missing!r}, expected one of {_MISSING_POLICIES}")
+
+    phi = as_mode_matrix(modes, "modes")
+    if phi.shape[0] == 0:
+        raise ValueError("modes has no rows to gather from")
+    source = dof_map
+    if source is None and not isinstance(modes, (np.ndarray, list, tuple)):
+        source = getattr(modes, "dof_map", None)
+    if isroutine(source):  # ``FEModel.dof_map`` is a method, not an attribute
+        source = source()
+    if source is not None and dofs_per_node is not None:
+        raise ValueError(
+            "dofs_per_node describes the row layout used when no DOF map is given; "
+            "drop it, or select components with dofs= instead"
+        )
+    dmap = DOFMap.from_mapping(source) if source is not None else None
+    if dmap is not None and len(dmap) != phi.shape[0]:
+        raise ValueError(f"modes has {phi.shape[0]} rows but the DOF map has {len(dmap)} DOF")
+
+    per_node = 6 if dofs_per_node is None else int(dofs_per_node)
+    if dmap is None and not 1 <= per_node <= 6:
+        raise ValueError(f"dofs_per_node must be within 1..6, got {per_node}")
+    comps, signs = _mapped_components(dofs, dmap, per_node)
+
+    ids = _node_array(getattr(fe_ids, "ids", fe_ids))
+    keep = ids >= 0
+    if missing == "raise" and not keep.all():
+        lost = np.flatnonzero(~keep)
+        raise ValueError(
+            f"{lost.size} of {ids.size} test points have no FE node (first at "
+            f"position {int(lost[0])}); raise tol, or pass missing='zero' / 'drop'"
+        )
+    kept = ids[keep]
+    n_point = kept.size if missing == "drop" else ids.size
+    if kept.size == 0:
+        return np.zeros((n_point * comps.size, phi.shape[1]), dtype=phi.dtype)
+
+    rows = (
+        _mapped_rows(dmap, kept, comps)
+        if dmap is not None
+        else _positional_rows(kept, comps, per_node, phi.shape[0])
+    )
+    gathered = phi[rows, :]
+    if not np.all(signs == 1.0):
+        gathered = gathered * np.tile(signs, kept.size)[:, None]
+    if missing == "drop" or keep.all():
+        return gathered
+    out = np.zeros((ids.size * comps.size, phi.shape[1]), dtype=gathered.dtype)
+    out[np.repeat(keep, comps.size), :] = gathered
+    return out

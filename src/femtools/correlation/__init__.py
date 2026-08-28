@@ -11,7 +11,10 @@ Typical workflow::
 Two geometric helpers sit on either side of it: :func:`map_nearest_nodes`
 attaches digitized measurement points to the nodes of the mesh before the DOF
 maps can be written down, and :func:`mac_contribution` splits a single MAC
-value back into one signed number per DOF once it comes out too low.
+value back into one signed number per DOF once it comes out too low.  When the
+test side is a bare point cloud rather than a labelled DOF map,
+:func:`mapped_mode_matrix` replaces :func:`align_modes`: it gathers the FE mode
+rows of the matched nodes directly in the order of the measurement points.
 
 A solved model can be used wherever mode shapes are expected: a
 :class:`~femtools.fea.eigen.ModalResult` supplies its ``modes``, its real
@@ -34,6 +37,7 @@ from .dofmap import (
     align_modes,
     as_dofmap,
     map_nearest_nodes,
+    mapped_mode_matrix,
     match_dofs,
     parse_component,
     parse_components,
@@ -94,6 +98,7 @@ __all__ = [
     "mac_value",
     "macx",
     "map_nearest_nodes",
+    "mapped_mode_matrix",
     "match_dofs",
     "modal_scale_factor",
     "nmd",
