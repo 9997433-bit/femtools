@@ -9,9 +9,12 @@ from femtools.fea.eigen import solve_modes           # -> ModalResult
 from femtools.fea.elements import available_elements
 # Round-4 additions (REMAINING.md, owner R4-O1) — see §9:
 from femtools.fea.reduction import guyan, irs, serep, ReductionResult
-# Round-7 additions (REMAINING.md, owner R7-O1; pending on this tree) — see §10–§11:
+# Round-7 additions (REMAINING.md, owner R7-O1; landed and measured) — see §10–§11:
 from femtools.fea.recover import recover_stress, recover_strain, StressResult
 from femtools.fea.mpc import apply_rbe2, ConstraintTransform
+# Round-8 additions (REMAINING.md, owner R8-O1; pending on this tree) — see §12–§13:
+from femtools.fea.mpc import apply_rbe3
+from femtools.fea.recover import average_nodal
 ```
 
 Notation: $K$, $M$ global stiffness/mass (`scipy.sparse.csr_matrix`, symmetric),
@@ -433,7 +436,8 @@ improving the first eigenvalue error by ≥ 10×, SEREP reconstruction at 1e-13)
 
 ## 10. Stress and strain recovery — `recover_stress` / `recover_strain` (Round 7, owner R7-O1)
 
-Frozen entry points (REMAINING.md; module pending on this tree as of 2026-08-28):
+Frozen entry points (REMAINING.md; landed on this tree, measured — ACCEPTANCE Round-7
+status):
 
 ```python
 from femtools.fea.recover import recover_stress, recover_strain, StressResult
@@ -499,7 +503,8 @@ models", *IJNME* 10 (1976); Bathe, *Finite Element Procedures* §4.3.6.
 
 ## 11. RBE2 rigid constraints — condensation $u = Tq$ (Round 7, owner R7-O1)
 
-Frozen entry points (REMAINING.md; module pending on this tree as of 2026-08-28):
+Frozen entry points (REMAINING.md; landed on this tree, measured — ACCEPTANCE Round-7
+status, demonstrated by `examples/rbe2_rigid.py`):
 
 ```python
 from femtools.fea.mpc import apply_rbe2, ConstraintTransform
@@ -552,3 +557,116 @@ round if ever). Complexity: building $T$ is $O(n_{dep})$; the triple products ar
 and dominated by `assemble_km` itself. References: Cook et al. ch. 13 (transformation
 equations for constraints); Craig & Kurdila, *Fundamentals of Structural Dynamics* §14
 (constraint reduction); the RBE2 layout is the public MSC/NX card.
+
+## 12. RBE3 interpolation constraints — `apply_rbe3` (Round 8, owner R8-O1)
+
+Frozen entry point (REMAINING.md; pending on this tree as of 2026-08-28):
+
+```python
+from femtools.fea.mpc import apply_rbe3
+# Interpolation MPC: the dependent node's listed components are a weighted
+# average of the independents. assemble_km honors model.rbe3, composed with
+# model.rbe2 into one ConstraintTransform; mpc=False disables all MPCs.
+```
+
+The data container is the **merged and stable** `core.model.RBE3`
+(`id, dependent, independents, components (default 1..3), independent_components
+(default 1..3), weights (None = equal)`) via `FEModel.add_rbe3` — shared with the BDF
+`RBE3` card (io.md §5). Do not replace the dataclass; validation (duplicate id, missing
+nodes, dependent ∉ independents, components in 1..6, weight count) lives there.
+
+Semantics — the exact opposite of §11 in *direction*, the same machinery in *method*. An
+RBE2 makes many dependents follow one independent rigidly; an RBE3 makes **one dependent**
+follow **many independents** as a weighted average. It is *not* a rigid weld: no relative
+stiffening of the independent set occurs, no penalty springs enter, and the RBE2 lever-arm
+kinematics of §11 must not be reused. With normalized weights
+$\bar w_i = w_i / \sum_j w_j$ (equal by default), each listed dependent component $c$ is
+eliminated by the master–slave row (Cook ch. 13; Zienkiewicz & Taylor master–slave
+elimination — the same classical constraint-transformation both RBE kinds share)
+
+$$u_{d,c} \;=\; \sum_i \bar w_i\, u_{i,c},$$
+
+i.e. the dependent row of $G$ carries $\bar w_i$ in the columns of the matching
+independent components and zero elsewhere. Everything of §11 then applies verbatim:
+congruence $\hat K = G^\top K G$, $\hat M = G^\top M G$, virtual-work load mapping
+$\hat f = G^\top f$, idempotent $G$, exact elimination (no penalty, no Lagrange
+multipliers, conditioning untouched — the coefficients are dimensionless weights).
+
+Composition with RBE2: `assemble_km` builds **one** `ConstraintTransform` from
+`model.rbe2` *and* `model.rbe3` together — the row dictionaries merge before chain
+resolution, so a DOF eliminated by both kinds is the same over-determination error as two
+RBE2s claiming it, and RBE2→RBE3 chains resolve through the existing
+`_resolve_chains` substitution (depth ≤ `MAX_CHAIN_DEPTH`, cycle-safe). `mpc=False`
+still disables *all* multipoint constraints, and a model with `model.rbe3` empty must
+leave the RBE2-only path **bit-identical** (the Round-7 goldens are regression gates).
+
+Properties the acceptance gates pin (ACCEPTANCE Round-8 status; demonstrated by the
+kernel-gated section of `examples/rbe2_rigid.py`):
+
+- **6 rigid-body modes, free–free**: a mass RBE3-tied to a triangle of independent nodes
+  keeps *exactly* 6 zero modes. This needs no geometric condition: any rigid motion of
+  the independents maps under $G$ to a consistent dependent motion, so
+  $\mathrm{null}(\hat K)$ keeps dimension 6. (Kinematic fidelity of the *inertia* placed
+  at the dependent node is a separate matter: the translation average equals the true
+  rigid-body motion of the **weighted centroid** of the independents, so a mass hung at
+  any other point effectively sits at that centroid — a modeling approximation, never a
+  mechanism.)
+- **Load distribution by virtual work**: $\hat f = G^\top f$ sends a force $f_d$ on the
+  dependent component to $\bar w_i f_d$ on each independent — equal weights give equal
+  translational force shares. No moments appear for translation-only component lists
+  (there are no lever arms in the rows).
+- **RBE2 goldens bit-identical** when `model.rbe3` is empty.
+
+Scope note vs the full Nastran card: the public MSC/NX RBE3 derives the reference-grid
+motion from a weighted least-squares **rigid-body fit** of the independents (translations
+*and* rotations from lever arms). The Round-8 frozen subset is the component-wise weighted
+average above — it coincides with the LS fit's translation components when the reference
+grid sits at the weighted centroid, and it is exactly what `core.model.RBE3` stores. The
+lever-arm fit is a later round if ever; do not fake it with RBE2 kinematics. References:
+Cook et al. ch. 13; Zienkiewicz & Taylor, *The Finite Element Method* (master–slave
+constraint elimination); the RBE3 field layout is the public MSC/NX card.
+
+## 13. Nodal stress averaging — `average_nodal` (Round 8, owner R8-O1)
+
+Frozen entry point (REMAINING.md; pending on this tree as of 2026-08-28):
+
+```python
+from femtools.fea.recover import average_nodal
+# average_nodal(stress: StressResult, model) -> StressResult (or a small
+# nodal result type): centroid stresses averaged onto incident nodes, 1/n_adj.
+```
+
+The plain unweighted incidence average — for each node $n$ with $\mathrm{adj}(n)$ the set
+of recovered elements containing it,
+
+$$\sigma_n \;=\; \frac{1}{|\mathrm{adj}(n)|} \sum_{e \,\in\, \mathrm{adj}(n)} \sigma_e^{(c)},$$
+
+component-wise on the Voigt tensor, where $\sigma_e^{(c)}$ is the §10 centroid value.
+Rules that make the average meaningful:
+
+- **Average in a common frame.** §10 element-frame components of different elements are
+  not comparable; the average must run on the basic-frame tensors
+  (`StressResult.stress_basic`) — or equivalently rotate first, average after. Beam/bar
+  resultants (extras) stay per-element: an end moment has no nodal average.
+- **Derived invariants are recomputed, never averaged.** Von Mises is a nonlinear
+  functional of the tensor: $\sigma_{vm}(\bar\sigma) \ne \overline{\sigma_{vm}}$ in
+  general. Average the six components, then evaluate von Mises / principals on the
+  averaged tensor.
+- **Skipped elements do not vote.** Elements absent from `StressResult`
+  (`skipped`) contribute neither values nor incidence counts; a node touched only by
+  skipped elements has no averaged value.
+
+Acceptance gate: on a **constant-stress patch** (§10's patch construction, or the
+uniform-tension bar of `examples/recover_stress.py`) every incident element reports the
+same tensor, so the mean is exact at *every* node — machine-precision equality, no
+tolerance slack needed. This is the sharp end: any frame mix-up or mis-normalization
+breaks an exact identity rather than degrading an estimate.
+
+Scope guard — **not Zienkiewicz–Zhu SPR**: no patch-wise polynomial fit over
+superconvergent sampling points, no recovered-field error estimation
+(Zienkiewicz & Zhu, *IJNME* 33 (1992), SPR), and no global $L_2$ smoothing mass-matrix
+solve (Hinton & Campbell 1974). Those produce *better* nodal fields at real stress
+gradients; the Round-8 contract is the classical incidence average FE post-processors
+default to — $O(n_{elem})$ work, one pass over the connectivity, deterministic.
+References: Cook et al. ch. 6 (stress averaging and smoothing); Zienkiewicz & Zhu 1992
+(what this deliberately is not).

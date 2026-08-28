@@ -169,7 +169,63 @@ Round-7 frozen APIs (`REMAINING.md` / `ROUND7_BRIEF.md`) are merged on
       `update_model` residuals; 10% E recovery invariant holds
 - [x] **R7 base_accel PSD / dump_cms** — SDOF vs Miles; CMS npz bit-identical K/M
 
-The eight examples remain the Round-6 set until Round 8 adds kernel-backed demos.
+### Round-8 status (2026-08-28, R8-F3 — frozen APIs pending measurement)
+
+Round-8 frozen APIs (`REMAINING.md` Round-8 section / `ROUND8_BRIEF.md`). The `RBE3`
+dataclass (`FEModel.add_rbe3`, top-level `RBE3` export) is merged and stable; the rows
+below are the Round-8 kernels, **unchecked until measured on this tree** by their test
+files (`tests/test_round8_o1.py`, `test_round8_io.py`, `test_round8_o4.py`) or a direct
+probe. Import status noted per row as of 2026-08-28; a later re-audit flips rows to
+measured with numbers, exactly as the Round-6/7 blocks above were flipped.
+
+- [ ] **R8 RBE3 interpolation** — `femtools.fea.mpc.apply_rbe3` (not importable yet).
+      Gates (`fea.md` §12): mass RBE3-tied to a triangle of independents keeps exactly
+      **6** rigid-body modes free–free; equal weights → equal translational force shares
+      under $G^\top f$; RBE2 goldens **bit-identical** when `model.rbe3` is empty;
+      `mpc=False` disables all MPCs. The kernel-gated section of
+      `examples/rbe2_rigid.py` runs these checks automatically once the name imports.
+- [ ] **R8 nodal stress averaging** — `femtools.fea.recover.average_nodal` (not
+      importable yet). Gate (`fea.md` §13): constant-stress patch exact at **every**
+      node (1/n_adj incidence average, basic frame, not ZZ-SPR). Kernel-gated section of
+      `examples/recover_stress.py` runs it once the name imports.
+- [ ] **R8 BDF RBE3 card** — `read_bdf` parses `RBE3` via `FEModel.add_rbe3`,
+      `write_bdf` emits it, round-trip exact; unknown tails one aggregated
+      `UserWarning` (`io.md` §5). Not measured yet (`tests/test_round8_io.py`).
+- [ ] **R8 Ansys/Abaqus text drivers** — `drivers.ansys.AnsysCdbDriver` /
+      `drivers.abaqus.AbaqusInpDriver` (modules not on this tree yet). Gates (`io.md`
+      §6): `SolverDriver` conformance, `write_cdb`/`write_inp` input, stubbed-executable
+      run, `SolverError` on missing executable / nonzero exit / timeout, `.rst`/`.odb`
+      refusal naming the binary as N/A, `.pch`/`.unv` text results only.
+- [ ] **R8 FRF dump/load** — `femtools.dynamics.frf.dump_frf` / `load_frf` import on
+      this tree (2026-08-28). Gate: `H` and `freq_hz` **bit-identical** after an npz
+      round-trip (the `dump_cms` invariant); `modal_frf` numerics and the Rubin 0.028%
+      golden unchanged. Not measured by a dedicated test yet.
+- [ ] **R8 mapped-shape correlation** — `femtools.correlation.dofmap.mapped_mode_matrix`
+      imports on this tree (2026-08-28). Gate: two translated copies of the same cube →
+      mapped MAC diagonal exactly 1; `mac_matrix` / `map_nearest_nodes` numerics
+      unchanged. Not measured by a dedicated test yet.
+- [ ] **R8 plot_stress** — `femtools.viz.plots.plot_stress` imports on this tree
+      (2026-08-28). Gates: mesh colored by `StressResult.von_mises` (or a named
+      component), matplotlib default, `import femtools.viz` without pyvista; CLI
+      `femtools plot-stress` lazy-fails when kernels are missing. Not measured yet.
+- [ ] **R8 static update convenience** — `femtools.updating.updater.update_from_static`
+      imports on this tree (2026-08-28). Gate: recover a 10% E error from static tip
+      deflection to the same order as the modal path (~1e-9 relative);
+      `parameter_covariance` / topometry / 10% modal-E goldens unchanged
+      (`tests/test_round8_o4.py`).
+
+Consequence for examples: Round 8 adds the three kernel-backed demos sanctioned since
+the Round-7 brief — `examples/rbe2_rigid.py`, `examples/topometry_plate.py` and
+`examples/recover_stress.py`, all **measured PASS** on this tree (2026-08-28) against
+the landed Round-7 kernels (RBE2/`apply_rbe2`, `topometry_optimize`, `recover_stress`)
+— bringing the example set to **11/11 PASS**. Each new example carries a kernel-gated
+Round-8 section (RBE3, `average_nodal`) that self-enables when those names import, and
+each skips whole (`sys.exit(0)`) rather than failing if its kernels are absent, so the
+example suite stays green on partial trees. Measured headline numbers: RBE2 rigid-arm
+kinematics and $G^\top f$ force+moment transfer exact to ≤ 2e-16 rel, 6/6 free–free RBM
+with the arm; topometry compliance ratio **0.158** (OC, 166 iterations, converged,
+volume conserved to 2e-13, root 7.0 mm vs tip column 2.6 mm); HEX8 uniform-tension patch
+$s_{xx} = P/A$ to 6e-16, BEAM2 end moments $M(x) = P(L-x)$ to 2e-14.
 
 ## 0. Master table
 

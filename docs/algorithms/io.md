@@ -6,10 +6,14 @@ Nastran BDF extensions of §4 (owner: R7-F2). Frozen entry points:
 ```python
 from femtools.io.inp import read_inp      # write_inp is optional
 from femtools.io.kfile import read_k
-# Round-7 (REMAINING.md; pending on this tree) — see §4 and ACCEPTANCE Round-7 status:
+# Round-7 (REMAINING.md; landed and measured — ACCEPTANCE Round-7 status) — see §4:
 from femtools.io.cdb import write_cdb
 from femtools.io.kfile import write_k
-from femtools.io.bdf import read_bdf      # grows INCLUDE + RBE2, §4
+from femtools.io.bdf import read_bdf      # INCLUDE + RBE2, §4
+# Round-8 (REMAINING.md, owner R8-F2; pending on this tree) — see §5–§6:
+from femtools.io.bdf import read_bdf, write_bdf   # grow RBE3, §5
+from femtools.drivers.ansys import AnsysCdbDriver
+from femtools.drivers.abaqus import AbaqusInpDriver
 ```
 
 Scope guard (REMAINING.md): **public text card layouts only** — the card grammars below are
@@ -150,9 +154,9 @@ the model itself plus the raw-card store for the K-file two-phase resolve.
 
 ## 4. Nastran BDF extensions — `INCLUDE` and `RBE2` (Round 7, owner R7-F2)
 
-`read_bdf` (Round 1, stable) grows two features frozen in REMAINING.md — pending on this
-tree as of 2026-08-28. Both are public card/statement layouts (MSC/NX Quick Reference
-Guide); no copyrighted deck content is reproduced anywhere.
+`read_bdf` (Round 1, stable) grew two features frozen in REMAINING.md — landed on this
+tree and measured (ACCEPTANCE Round-7 status). Both are public card/statement layouts
+(MSC/NX Quick Reference Guide); no copyrighted deck content is reproduced anywhere.
 
 ### 4.1 `INCLUDE` statement resolution
 
@@ -203,5 +207,92 @@ which is the same `core.model.RBE2` list that `fea.mpc.apply_rbe2` consumes for 
 condensation $u = Tq$ (`fea.md` §11) — reading a deck and assembling it therefore honors
 the rigid constraints with no extra plumbing. Validation (duplicate id, missing nodes,
 independent ∈ dependents) lives in the container, not the parser. `RBE3` (interpolation,
-*not* rigid) is optional Round-7 scope: if unimplemented it must take the standard
-aggregated warn-and-skip path, and it must never be stored as an `RBE2`.
+*not* rigid) was optional Round-7 scope (warn-and-skip); it becomes required Round-8
+scope in §5 below — and it must never be stored as an `RBE2`.
+
+## 5. Nastran BDF `RBE3` card (Round 8, owner R8-F2)
+
+Frozen in REMAINING.md — pending on this tree as of 2026-08-28: `read_bdf` parses `RBE3`
+into the merged, stable `FEModel.add_rbe3` container, and `write_bdf` emits it. Public
+small/large/free-field layout (MSC/NX Quick Reference Guide; no copyrighted deck content
+reproduced):
+
+```text
+RBE3  EID  (blank)  REFGRID  REFC  WT1  C1  G1,1  G1,2 ...
+      WT2  C2  G2,1  G2,2 ...  ("UM" / ALPHA tails, see below)
+```
+
+`REFGRID` is the **dependent** (reference) grid — note the direction is the opposite of
+`RBE2`'s `GN` — and `REFC` its constrained component digits (1..6, packed, e.g. `123`).
+The tail is a repeating sequence of weighted groups: a real weight `WTi`, a component
+digit string `Ci`, then the independent grids `Gi,j` the pair applies to, continuing over
+standard continuation lines. Field disambiguation inside the tail is type-driven, same
+rule as the RBE2 `ALPHA` tail: grids are integers, weights are reals (contain `.` or an
+exponent), component strings are digit-packed integers following a weight.
+
+Mapping onto the container — **do not invent a parallel table**:
+
+```python
+model.add_rbe3(
+    id=EID, dependent=REFGRID,
+    components=tuple(int(c) for c in str(REFC)),
+    independents=(G11, G12, ..., G21, ...),          # groups flattened, deck order
+    independent_components=tuple(int(c) for c in str(C1)),
+    weights=(WT1, WT1, ..., WT2, ...),               # one entry per grid
+)
+```
+
+which is the same `core.model.RBE3` list `fea.mpc.apply_rbe3` consumes (`fea.md` §12).
+Validation (duplicate id, missing nodes, dependent ∈ independents, component ranges,
+weight count) lives in the container, not the parser. Subset boundaries, all taking the
+standard **one aggregated `UserWarning`** path (never silent, never a hard error):
+
+- heterogeneous per-group component lists (`C2 != C1`) — the container carries a single
+  `independent_components`; decks that mix component sets per group are out of subset;
+- the `UM` continuation (explicit dependent-DOF selection) and trailing `ALPHA`
+  (thermal expansion) — recognized and skipped, like the RBE2 `ALPHA`;
+- zero or negative weights — the deck is warned about and the card skipped rather than
+  normalized into something the writer cannot round-trip.
+
+`write_bdf` emits one `RBE3` per record — `EID, blank, REFGRID, REFC`, then the weighted
+groups (equal weights `1.0` when `weights is None`) — such that
+`read_bdf(write_bdf(model))` round-trips the `model.rbe3` table exactly (the invariant
+`io.bdf` already pins for nodes/elements/SPCs/RBE2).
+
+## 6. Solver text drivers — `AnsysCdbDriver`, `AbaqusInpDriver` (Round 8, owner R8-F2)
+
+Frozen in REMAINING.md — pending on this tree as of 2026-08-28. Two more concrete
+adapters for the `drivers.base.SolverDriver` protocol (PEP 544 structural typing, merged
+Round 4; `docs/ARCHITECTURE.md` §10), joining Round-7's `NastranPunchDriver`. Both are
+**text-only**: models cross the boundary as text decks the io layer already writes, and
+results come back as text the io layer already reads. femtools ships no proprietary
+binary parsers, in any round.
+
+```python
+from femtools.drivers.ansys import AnsysCdbDriver     # drivers/ansys.py
+from femtools.drivers.abaqus import AbaqusInpDriver   # drivers/abaqus.py
+# both re-exported from femtools.drivers (drivers/__init__.py);
+# femtools/__init__.py is deliberately untouched.
+```
+
+Contract, identical shape for both (the four-step exchange loop of `drivers.base`):
+
+| step | `AnsysCdbDriver` | `AbaqusInpDriver` |
+|---|---|---|
+| `write_input` | `io.cdb.write_cdb` (§ACCEPTANCE cases 24–25 deck subset) | `io.inp.write_inp` (§1 subset) |
+| `is_available` | `shutil.which` over the executable and public aliases (`ansys`, `mapdl`) — must not raise | `shutil.which("abaqus")` — must not raise |
+| `run` | launch executable, block; raise `SolverError` on **missing executable**, **nonzero exit**, or **timeout** | same conventions |
+| `read_modal` | existing **text** readers only: `.pch` (`io.pch.read_pch`) or `.unv` (`io.unv.read_unv`) | same: `.unv` / `.pch` text only |
+
+Binary results stay N/A with a *named* refusal: handing a `.rst` path to
+`AnsysCdbDriver.read_modal` raises `SolverError` explicitly naming RST as not available
+(pointing at the text alternatives), and `.odb` likewise for `AbaqusInpDriver` — a clear
+error beats a silent misparse of a binary header. This mirrors the PRODUCT_MAP N/A row
+(OP2/RST/ODB) rather than weakening it.
+
+Testing convention (frozen): **no ANSYS or Abaqus install is ever required.** Tests stub
+the executable exactly like the Round-7 Nastran tests — a shell script on `PATH` that
+emits a canned text result file — so `is_available`/`run`/`read_modal` are exercised
+end-to-end, and the `SolverError` paths (missing executable, nonzero exit, timeout, RST/
+ODB refusal) are pinned without any commercial binary. Translation losses in
+`write_input` follow the io convention: aggregated `UserWarning`s, never silent.
