@@ -32,8 +32,10 @@ class AssemblyResult:
     Multipoint constraints
     ----------------------
 
-    When the model carries rigid bodies (``model.rbe2``) the matrices are the
-    *constrained* ones, ``G^T A G`` for the transform in :attr:`mpc`
+    When the model carries multipoint constraints -- rigid bodies
+    (``model.rbe2``), interpolation constraints (``model.rbe3``) or both -- the
+    matrices are the *constrained* ones, ``G^T A G`` for the single composed
+    transform in :attr:`mpc`
     (:mod:`femtools.fea.mpc`).  The DOF numbering is untouched: the dependent
     DOFs keep their equation numbers, their rows and columns are empty and they
     are listed in :attr:`mpc_dof` rather than being solved.  Their motion is
@@ -320,10 +322,14 @@ def assemble_km(
     mpc
         Multipoint constraints.  ``None`` (default) applies the model's own
         rigid bodies (``model.rbe2``, see
-        :meth:`femtools.core.model.FEModel.add_rbe2`); ``False`` ignores them;
-        a :class:`~femtools.fea.mpc.ConstraintTransform` from
-        :func:`~femtools.fea.mpc.apply_rbe2` is used as given, and explicit
-        ``RBE2`` records replace the model's table.  The matrices come back
+        :meth:`femtools.core.model.FEModel.add_rbe2`) *and* its interpolation
+        constraints (``model.rbe3``, see
+        :meth:`femtools.core.model.FEModel.add_rbe3`), composed into one
+        transform; ``False`` ignores both; a
+        :class:`~femtools.fea.mpc.ConstraintTransform` from
+        :func:`~femtools.fea.mpc.apply_mpc` (or ``apply_rbe2`` /
+        ``apply_rbe3``) is used as given, and explicit ``RBE2``/``RBE3``
+        records replace the model's tables.  The matrices come back
         constrained (``G^T A G``) with the dependent DOFs emptied and reported
         in ``mpc_dof``.
     rayleigh
@@ -445,8 +451,8 @@ def assemble_km(
     # -- per-node rotational frames --------------------------------------
     # A rotational SPC is written in the basic frame and only remains a single
     # DOF constraint there, so those nodes keep the basic triad; everything
-    # else follows its averaged shell normal.  A node tied by a rigid body is
-    # left alone for the same reason: the constraint is written in the basic
+    # else follows its averaged shell normal.  A node tied by a multipoint
+    # constraint is left alone for the same reason: it is written in the basic
     # frame, and mixing the three rotations of such a node would blur the line
     # between the DOFs it eliminates and the ones it drives.
     frames = NodalFrames(dof_map=dof_map)

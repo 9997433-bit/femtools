@@ -36,10 +36,35 @@ so ``sigma = D @ eps`` holds componentwise.
   follows its uniaxial state.  Stress and strain therefore always describe one
   consistent state.
 
+Nodal averaging
+---------------
+
+:func:`average_nodal` is the one smoothing step the module does offer, and it
+is the simplest one there is: the value reported at a node is the unweighted
+mean of the centroid tensors of the elements incident on it,
+
+.. math::
+
+    \\sigma_a = \\frac{1}{n_a} \\sum_{e \\ni a} \\sigma_e ,
+
+the classical nodal average of Cook §6.13 / Zienkiewicz & Taylor §14.  It is
+averaged in the **basic** frame, since tensors written in different element
+frames cannot be added.  Two properties follow directly and are what the
+function is for: a constant stress state survives it exactly at every node
+(every contribution is the same number), and no element is preferred over
+another, so the result carries no information the recovery did not have.
+
+It is explicitly **not** superconvergent patch recovery: Zienkiewicz-Zhu fits a
+polynomial through the superconvergent sampling points of a patch and is the
+basis of an error estimator; this is an arithmetic mean and makes no claim
+beyond continuity.  Where the two differ -- a coarse mesh with a steep gradient
+-- SPR is the better answer, and the honest reading of a large jump between the
+averaged nodal value and the element value is that the mesh is too coarse.
+
 What is deliberately *not* here: no extrapolation of Gauss point values to the
-nodes, no averaging across elements, no nonlinear or plastic material.  Those
-are separate decisions with their own error, and the centroid value is the one
-a linear element actually represents best.
+nodes, no nonlinear or plastic material.  Those are separate decisions with
+their own error, and the centroid value is the one a linear element actually
+represents best.
 """
 
 from __future__ import annotations
@@ -73,7 +98,9 @@ from .quadrature import gauss_2d
 
 __all__ = [
     "COMPONENTS",
+    "NodalStressResult",
     "StressResult",
+    "average_nodal",
     "recover_strain",
     "recover_stress",
     "von_mises",
@@ -672,3 +699,241 @@ def recover_strain(model: Any, u: Any = None, **kwargs: Any) -> StressResult:
     reading :attr:`StressResult.strain` says what it means.
     """
     return recover_stress(model, u, **kwargs)
+
+
+# ---------------------------------------------------------------------------
+# nodal averaging
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class NodalStressResult:
+    """Element stress and strain averaged onto the nodes.
+
+    The counterpart of :class:`StressResult` for the smoothed field: one Voigt
+    tensor per node instead of one per element, always in the **basic**
+    (global) frame, because that is the only frame the contributions of
+    differently oriented elements share.
+
+    Attributes
+    ----------
+    node_ids:
+        Nodes carrying a value, in the order they were first met; row ``i`` of
+        every array belongs to ``node_ids[i]``.  Nodes with no recovered
+        element on them are not listed at all rather than being reported as
+        zero.
+    stress, strain:
+        ``(n_nodes, 6)`` Voigt tensors, ordered :data:`COMPONENTS`, with
+        engineering shear strains.
+    count:
+        ``(n_nodes,)`` number of elements averaged into each node, the ``n_a``
+        of the ``1 / n_a`` weighting.
+    xyz:
+        ``(n_nodes, 3)`` node coordinates, when the model supplied them.
+    element_ids, etypes, layer:
+        Provenance: the elements that contributed, their types and the
+        through-thickness position the shell rows were evaluated at.
+    """
+
+    node_ids: list[Any] = field(default_factory=list)
+    stress: np.ndarray = field(default_factory=lambda: np.zeros((0, 6)))
+    strain: np.ndarray = field(default_factory=lambda: np.zeros((0, 6)))
+    count: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))
+    xyz: np.ndarray = field(default_factory=lambda: np.zeros((0, 3)))
+    element_ids: list[Any] = field(default_factory=list)
+    etypes: list[str] = field(default_factory=list)
+    location: str = "node"
+    layer: float = 0.0
+
+    def __len__(self) -> int:
+        return len(self.node_ids)
+
+    @property
+    def n_nodes(self) -> int:
+        return len(self.node_ids)
+
+    @property
+    def components(self) -> tuple[str, ...]:
+        return COMPONENTS
+
+    def index_of(self, node_id: Any) -> int:
+        """Row of *node_id*."""
+        try:
+            return self.node_ids.index(node_id)
+        except ValueError:
+            pass
+        try:
+            return self.node_ids.index(int(node_id))
+        except (ValueError, TypeError):
+            raise KeyError(f"node {node_id!r} carries no averaged stress") from None
+
+    @property
+    def von_mises(self) -> np.ndarray:
+        """``(n_nodes,)`` von Mises stress *of the averaged tensor*.
+
+        Not the average of the element von Mises values: the equivalent stress
+        is a nonlinear function of the tensor, and averaging the tensor first
+        is what keeps a constant state exact.
+        """
+        return von_mises(self.stress) if len(self) else np.zeros(0)
+
+    @property
+    def principal(self) -> np.ndarray:
+        """``(n_nodes, 3)`` principal stresses, descending."""
+        out = np.empty((len(self), 3))
+        for i, voigt in enumerate(self.stress):
+            out[i] = np.linalg.eigvalsh(_tensor(voigt))[::-1]
+        return out
+
+    def tensor(self, node_id: Any) -> np.ndarray:
+        """``(3, 3)`` averaged stress tensor at one node."""
+        return _tensor(self.stress[self.index_of(node_id)])
+
+    def node(self, node_id: Any) -> dict[str, Any]:
+        """Everything averaged onto one node, as a plain dictionary."""
+        i = self.index_of(node_id)
+        return {
+            "node_id": self.node_ids[i],
+            "stress": self.stress[i],
+            "strain": self.strain[i],
+            "von_mises": float(self.von_mises[i]),
+            "count": int(self.count[i]),
+            "xyz": self.xyz[i],
+        }
+
+    def summary(self) -> str:  # pragma: no cover - reporting helper
+        peak = float(self.von_mises.max()) if len(self) else 0.0
+        return (
+            f"NodalStressResult(nodes={len(self)}, elements={len(self.element_ids)}, "
+            f"location={self.location}, layer={self.layer:+.2f}t, "
+            f"max_von_mises={peak:.6g})"
+        )
+
+
+def average_nodal(
+    stress: StressResult,
+    model: Any,
+    *,
+    nodes: Callable[[Any], bool] | Iterable[Any] | None = None,
+    index: ModelIndex | None = None,
+) -> NodalStressResult:
+    """Average centroid element stresses onto the nodes they touch.
+
+    Each node gets the unweighted mean of the basic-frame tensors of the
+    ``n_a`` elements incident on it (see the module docstring).  This is the
+    classical nodal average, **not** Zienkiewicz-Zhu superconvergent patch
+    recovery: no polynomial is fitted, no patch is assembled and no error
+    estimate is produced.
+
+    Because every contribution to a node is an equal share, a field that is
+    already constant over the mesh -- the constant-stress patch test of
+    :func:`femtools.fea.verification.stress_patch_error` -- comes through
+    exactly at every node, interior and boundary alike.
+
+    Parameters
+    ----------
+    stress
+        The :class:`StressResult` of :func:`recover_stress` (or
+        :func:`recover_strain`, which returns the same object).
+    model
+        The model the result was recovered from; only the element connectivity
+        is read, plus the node coordinates when they are available.
+    nodes
+        Restrict the output: a callable ``(node_id) -> bool`` or an explicit
+        collection of node ids.  Elements are still averaged in full, so a
+        restricted node keeps the same value it would have had.
+    index
+        A prebuilt :class:`~femtools.fea.elements.ModelIndex`, to skip
+        re-reading the node table.
+
+    Returns
+    -------
+    NodalStressResult
+        Empty when the recovery produced no elements.
+    """
+    if not isinstance(stress, StressResult):
+        raise TypeError(
+            "average_nodal takes the StressResult of recover_stress, got "
+            f"{type(stress).__name__}"
+        )
+    index = ModelIndex.build(model) if index is None else index
+
+    keep: Callable[[Any], bool]
+    if nodes is None:
+        keep = lambda _nid: True  # noqa: E731
+    elif callable(nodes):
+        keep = nodes
+    else:
+        wanted = set(nodes)
+        keep = lambda nid: nid in wanted  # noqa: E731
+
+    connectivity = _connectivity(model, stress.element_ids)
+    stress_basic = stress.stress_basic
+    strain_basic = stress.strain_basic
+
+    order: list[Any] = []
+    rows: dict[Any, int] = {}
+    totals: list[np.ndarray] = []
+    counts: list[int] = []
+    used: list[Any] = []
+    used_types: list[str] = []
+    for i, eid in enumerate(stress.element_ids):
+        node_ids = connectivity.get(eid)
+        if not node_ids:
+            continue
+        used.append(eid)
+        used_types.append(stress.etypes[i])
+        contribution = np.concatenate([stress_basic[i], strain_basic[i]])
+        for nid in node_ids:
+            row = rows.get(nid)
+            if row is None:
+                row = rows[nid] = len(order)
+                order.append(nid)
+                totals.append(np.zeros(12))
+                counts.append(0)
+            totals[row] += contribution
+            counts[row] += 1
+
+    selected = [i for i, nid in enumerate(order) if keep(nid)]
+    result = NodalStressResult(
+        node_ids=[order[i] for i in selected],
+        element_ids=used,
+        etypes=used_types,
+        layer=stress.layer,
+    )
+    if not selected:
+        return result
+
+    summed = np.array([totals[i] for i in selected], dtype=float)
+    result.count = np.array([counts[i] for i in selected], dtype=int)
+    averaged = summed / result.count[:, None]
+    result.stress = averaged[:, :6]
+    result.strain = averaged[:, 6:]
+    result.xyz = np.array(
+        [_node_xyz_or_nan(index, nid) for nid in result.node_ids], dtype=float
+    )
+    return result
+
+
+def _connectivity(model: Any, element_ids: Iterable[Any]) -> dict[Any, tuple[Any, ...]]:
+    """``element id -> node ids`` for the elements a recovery reported."""
+    wanted = set(element_ids)
+    out: dict[Any, tuple[Any, ...]] = {}
+    for eid, element in iter_records(get_any(model, ("elements", "elems", "element"), None)):
+        if element is None or eid not in wanted:
+            continue
+        raw = get_any(element, ("nodes", "node_ids", "connectivity", "conn", "grids"), None)
+        if raw is None:
+            continue
+        if isinstance(raw, (int, np.integer, str)):
+            raw = (raw,)
+        # A blank connection slot is the "grounded" marker of a scalar element.
+        out[eid] = tuple(nid for nid in raw if nid is not None)
+    return out
+
+
+def _node_xyz_or_nan(index: ModelIndex, node_id: Any) -> np.ndarray:
+    try:
+        return np.asarray(index.xyz(node_id), dtype=float)
+    except (KeyError, TypeError, ValueError):
+        return np.full(3, np.nan)
