@@ -1,4 +1,4 @@
-"""LS-DYNA keyword file (.k) reader -- keyword TEXT subset.
+"""LS-DYNA keyword file (.k) translator -- keyword TEXT subset.
 
 An original parser built from the publicly documented keyword card
 layouts (same policy as the BDF/CDB translators: **no** vendor code,
@@ -56,8 +56,22 @@ keyword name (like the BDF midside drop); malformed cards raise
 
 A .k file carries no unit information: the returned model keeps the
 default SI :class:`~femtools.core.units.UnitSystem` and deck consistency
-is the caller's responsibility.  There is no ``write_k`` (export to
-LS-DYNA is out of scope for this subset).
+is the caller's responsibility.
+
+:func:`write_k` (Round 7) emits the same subset in comma free format
+(full double precision; the reader accepts it on every card):
+``*TITLE`` = model name, ``*NODE``, ``*ELEMENT_SOLID`` (TET4 with the
+last corner repeated to 8), ``*ELEMENT_SHELL`` (TRIA3 with n3 repeated),
+``*ELEMENT_BEAM`` (orientation vectors become extra third nodes appended
+after the real nodes), ``*MAT_ELASTIC``/``_TITLE``, one ``*SECTION_*`` +
+``*PART`` pair per femtools property (secid = part id = property id;
+beam -> ELFORM 2 resultant, bar/TRUSS2D -> ELFORM 3 truss) and
+``*BOUNDARY_SPC_NODE`` rows for the SPCs.  Documented losses (aggregated
+``UserWarning`` s, never silent): lumped MASS/SPRING/DAMPER elements and
+properties, nodal loads, RBE2 tables, enforced SPC values (written as
+fixed-at-zero), beam ``kappa`` and TRUSS2D planarity (reads back as
+BAR2).  Named sets are metadata without a subset keyword and are
+dropped silently.
 """
 
 from __future__ import annotations
@@ -71,7 +85,7 @@ import numpy as np
 from ..core.errors import FileFormatError
 from ..core.model import FEModel
 
-__all__ = ["read_k", "KFileError"]
+__all__ = ["read_k", "write_k", "KFileError"]
 
 
 class KFileError(FileFormatError):
@@ -625,3 +639,206 @@ def read_k(path: str | Path) -> FEModel:
     for note in notes:
         warnings.warn(f"read_k({fname}): {note}", UserWarning, stacklevel=2)
     return model
+
+
+# ---------------------------------------------------------------------------
+# writing
+# ---------------------------------------------------------------------------
+
+
+def _gk(v: float | None) -> str:
+    """Full-precision comma-free-format value."""
+    return format(0.0 if v is None else float(v), ".17g")
+
+
+def write_k(path: str | Path | FEModel, model: FEModel | str | Path | None = None) -> None:
+    """Write an :class:`FEModel` as an LS-DYNA keyword TEXT subset.
+
+    Accepts ``write_k(path, model)`` or ``write_k(model, path)``.
+
+    Emits exactly the keyword subset :func:`read_k` parses, in comma
+    free format (see the module docstring for the layout and the
+    documented losses).  BEAM2 orientation vectors are materialized as
+    ``*ELEMENT_BEAM`` third nodes: one extra ``*NODE`` per distinct
+    ``(end A, orientation)`` position, ids continuing after the real
+    nodes (they read back as unattached nodes; the assembler drops
+    their DOFs).  Every degradation raises one aggregated
+    ``UserWarning``; a material that cannot express ``E > 0`` raises
+    :class:`KFileError` (``*MAT_ELASTIC`` requires it).
+    """
+    from ._compat import coerce_path_model
+
+    out_path, model = coerce_path_model(path, model)
+    notes: list[str] = []
+
+    # -- plan elements (and the beam orientation nodes they need) -----------
+    next_nid = max(model.nodes, default=0) + 1
+    orient_ids: dict[tuple[float, float, float], int] = {}
+    extra_nodes: list[tuple[int, float, float, float]] = []
+    solid_rows: list[str] = []
+    shell_rows: list[str] = []
+    beam_rows: list[str] = []
+    dropped_lumped_elems: dict[str, int] = {}
+    n_truss2d = 0
+
+    for eid in sorted(model.elements):
+        el = model.elements[eid]
+        pid = el.property_id or 0
+        if el.type in ("MASS", "SPRING", "DAMPER"):
+            dropped_lumped_elems[el.type] = dropped_lumped_elems.get(el.type, 0) + 1
+            continue
+        if el.type in ("HEX8", "TET4"):
+            conn = list(el.nodes)
+            conn += [conn[-1]] * (8 - len(conn))  # TET4: repeat the last corner
+            solid_rows.append(f"{eid}, {pid}, " + ", ".join(str(n) for n in conn))
+        elif el.type in ("QUAD4", "TRIA3"):
+            conn = list(el.nodes)
+            if el.type == "TRIA3":
+                conn.append(conn[2])
+            shell_rows.append(f"{eid}, {pid}, " + ", ".join(str(n) for n in conn))
+        else:  # BEAM2 / BAR2 / TRUSS2D
+            if el.type == "TRUSS2D":
+                n_truss2d += 1
+            n3 = 0
+            if el.type == "BEAM2" and el.orientation is not None:
+                xyz = model.nodes[el.nodes[0]].xyz + np.asarray(el.orientation, dtype=float)
+                key = (float(xyz[0]), float(xyz[1]), float(xyz[2]))
+                n3 = orient_ids.get(key, 0)
+                if not n3:
+                    n3 = next_nid
+                    next_nid += 1
+                    orient_ids[key] = n3
+                    extra_nodes.append((n3, *key))
+            beam_rows.append(f"{eid}, {pid}, {el.nodes[0]}, {el.nodes[1]}, {n3}")
+
+    lines: list[str] = [
+        "*KEYWORD",
+        "$ femtools LS-DYNA keyword export",
+        "*TITLE",
+        model.name or "model",
+    ]
+
+    # -- nodes -----------------------------------------------------------------
+    all_nodes = [(nid, *model.nodes[nid].xyz) for nid in model.node_ids()]
+    if all_nodes or extra_nodes:
+        lines.append("*NODE")
+        for nid, x, y, z in [*all_nodes, *extra_nodes]:
+            lines.append(f"{nid}, {_gk(x)}, {_gk(y)}, {_gk(z)}")
+
+    # -- elements -----------------------------------------------------------------
+    if solid_rows:
+        lines += ["*ELEMENT_SOLID", *solid_rows]
+    if shell_rows:
+        lines += ["*ELEMENT_SHELL", *shell_rows]
+    if beam_rows:
+        lines += ["*ELEMENT_BEAM", *beam_rows]
+
+    # -- materials -------------------------------------------------------------------
+    for mid in sorted(model.materials):
+        mtl = model.materials[mid]
+        if mtl.type != "isotropic":
+            warnings.warn(
+                f"write_k: material {mid} is {mtl.type}; written as *MAT_ELASTIC "
+                "with E1/nu12",
+                UserWarning,
+                stacklevel=2,
+            )
+            e, nu, g = mtl.E1, mtl.nu12, None
+        else:
+            e, nu, g = mtl.E, mtl.nu, mtl.G
+        if e is None and g is not None and nu is not None:
+            e = 2.0 * g * (1.0 + nu)
+        if e is None or e <= 0.0:
+            raise KFileError(
+                f"material {mid}: *MAT_ELASTIC requires E > 0 and neither E nor "
+                "G+nu are available"
+            )
+        if nu is None:
+            notes.append(f"material {mid}: Poisson ratio missing; PR written as 0")
+        if mtl.damping:
+            notes.append(f"material {mid}: structural damping GE has no card; dropped")
+        if mtl.name:
+            lines += ["*MAT_ELASTIC_TITLE", mtl.name]
+        else:
+            lines.append("*MAT_ELASTIC")
+        lines.append(f"{mid}, {_gk(mtl.rho)}, {_gk(e)}, {_gk(nu)}")
+
+    # -- sections + parts (secid = part id = femtools property id) ---------------------
+    dropped_lumped_props: list[int] = []
+    for pid in sorted(model.properties):
+        prop = model.properties[pid]
+        if prop.type == "solid":
+            lines += ["*SECTION_SOLID", f"{pid}, 1"]
+        elif prop.type == "shell":
+            t = _gk(prop.t)
+            lines += ["*SECTION_SHELL", f"{pid}, 2", f"{t}, {t}, {t}, {t}"]
+        elif prop.type == "beam":
+            row = f"{_gk(prop.A)}, {_gk(prop.Iy)}, {_gk(prop.Iz)}, {_gk(prop.J)}"
+            asy, asz = prop.attrs.get("Asy"), prop.attrs.get("Asz")
+            sa = asy if asy is not None else asz
+            if sa is not None:
+                if asy is not None and asz is not None and asy != asz:
+                    notes.append(
+                        f"beam property {pid}: Asy != Asz; SA written as Asy "
+                        "(the format has one shear area)"
+                    )
+                row += f", {_gk(sa)}"
+            if prop.kappa is not None:
+                notes.append(f"beam property {pid}: shear factor kappa not written")
+            lines += ["*SECTION_BEAM", f"{pid}, 2", row]
+        elif prop.type == "bar":
+            # trailing comma keeps the single-value card in free format
+            lines += ["*SECTION_BEAM", f"{pid}, 3", f"{_gk(prop.A)},"]
+        else:  # lumped: no keyword mapping in this subset
+            dropped_lumped_props.append(pid)
+            continue
+        if prop.nsm:
+            notes.append(f"property {pid}: non-structural mass has no card; dropped")
+        lines += ["*PART", prop.name or f"P{pid}", f"{pid}, {pid}, {prop.material_id or 0}"]
+
+    # -- constraints ---------------------------------------------------------------------
+    spc_rows: list[str] = []
+    n_enforced = 0
+    for spc in model.spcs:
+        if not any(spc.mask):
+            continue
+        if spc.value != 0.0:
+            n_enforced += 1
+        flags = ", ".join("1" if m else "0" for m in spc.mask)
+        spc_rows.append(f"{spc.node_id}, 0, {flags}")
+    if spc_rows:
+        lines += ["*BOUNDARY_SPC_NODE", *spc_rows]
+
+    # -- aggregated warnings ----------------------------------------------------------------
+    for etype, count in sorted(dropped_lumped_elems.items()):
+        notes.append(f"{count} {etype} element(s) dropped (no keyword mapping in this subset)")
+    if dropped_lumped_props:
+        notes.append(
+            f"lumped propert{'ies' if len(dropped_lumped_props) > 1 else 'y'} "
+            f"{dropped_lumped_props} dropped (no keyword mapping in this subset)"
+        )
+    if n_truss2d:
+        notes.append(
+            f"{n_truss2d} TRUSS2D element(s) written as truss-section beams; "
+            "they read back as BAR2 (planar nature is femtools metadata)"
+        )
+    if n_enforced:
+        notes.append(
+            f"{n_enforced} enforced SPC value(s) dropped (*BOUNDARY_SPC_NODE has no "
+            "value field; written as fixed at zero)"
+        )
+    if model.loads:
+        notes.append(
+            f"{len(model.loads)} nodal load(s) dropped (*LOAD_NODE is outside the "
+            "supported subset)"
+        )
+    if model.rbe2:
+        notes.append(
+            f"{len(model.rbe2)} RBE2 table(s) dropped (*CONSTRAINED_NODAL_RIGID_BODY "
+            "is outside the supported subset)"
+        )
+
+    lines.append("*END")
+    for note in dict.fromkeys(notes):
+        warnings.warn(f"write_k: {note}", UserWarning, stacklevel=2)
+    Path(out_path).write_text("\n".join(lines) + "\n", encoding="utf-8")

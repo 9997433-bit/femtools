@@ -1,4 +1,4 @@
-"""ANSYS coded-database (.cdb) reader -- blocked NBLOCK/EBLOCK subset.
+"""ANSYS coded-database (.cdb) translator -- blocked NBLOCK/EBLOCK subset.
 
 Reads the archive files written by MAPDL ``CDWRITE`` (an original parser --
 no ANSYS or pymapdl code involved; **no binary .rst support, by design**).
@@ -57,8 +57,23 @@ touch the neighbouring field and whitespace splitting would be wrong.
 
 A .cdb carries no unit information: the returned model keeps the default
 SI :class:`~femtools.core.units.UnitSystem` and consistency is the
-caller's responsibility.  There is no ``write_cdb`` (export to ANSYS is
-out of scope for this subset).
+caller's responsibility.
+
+:func:`write_cdb` (Round 7) emits the same subset -- one ``ET`` per ANSYS
+element number, ``MP`` material records, ``R``/``RMORE`` real constants,
+``SECTYPE``/``SECDATA`` shell sections, one blocked ``NBLOCK``/``EBLOCK``
+(SOLID key) pair and ``D``/``F`` records -- so a written archive reads
+back through :func:`read_cdb`.  Element type mapping on write: HEX8 ->
+SOLID185, TET4 -> SOLID285, QUAD4/TRIA3 -> SHELL181 (TRIA3 as the
+degenerate quad), BEAM2 -> BEAM4 (orientation vectors become extra K
+nodes appended after the real nodes), BAR2 -> LINK180, TRUSS2D -> LINK1,
+MASS -> MASS21, SPRING -> COMBIN14.  Documented losses (aggregated
+``UserWarning`` s, never silent): DAMPER elements, SPRING DOF pins,
+beam ``kappa``, non-structural mass, RBE2 tables, enforced-SPC /
+load set ids other than 1, nodal output systems (``cd``) and the model
+name (:func:`read_cdb` names the model after the file).  Property ids
+are not carried by the format: the reader re-synthesizes one property
+per (kind, MAT, REAL, SECNUM) combination.
 """
 
 from __future__ import annotations
@@ -72,7 +87,7 @@ import numpy as np
 from ..core.errors import FileFormatError
 from ..core.model import FEModel
 
-__all__ = ["read_cdb", "CdbError"]
+__all__ = ["read_cdb", "write_cdb", "CdbError"]
 
 
 class CdbError(FileFormatError):
@@ -738,3 +753,224 @@ def read_cdb(path: str | Path) -> FEModel:
     for note in notes:
         warnings.warn(f"read_cdb({path.name}): {note}", UserWarning, stacklevel=2)
     return model
+
+
+# ---------------------------------------------------------------------------
+# writing
+# ---------------------------------------------------------------------------
+
+#: femtools element type -> ANSYS element name number (writer side).
+_WRITE_NUM: dict[str, int] = {
+    "HEX8": 185,  # SOLID185
+    "TET4": 285,  # SOLID285
+    "QUAD4": 181,  # SHELL181
+    "TRIA3": 181,  # SHELL181, degenerate quad (n3 repeated)
+    "BEAM2": 4,  # BEAM4 (section from real constants, K orientation node)
+    "BAR2": 180,  # LINK180
+    "TRUSS2D": 1,  # LINK1
+    "MASS": 21,  # MASS21
+    "SPRING": 14,  # COMBIN14
+}
+
+_D_NAMES = ("UX", "UY", "UZ", "ROTX", "ROTY", "ROTZ")
+_F_NAMES = ("FX", "FY", "FZ", "MX", "MY", "MZ")
+
+
+def _gv(v: float | None) -> str:
+    """Full-precision value for free-format command records (MP, R, ...)."""
+    return format(0.0 if v is None else float(v), ".17g")
+
+
+def _i9(v: int, what: str) -> str:
+    s = f"{int(v):9d}"
+    if len(s) > 9:
+        raise CdbError(f"{what} {v} does not fit the blocked i9 field")
+    return s
+
+
+def write_cdb(path: str | Path | FEModel, model: FEModel | str | Path | None = None) -> None:
+    """Write an :class:`FEModel` as an ANSYS coded-database archive.
+
+    Accepts ``write_cdb(path, model)`` or ``write_cdb(model, path)``.
+
+    Emits exactly the record subset :func:`read_cdb` parses (see the
+    module docstring for the element mapping and the documented losses):
+    ``ET`` records (one TYPE per ANSYS element number), free-format
+    ``MP`` materials, ``R``/``RMORE`` real-constant sets and
+    ``SECTYPE``/``SECDATA`` shell sections keyed by the femtools property
+    id, a fixed-format ``NBLOCK``/``EBLOCK`` (SOLID key) pair and
+    ``D``/``F`` constraint/load records.  BEAM2 orientation vectors are
+    materialized as BEAM4 K nodes: one extra grid per distinct
+    ``(end A, orientation)`` position, ids continuing after the real
+    nodes (they read back as unattached nodes; the assembler drops their
+    DOFs).  Every degradation raises one aggregated ``UserWarning``.
+    """
+    from ._compat import coerce_path_model
+
+    out_path, model = coerce_path_model(path, model)
+    notes: list[str] = []
+
+    # -- plan elements (and the beam orientation nodes they need) -----------
+    next_nid = max(model.nodes, default=0) + 1
+    orient_ids: dict[tuple[float, float, float], int] = {}
+    extra_nodes: list[tuple[int, float, float, float]] = []
+    # (eid, mat, ansys_num, real, sec, nodes)
+    planned: list[tuple[int, int, int, int, int, list[int]]] = []
+    dropped_dampers: list[int] = []
+    dropped_pins: list[int] = []
+
+    for eid in sorted(model.elements):
+        el = model.elements[eid]
+        if el.type == "DAMPER":
+            dropped_dampers.append(eid)
+            continue
+        num = _WRITE_NUM[el.type]
+        pid = el.property_id or 0
+        prop = model.properties.get(pid)
+        mat = prop.material_id if prop is not None and prop.material_id is not None else 0
+        real, sec = pid, 0
+        nodes = list(el.nodes)
+        if el.type == "BEAM2" and el.orientation is not None:
+            xyz = model.nodes[el.nodes[0]].xyz + np.asarray(el.orientation, dtype=float)
+            key = (float(xyz[0]), float(xyz[1]), float(xyz[2]))
+            k = orient_ids.get(key)
+            if k is None:
+                k = next_nid
+                next_nid += 1
+                orient_ids[key] = k
+                extra_nodes.append((k, *key))
+            nodes.append(k)
+        elif el.type in ("QUAD4", "TRIA3"):
+            real, sec = 0, pid
+            if el.type == "TRIA3":
+                nodes.append(nodes[2])  # ANSYS degenerate-quad convention
+        elif el.type == "SPRING" and el.dofs is not None:
+            dropped_pins.append(eid)
+        planned.append((eid, mat, num, real, sec, nodes))
+
+    used_nums = sorted({num for _, _, num, _, _, _ in planned})
+    type_of = {num: tid for tid, num in enumerate(used_nums, start=1)}
+
+    lines: list[str] = [
+        f"/COM, femtools coded-database export -- model: {model.name}",
+        "/PREP7",
+    ]
+
+    # -- element types --------------------------------------------------------
+    for num in used_nums:
+        lines.append(f"ET,{type_of[num]},{num}")
+
+    # -- materials -------------------------------------------------------------
+    for mid in sorted(model.materials):
+        mtl = model.materials[mid]
+        if mtl.type != "isotropic":
+            warnings.warn(
+                f"write_cdb: material {mid} is {mtl.type}; written as isotropic "
+                "MP records with E1/nu12",
+                UserWarning,
+                stacklevel=2,
+            )
+            e, nu, g = mtl.E1, mtl.nu12, None
+        else:
+            e, nu, g = mtl.E, mtl.nu, mtl.G
+        if e is not None:
+            lines.append(f"MP,EX,{mid},{_gv(e)}")
+        elif g is not None:
+            lines.append(f"MP,GXY,{mid},{_gv(g)}")
+        if nu is not None:
+            lines.append(f"MP,NUXY,{mid},{_gv(nu)}")
+        if mtl.rho is not None:
+            lines.append(f"MP,DENS,{mid},{_gv(mtl.rho)}")
+        if mtl.alpha is not None:
+            lines.append(f"MP,ALPX,{mid},{_gv(mtl.alpha)}")
+        if mtl.damping:
+            notes.append(f"material {mid}: structural damping GE has no MP record; dropped")
+
+    # -- real constants / sections (keyed by the femtools property id) ---------
+    for pid in sorted(model.properties):
+        prop = model.properties[pid]
+        if prop.type == "beam":
+            # BEAM4 layout: R1 AREA, R2 IZZ, R3 IYY / RMORE: R7 ISTRN, R8 IXX
+            lines.append(f"R,{pid},{_gv(prop.A)},{_gv(prop.Iz)},{_gv(prop.Iy)}")
+            lines.append(f"RMORE,0.,{_gv(prop.J)}")
+            if prop.kappa is not None:
+                notes.append(f"beam property {pid}: shear factor kappa not written")
+        elif prop.type == "bar":
+            lines.append(f"R,{pid},{_gv(prop.A)}")
+            if prop.J:
+                notes.append(f"bar property {pid}: torsion constant J not written")
+        elif prop.type == "shell":
+            lines.append(f"SECTYPE,{pid},SHELL")
+            lines.append(f"SECDATA,{_gv(prop.t)}")
+        elif prop.type == "lumped":  # MASS21 / COMBIN14 read their value from RC 1
+            value = prop.m if prop.m is not None else prop.k
+            if prop.m is not None and prop.k is not None:
+                notes.append(
+                    f"lumped property {pid} carries both m and k; real constant 1 "
+                    "holds m (a COMBIN14 sharing this set reads it as stiffness)"
+                )
+            if value is None:
+                value = 0.0
+                notes.append(f"lumped property {pid}: damping-only value not written")
+            lines.append(f"R,{pid},{_gv(value)}")
+        if prop.nsm:
+            notes.append(f"property {pid}: non-structural mass has no CDB record; dropped")
+
+    # -- nodes ------------------------------------------------------------------
+    lines.append("NBLOCK,6,SOLID")
+    lines.append("(3i9,6e21.13e3)")
+    all_nodes = [(nid, *model.nodes[nid].xyz) for nid in model.node_ids()]
+    for nid, x, y, z in [*all_nodes, *extra_nodes]:
+        ints = _i9(nid, "node id") + _i9(0, "field") + _i9(0, "field")
+        lines.append(ints + "".join(f"{float(v):21.13E}" for v in (x, y, z)))
+    lines.append("N,R5.3,LOC,       -1,")
+    if any(model.nodes[nid].cd for nid in model.nodes):
+        notes.append("nodal output systems (cd) have no NBLOCK record; dropped")
+
+    # -- elements ----------------------------------------------------------------
+    if planned:
+        lines.append(f"EBLOCK,19,SOLID,,{len(planned)}")
+        lines.append("(19i9)")
+        for eid, mat, num, real, sec, nodes in planned:
+            fields = [mat, type_of[num], real, sec, 0, 0, 0, 0, len(nodes), 0, eid, *nodes]
+            lines.append("".join(_i9(v, "EBLOCK field") for v in fields))
+        lines.append(_i9(-1, "terminator"))
+
+    # -- constraints and loads ------------------------------------------------------
+    for spc in model.spcs:
+        if not any(spc.mask):
+            continue
+        if spc.sid != 1:
+            notes.append("SPC set ids other than 1 collapse to set 1 on read")
+        if all(spc.mask):
+            lines.append(f"D,{spc.node_id},ALL,{_gv(spc.value)}")
+        else:
+            for d, on in enumerate(spc.mask):
+                if on:
+                    lines.append(f"D,{spc.node_id},{_D_NAMES[d]},{_gv(spc.value)}")
+    for load in model.loads:
+        if load.sid != 1:
+            notes.append("load set ids other than 1 collapse to set 1 on read")
+        for d, value in load.as_dof_values():
+            lines.append(f"F,{load.node_id},{_F_NAMES[d]},{_gv(value)}")
+
+    if model.rbe2:
+        notes.append(
+            f"{len(model.rbe2)} RBE2 table(s) dropped (CERIG/CE records are outside "
+            "the readable subset)"
+        )
+    if dropped_dampers:
+        notes.append(
+            f"{len(dropped_dampers)} DAMPER element(s) dropped (COMBIN14 reads back "
+            "as a spring; no damper mapping in this subset)"
+        )
+    if dropped_pins:
+        notes.append(
+            f"SPRING DOF pins dropped on {len(dropped_pins)} element(s) "
+            "(COMBIN14 reads back as an axial spring)"
+        )
+
+    lines.append("FINISH")
+    for note in dict.fromkeys(notes):
+        warnings.warn(f"write_cdb: {note}", UserWarning, stacklevel=2)
+    Path(out_path).write_text("\n".join(lines) + "\n", encoding="utf-8")
