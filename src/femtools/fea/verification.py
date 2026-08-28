@@ -67,10 +67,19 @@ Stress recovery and rigid bodies
 --------------------------------
 
 ``stress_patch_error`` is the constant-strain patch test of
-:mod:`femtools.fea.recover`, run for each of the six structural element types
-on a deliberately irregular mesh: the boundary is driven with an exact linear
-field, the enclosed node is left free and the recovered centroid stress of
-every element is compared with the analytic constant state.
+:mod:`femtools.fea.recover`, run for each of the structural element types of
+:data:`PATCH_TYPES` on a deliberately irregular mesh: the boundary is driven
+with an exact linear field, the enclosed node is left free and the recovered
+centroid stress of every element is compared with the analytic constant state.
+The same figure is reported after ``average_nodal`` and after ``recover_spr``
+have put the element values on the nodes, since neither smoothing is allowed
+to damage a state that is already constant.
+
+``tet_patch_model`` builds the tetrahedral half of that: four tetrahedra
+filling one irregular outer tetrahedron, as ``TET4`` or as ``TET10``.
+``tet10_rigid_body_frequencies`` runs the same block free-free, where the
+four-point quadrature of the quadratic tetrahedron has to leave exactly six
+zero frequencies -- it is the minimum rule that can.
 
 ``rbe2_rigid_pair`` and ``rbe2_offset_moment`` are the two statements a rigid
 body element has to satisfy (:mod:`femtools.fea.mpc`): welding two nodes leaves
@@ -104,7 +113,7 @@ import scipy.linalg as sla
 from .assemble import assemble_km
 from .eigen import mass_normalize, solve_modes
 from .elements import ModelIndex, element_matrices, element_spec
-from .elements.solid import _hex_shape, _strain_matrix
+from .elements.solid import TET10_EDGES, _hex_shape, _strain_matrix
 from .materials import MaterialData, plane_stress_D, solid_D
 from .protocols import get_any, iter_records
 from .quadrature import gauss_3d
@@ -135,6 +144,8 @@ __all__ = [
     "shell_plate",
     "shell_drilling_orientation_gap",
     "stress_patch_error",
+    "tet10_rigid_body_frequencies",
+    "tet_patch_model",
     "timoshenko_tip_deflection",
 ]
 
@@ -922,7 +933,7 @@ def hex8_jacobian_spread(model: Any) -> float:
 # ---------------------------------------------------------------------------
 
 #: Element types :func:`stress_patch_error` covers, in the order documented.
-PATCH_TYPES: tuple[str, ...] = ("BAR2", "BEAM2", "TRIA3", "QUAD4", "TET4", "HEX8")
+PATCH_TYPES: tuple[str, ...] = ("BAR2", "BEAM2", "TRIA3", "QUAD4", "TET4", "TET10", "HEX8")
 
 #: Displacement gradient of the solid and shell patch tests.  Deliberately
 #: unsymmetric, so a recovery that dropped the rotational part of the gradient
@@ -1003,20 +1014,74 @@ def _shell_patch_model(etype: str, distortion: float) -> tuple[dict[str, Any], d
     return model, coords, boundary
 
 
-def _tet_patch_model(distortion: float) -> tuple[dict[str, Any], dict, list[int]]:
-    """Four ``TET4`` elements filling one outer tetrahedron around a free node."""
+def tet_patch_model(
+    etype: str = "TET4", *, distortion: float = 0.3
+) -> tuple[dict[str, Any], dict, list[int]]:
+    """Four tetrahedra filling one irregular outer tetrahedron around a free node.
+
+    Returns ``(model, coords, boundary)``: the four corners of the outer
+    tetrahedron are its whole surface for ``TET4``, so they are the boundary
+    and the enclosed fifth node is the one the patch test solves for.
+
+    ``etype="TET10"`` adds the midside node of every edge, which makes the
+    patch a much harder case than a count of elements suggests: the boundary
+    now carries the midsides of the six outer edges as well, and **five** nodes
+    are left free -- the enclosed corner and the midsides of the four interior
+    edges.  The midside nodes sit exactly at the middle of their edge, so every
+    element keeps a constant Jacobian; a ``TET10`` with genuinely curved edges
+    only passes the patch test to the accuracy of its quadrature, which is a
+    property of the element and not of this mesh (see :func:`tet10`).
+    """
+    name = str(etype).strip().upper()
+    if name not in ("TET4", "TET10"):
+        raise ValueError(f"unknown tetrahedron type {etype!r}; expected TET4 or TET10")
+
     outer = np.array([[0.0, 0.0, 0.0], [1.3, 0.0, 0.0], [0.2, 1.1, 0.0], [0.4, 0.3, 1.2]])
     interior = outer.mean(axis=0) + distortion * np.array([0.11, -0.09, 0.07])
-    points = np.vstack([outer, interior])
-    nodes = {i + 1: {"xyz": tuple(p)} for i, p in enumerate(points)}
-    coords = {i + 1: p for i, p in enumerate(points)}
+    coords = {i + 1: p for i, p in enumerate(np.vstack([outer, interior]))}
     faces = ((1, 2, 3), (1, 2, 4), (1, 3, 4), (2, 3, 4))
-    elements = {
-        eid + 1: {"type": "TET4", "property_id": 1, "nodes": (*face, 5)}
-        for eid, face in enumerate(faces)
-    }
-    model = _model(nodes, elements, 1.0e7, 0.3, 1.0)
-    return model, coords, [1, 2, 3, 4]
+    corner_sets = [(*face, 5) for face in faces]
+    boundary = [1, 2, 3, 4]
+
+    if name == "TET4":
+        elements = {
+            eid + 1: {"type": "TET4", "property_id": 1, "nodes": conn}
+            for eid, conn in enumerate(corner_sets)
+        }
+    else:
+        outer_edges = {frozenset(pair) for face in faces for pair in
+                       ((face[0], face[1]), (face[1], face[2]), (face[2], face[0]))}
+        midside: dict[frozenset[int], int] = {}
+        elements = {}
+        for eid, conn in enumerate(corner_sets, start=1):
+            nodes_of = list(conn)
+            for a, b in TET10_EDGES:
+                key = frozenset((conn[a], conn[b]))
+                nid = midside.get(key)
+                if nid is None:
+                    nid = midside[key] = len(coords) + 1
+                    coords[nid] = 0.5 * (coords[conn[a]] + coords[conn[b]])
+                    if key in outer_edges:
+                        boundary.append(nid)
+                nodes_of.append(nid)
+            elements[eid] = {"type": "TET10", "property_id": 1, "nodes": tuple(nodes_of)}
+
+    nodes = {nid: {"xyz": tuple(float(v) for v in point)} for nid, point in coords.items()}
+    return _model(nodes, elements, 1.0e7, 0.3, 1.0), coords, boundary
+
+
+def tet10_rigid_body_frequencies(
+    *, distortion: float = 0.3, n_modes: int = 10
+) -> np.ndarray:
+    """Frequencies (Hz) of the unconstrained ``TET10`` patch block, ascending.
+
+    The four-point rule is the *minimum* one that leaves a ten-node tetrahedron
+    with rank 24 out of 30, so this is where a quadrature that had been reduced
+    one point too far would announce itself: the first six frequencies must be
+    zero and the seventh strictly positive.
+    """
+    model, _coords, _boundary = tet_patch_model("TET10", distortion=distortion)
+    return np.asarray(solve_modes(model, n_modes=n_modes).freq_hz, dtype=float)
 
 
 def stress_patch_error(etype: str = "HEX8", **case: Any) -> dict[str, float]:
@@ -1038,9 +1103,12 @@ def stress_patch_error(etype: str = "HEX8", **case: Any) -> dict[str, float]:
     test measure on the free node, and ``nodal``, the same stress error after
     :func:`femtools.fea.recover.average_nodal` has smoothed it onto the nodes
     -- a constant state is the one field an average cannot damage, so it has to
-    survive to the same precision.
+    survive to the same precision.  ``spr`` is that last figure once more for
+    :func:`femtools.fea.recover.recover_spr`, which has to reproduce a constant
+    exactly for a different reason: the polynomial it fits over each patch is
+    then the constant itself.
     """
-    from .recover import average_nodal, recover_stress  # verification loads on demand
+    from .recover import average_nodal, recover_spr, recover_stress  # loaded on demand
 
     name = str(etype).strip().upper()
     if name not in PATCH_TYPES:
@@ -1101,8 +1169,8 @@ def stress_patch_error(etype: str = "HEX8", **case: Any) -> dict[str, float]:
         free = [nid for nid in coords if nid not in boundary]
         free_check = {nid: gradient @ coords[nid] for nid in free}
     else:
-        if name == "TET4":
-            model, coords, boundary = _tet_patch_model(distortion)
+        if name in ("TET4", "TET10"):
+            model, coords, boundary = tet_patch_model(name, distortion=distortion)
         else:
             hex_coords, ids, nodes, elements = _distorted_hex_patch(distortion, seed)
             model = _model(nodes, elements, 1.0e7, 0.3, 1.0)
@@ -1161,6 +1229,11 @@ def stress_patch_error(etype: str = "HEX8", **case: Any) -> dict[str, float]:
         float(np.max(np.abs(nodal.stress - want_stress))) / scale_stress,
         float(np.max(np.abs(nodal.strain - want_strain))) / scale_strain,
     )
+    patch = recover_spr(result, model)
+    spr_error = max(
+        float(np.max(np.abs(patch.stress - want_stress))) / scale_stress,
+        float(np.max(np.abs(patch.strain - want_strain))) / scale_strain,
+    )
 
     displacement_error = 0.0
     for nid, exact in free_check.items():
@@ -1173,9 +1246,11 @@ def stress_patch_error(etype: str = "HEX8", **case: Any) -> dict[str, float]:
         "stress": stress_error,
         "strain": strain_error,
         "nodal": nodal_error,
+        "spr": spr_error,
         "displacement": displacement_error,
         "elements": float(len(result)),
         "nodes": float(len(nodal)),
+        "spr_terms": float(np.min(patch.patch_terms)) if len(patch) else 0.0,
     }
 
 

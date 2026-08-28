@@ -1,7 +1,17 @@
-"""Solid elements: ``TET4`` (constant strain) and ``HEX8`` (trilinear brick).
+"""Solid elements: ``TET4``, ``TET10`` (quadratic tetrahedron) and ``HEX8``.
 
 Solid nodes only carry the three translational DOFs; any rotational DOF left
 untouched at such a node is removed by the assembler.
+
+The constant-strain tetrahedron is the stiffest useful element there is, and a
+tetrahedral mesh of it is worth very little in bending.  :func:`tet10` is the
+usual answer: the same simplex with a node at the middle of each of its six
+edges, quadratic shape functions written in volume coordinates and therefore a
+*linear* strain field (Zienkiewicz & Taylor, *The Finite Element Method*,
+6th ed., §4 and §9; Bathe, *Finite Element Procedures*, §5.3; Cook et al.,
+*Concepts and Applications of Finite Element Analysis*, 4th ed., §6.4).  It is
+the element a mesher can actually fill an arbitrary solid with, which is why
+``CTETRA``/``C3D10`` is the workhorse of automatic solid meshing.
 
 The plain trilinear brick integrated with 2x2x2 Gauss shear-locks badly in
 bending: a single element through the thickness recovers roughly two thirds of
@@ -28,10 +38,18 @@ import numpy as np
 
 from ..materials import solid_D
 from ..protocols import get_any
-from ..quadrature import gauss_3d
+from ..quadrature import gauss_3d, tet_rule
 from .base import ElementContext, ElementMatrices, register
 
-__all__ = ["DEGENERACY_TOLERANCE", "HEX8_FORMULATIONS", "hex8", "hex8_formulation", "tet4"]
+__all__ = [
+    "DEGENERACY_TOLERANCE",
+    "HEX8_FORMULATIONS",
+    "TET10_EDGES",
+    "hex8",
+    "hex8_formulation",
+    "tet4",
+    "tet10",
+]
 
 #: A solid whose volume is below this fraction of the cube of its bounding-box
 #: diagonal is rejected as degenerate.
@@ -130,6 +148,133 @@ def tet4(ctx: ElementContext) -> ElementMatrices:
     m = _expand_mass(block)
 
     dofs = [(nid, comp) for nid in ctx.node_ids[:4] for comp in range(3)]
+    return ElementMatrices(dofs=dofs, k=k, m=m)
+
+
+#: Corner pairs the six midside nodes of a ``TET10`` sit between, in the node
+#: order every public card layout uses: nodes 5..10 bisect the edges 1-2, 2-3,
+#: 3-1, 1-4, 2-4 and 3-4 of the corner nodes 1..4.  Nastran ``CTETRA`` (G5..G10)
+#: and Abaqus ``C3D10`` number them exactly this way.
+TET10_EDGES: tuple[tuple[int, int], ...] = ((0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3))
+
+#: Natural coordinates of the ``TET10`` centroid, ``L = (1/4, 1/4, 1/4, 1/4)``.
+TET10_CENTROID: tuple[float, float, float] = (0.25, 0.25, 0.25)
+
+#: ``dL_a/d(r, s, t)`` for the volume coordinates, with ``(r, s, t)`` standing
+#: for ``(L2, L3, L4)`` and ``L1 = 1 - r - s - t``.
+_TET_DL = np.array([[-1.0, -1.0, -1.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+
+
+def _tet10_shape(r: float, s: float, t: float) -> tuple[np.ndarray, np.ndarray]:
+    """``(N, dN/d(r,s,t))`` of the quadratic tetrahedron at one natural point.
+
+    In volume coordinates the ten functions are the textbook ones: a corner
+    carries ``L_a (2 L_a - 1)`` and a midside node ``4 L_a L_b``.  Both are
+    quadratic and reproduce any linear polynomial in ``x`` exactly, which is
+    the whole reason the constant-strain patch test comes through untouched.
+    """
+    L = np.array([1.0 - r - s - t, r, s, t])
+    n = np.empty(10)
+    dn = np.empty((10, 3))
+    for a in range(4):
+        n[a] = L[a] * (2.0 * L[a] - 1.0)
+        dn[a] = (4.0 * L[a] - 1.0) * _TET_DL[a]
+    for e, (a, b) in enumerate(TET10_EDGES):
+        n[4 + e] = 4.0 * L[a] * L[b]
+        dn[4 + e] = 4.0 * (L[b] * _TET_DL[a] + L[a] * _TET_DL[b])
+    return n, dn
+
+
+def tet10_gradient(xyz: np.ndarray, natural: Any = TET10_CENTROID) -> tuple[np.ndarray, float]:
+    """``(dN/dx, det J)`` of a ``TET10`` at one natural point.
+
+    Shared with :mod:`femtools.fea.recover`, so the stress the element is
+    integrated with and the stress that is reported come from one derivation.
+    """
+    r, s, t = (float(v) for v in natural)
+    _n, dn = _tet10_shape(r, s, t)
+    jacobian = dn.T @ np.asarray(xyz, dtype=float)[:10]
+    det = float(np.linalg.det(jacobian))
+    return np.linalg.solve(jacobian, dn.T).T, det
+
+
+@register(
+    "TET10",
+    n_nodes=10,
+    dofs_per_node=(0, 1, 2),
+    family="solid",
+    description="Ten-node quadratic tetrahedron, linear strain, 30 DOF",
+    aliases=("CTETRA10", "TETRA10", "C3D10", "TET10N"),
+)
+def tet10(ctx: ElementContext) -> ElementMatrices:
+    """Ten-node quadratic tetrahedron (Zienkiewicz & Taylor / Bathe / Cook).
+
+    Stiffness on the four-point symmetric rule, ``tet_rule(2)``.  With straight
+    edges -- midside nodes at the middle of their edge, which is what a mesher
+    writes -- the Jacobian is constant, ``B`` is linear in the natural
+    coordinates and the four-point rule integrates ``B^T D B`` *exactly*; it is
+    also the minimum rule that leaves the element with rank 24, i.e. with the
+    six rigid body modes and not one mode more.  The same rule is what
+    ``CTETRA``/``C3D10`` are integrated with.
+
+    Mass on Keast's fifteen-point degree-five rule, since ``N_i N_j`` is
+    quartic and the stiffness rule would get the consistent mass wrong.
+    ``lumped_mass`` uses the **HRZ** diagonal scaling (Hinton, Rock &
+    Zienkiewicz 1976): the row sums of a quadratic element are negative at the
+    corners -- ``-V/20`` each -- so the classical row-sum lumping is not
+    available here, while scaling the (always positive) diagonal of the
+    consistent matrix up to the true total mass is.
+
+    Curved edges are integrated, not refused, but they cost the patch test:
+    once the Jacobian varies within the element the four-point rule is no
+    longer exact and a constant stress state is only recovered to quadrature
+    accuracy.  Keep midside nodes near the middle of their edge.
+    """
+    xyz = ctx.coords[:10]
+    D = solid_D(ctx.mat)
+
+    pts, wts = tet_rule(2)
+    n_gp = wts.size
+    grads = np.empty((n_gp, 10, 3))
+    dets = np.empty(n_gp)
+    for g, point in enumerate(pts):
+        grads[g], dets[g] = tet10_gradient(xyz, point)
+
+    scales = wts * np.abs(dets)
+    volume = float(scales.sum())
+    _check_volume(ctx.element_id, "TET10", xyz, volume)
+    if not (np.all(dets > 0.0) or np.all(dets < 0.0)):
+        # As for HEX8: a consistently reversed node ordering integrates
+        # correctly, but a Jacobian that changes sign inside the element means
+        # a midside node has been pushed past the quarter point of its edge and
+        # part of the tetrahedron is folded through itself.
+        raise ValueError(
+            f"element {ctx.element_id}: folded TET10 (the Jacobian determinant changes "
+            f"sign over the element, from {dets.min():.3e} to {dets.max():.3e}); "
+            "check the midside node positions and the node ordering"
+        )
+
+    k = np.zeros((30, 30))
+    for g in range(n_gp):
+        B = _strain_matrix(grads[g])
+        k += scales[g] * (B.T @ D @ B)
+    k = 0.5 * (k + k.T)
+
+    mass_pts, mass_wts = tet_rule(5)
+    block = np.zeros((10, 10))
+    for point, weight in zip(mass_pts, mass_wts, strict=True):
+        r, s, t = (float(v) for v in point)
+        n, dn = _tet10_shape(r, s, t)
+        det = float(np.linalg.det(dn.T @ xyz))
+        block += (weight * abs(det) * ctx.mat.rho) * np.outer(n, n)
+    if ctx.lumped_mass:
+        diagonal = np.diag(block).copy()
+        # Total mass of the consistent matrix, ``rho * V``: HRZ preserves it.
+        total = float(block.sum())
+        block = np.diag(diagonal * (total / float(diagonal.sum())))
+    m = _expand_mass(block)
+
+    dofs = [(nid, comp) for nid in ctx.node_ids[:10] for comp in range(3)]
     return ElementMatrices(dofs=dofs, k=k, m=m)
 
 

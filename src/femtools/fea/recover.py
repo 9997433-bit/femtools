@@ -61,6 +61,43 @@ beyond continuity.  Where the two differ -- a coarse mesh with a steep gradient
 -- SPR is the better answer, and the honest reading of a large jump between the
 averaged nodal value and the element value is that the mesh is too coarse.
 
+Superconvergent patch recovery
+------------------------------
+
+:func:`recover_spr` is that better answer, and it is a different function
+rather than a mode of :func:`average_nodal`, whose ``1 / n_a`` weighting is
+frozen.  Following Zienkiewicz and Zhu (*The superconvergent patch recovery and
+a posteriori error estimates. Part 1: The recovery technique*, IJNME **33**\\ (7),
+1992, pp. 1331-1364), the value at a node is read off a polynomial fitted by
+least squares over the *patch* of elements meeting there,
+
+.. math::
+
+    \\sigma^*(x) = P(x)\\, a, \\qquad
+    a = \\arg\\min_a \\sum_{e \\ni a} \\lVert P(x_e) a - \\sigma_e \\rVert^2 ,
+
+with ``P`` the same polynomial order as the element shape functions -- linear
+here -- and the sampling points ``x_e`` the points at which the finite element
+stress is superconvergent.  For linear elements those are the element centroids
+(Barlow, *Optimal stress locations in finite element models*, IJNME 10, 1976),
+which is exactly what :func:`recover_stress` already reports, so the recovery
+needs no second pass over the elements.
+
+Two properties matter and both are checked in the test suite.  A constant
+stress state is reproduced exactly at every node, interior and boundary alike,
+because the fitted polynomial is then the constant itself.  And, unlike the
+average, a *linear* stress field is reproduced exactly as well: SPR moves the
+nodal value onto the trend of the patch instead of onto the mean of its
+neighbours, which is the whole point of it on a boundary node, where the
+average is systematically biased inwards.
+
+The one deviation from the paper worth naming: femtools fits the same linear
+polynomial for every element type, ``TET10`` included, and samples it at the
+element centroid.  The superconvergent points of a quadratic tetrahedron are
+its four Gauss points, not its centroid, so for ``TET10`` the result is an
+honest least-squares patch fit -- constant-stress exact, continuous, better
+than the average -- but not a formally superconvergent one.
+
 What is deliberately *not* here: no extrapolation of Gauss point values to the
 nodes, no nonlinear or plastic material.  Those are separate decisions with
 their own error, and the centroid value is the one a linear element actually
@@ -91,7 +128,13 @@ from .elements.shell import (
     cst_strain_matrix,
     dkt_curvature_matrix,
 )
-from .elements.solid import _hex_shape, _strain_matrix
+from .elements.solid import (
+    TET10_CENTROID,
+    _hex_shape,
+    _strain_matrix,
+    _tet10_shape,
+    tet10_gradient,
+)
 from .materials import plane_stress_D, solid_D
 from .protocols import get_any, iter_records
 from .quadrature import gauss_2d
@@ -101,6 +144,7 @@ __all__ = [
     "NodalStressResult",
     "StressResult",
     "average_nodal",
+    "recover_spr",
     "recover_strain",
     "recover_stress",
     "von_mises",
@@ -480,6 +524,26 @@ def _tet4_recovery(ctx: ElementContext, disp: np.ndarray, _z: float) -> _Recover
     )
 
 
+def _tet10_recovery(ctx: ElementContext, disp: np.ndarray, _z: float) -> _Recovered:
+    """Quadratic tetrahedron, evaluated at the element centroid.
+
+    A ``TET10`` carries a *linear* strain field, so unlike the four-node tet
+    it has a stress gradient of its own and the single value reported is the
+    centroid one.  With straight edges that is exactly the mean of the four
+    Gauss point values the stiffness was integrated with, which is why the
+    centroid is the sample the recovery reports and the sample
+    :func:`recover_spr` fits its patch polynomial through.
+    """
+    xyz = ctx.coords[:10]
+    grad, det = tet10_gradient(xyz, TET10_CENTROID)
+    if det == 0.0:
+        raise ValueError(f"element {ctx.element_id}: degenerate TET10 (zero Jacobian)")
+    strain = _strain_matrix(grad) @ disp[:10, :3].ravel()
+    stress = solid_D(ctx.mat) @ strain
+    n, _dn = _tet10_shape(*TET10_CENTROID)
+    return _Recovered(stress=stress, strain=strain, frame=np.eye(3), centroid=n @ xyz)
+
+
 def _hex8_recovery(ctx: ElementContext, disp: np.ndarray, _z: float) -> _Recovered:
     xyz = ctx.coords[:8]
     _n, dn0 = _hex_shape(0.0, 0.0, 0.0)
@@ -505,6 +569,7 @@ _RECOVERY: dict[str, Callable[[ElementContext, np.ndarray, float], _Recovered]] 
     "TRIA3": _tria3_recovery,
     "QUAD4": _quad4_recovery,
     "TET4": _tet4_recovery,
+    "TET10": _tet10_recovery,
     "HEX8": _hex8_recovery,
 }
 
@@ -727,12 +792,20 @@ class NodalStressResult:
         engineering shear strains.
     count:
         ``(n_nodes,)`` number of elements averaged into each node, the ``n_a``
-        of the ``1 / n_a`` weighting.
+        of the ``1 / n_a`` weighting -- and, for :func:`recover_spr`, the
+        number of sampling points in the patch.
     xyz:
         ``(n_nodes, 3)`` node coordinates, when the model supplied them.
     element_ids, etypes, layer:
         Provenance: the elements that contributed, their types and the
         through-thickness position the shell rows were evaluated at.
+    location:
+        ``"node"`` for the average, ``"spr"`` for the patch recovery.
+    patch_terms:
+        SPR only: how many terms of the linear polynomial the patch could
+        actually support at each node (4 on a three-dimensional patch, fewer
+        where the sampling points are coplanar, collinear or too few).  Empty
+        for :func:`average_nodal`, which fits nothing.
     """
 
     node_ids: list[Any] = field(default_factory=list)
@@ -744,6 +817,7 @@ class NodalStressResult:
     etypes: list[str] = field(default_factory=list)
     location: str = "node"
     layer: float = 0.0
+    patch_terms: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))
 
     def __len__(self) -> int:
         return len(self.node_ids)
@@ -937,3 +1011,206 @@ def _node_xyz_or_nan(index: ModelIndex, node_id: Any) -> np.ndarray:
         return np.asarray(index.xyz(node_id), dtype=float)
     except (KeyError, TypeError, ValueError):
         return np.full(3, np.nan)
+
+
+# ---------------------------------------------------------------------------
+# superconvergent patch recovery
+# ---------------------------------------------------------------------------
+
+#: A column of the SPR basis is dropped when this little of it survives the
+#: projection onto the columns already accepted.  The offsets are scaled to the
+#: patch radius first, so the test is on a dimensionless quantity.
+SPR_RANK_TOLERANCE = 1.0e-8
+
+#: How much a patch fit may amplify the scatter of its own samples before a
+#: polynomial term is given up.
+#:
+#: Evaluating the fit at the node is a linear functional ``w`` of the sampled
+#: stresses, and ``||w|| sqrt(n)`` is by how much it can magnify a perturbation
+#: of them; the plain average scores exactly 1.  A patch that is short of
+#: sampling points, or whose points all sit on one side of the node -- the
+#: boundary patches Zienkiewicz and Zhu handle by borrowing an interior fit --
+#: is *extrapolating*, and an exactly determined extrapolation over a short
+#: baseline can multiply round-off by several thousand.  Dropping the last
+#: polynomial term until the score is back under this bound trades a little of
+#: the recovery's reach for an answer that cannot be worse than the average by
+#: more than a fixed factor.
+SPR_MAX_AMPLIFICATION = 20.0
+
+
+def _spr_basis(offsets: np.ndarray) -> tuple[np.ndarray, list[int]]:
+    """The usable columns of ``[1, dx, dy, dz]`` over one patch, and which they are.
+
+    A patch whose sampling points are coplanar (a flat shell mesh), collinear
+    (a chain of rods) or simply too few cannot support the full linear
+    polynomial, and asking a least-squares solver for it anyway returns the
+    minimum-norm answer, which does *not* reproduce a constant.  Accepting the
+    columns one at a time by modified Gram-Schmidt and dropping the ones that
+    add nothing leaves a basis of full column rank that still starts with the
+    constant, so the fit is unique and a constant field survives exactly.
+    """
+    P = np.column_stack([np.ones(len(offsets)), np.asarray(offsets, dtype=float)])
+    kept: list[int] = []
+    basis = np.zeros((len(offsets), 0))
+    for j in range(P.shape[1]):
+        column = P[:, j]
+        residual = column - basis @ (basis.T @ column) if basis.shape[1] else column.copy()
+        norm = float(np.linalg.norm(residual))
+        if norm > SPR_RANK_TOLERANCE * max(float(np.linalg.norm(column)), 1.0):
+            kept.append(j)
+            basis = np.column_stack([basis, residual / norm])
+    return P[:, kept], kept
+
+
+def _spr_weights(P: np.ndarray) -> np.ndarray:
+    """``w`` with ``w @ values`` the least-squares fit evaluated at the node.
+
+    The offsets the basis was built from are measured from the node, so the
+    polynomial there is its constant term: ``w = P (P^T P)^-1 e_0``.
+    """
+    e0 = np.zeros(P.shape[1])
+    e0[0] = 1.0
+    return P @ np.linalg.solve(P.T @ P, e0)
+
+
+def _spr_fit(offsets: np.ndarray, data: np.ndarray) -> tuple[np.ndarray, int]:
+    """Fit one patch and evaluate it at the node; returns ``(values, n_terms)``."""
+    mean = data.mean(axis=0)
+    P, _kept = _spr_basis(offsets)
+    limit = SPR_MAX_AMPLIFICATION / np.sqrt(len(data))
+    while P.shape[1] > 1:
+        w = _spr_weights(P)
+        if float(np.linalg.norm(w)) <= limit:
+            # Fitting the deviation from the patch mean rather than the values
+            # themselves is the same fit -- the constant column is always in
+            # the basis, so shifting the data shifts the constant coefficient
+            # by the same amount -- but it makes a constant field come through
+            # at the round-off of a mean rather than of a linear solve.
+            return mean + w @ (data - mean), P.shape[1]
+        P = P[:, :-1]
+    return mean, 1
+
+
+def recover_spr(
+    stress: StressResult,
+    model: Any,
+    *,
+    nodes: Callable[[Any], bool] | Iterable[Any] | None = None,
+    index: ModelIndex | None = None,
+) -> NodalStressResult:
+    """Zienkiewicz-Zhu superconvergent patch recovery of the nodal stresses.
+
+    Zienkiewicz, O.C. and Zhu, J.Z., *The superconvergent patch recovery and a
+    posteriori error estimates. Part 1: The recovery technique*, IJNME
+    **33**\\ (7), 1992, pp. 1331-1364.  For each node, a linear polynomial is
+    fitted by least squares through the recovered stresses of the elements
+    meeting at it -- sampled at their centroids, the superconvergent points of
+    a linear element (Barlow 1976) -- and evaluated at the node.  See the
+    module docstring for the statement of the method and for what femtools
+    does differently.
+
+    This is *not* :func:`average_nodal`, which stays the plain ``1 / n_a``
+    arithmetic mean and is unchanged by this function existing.  The two agree
+    on a constant field (both are exact) and part company as soon as the
+    stress has a gradient: SPR reproduces a linear field exactly at every node,
+    including the boundary nodes where the average is biased towards the
+    interior.
+
+    Parameters
+    ----------
+    stress
+        The :class:`StressResult` of :func:`recover_stress` -- the element
+        centroid values *are* the sampling points, so no second pass over the
+        elements is needed.
+    model
+        The model it was recovered from; the element connectivity and the node
+        coordinates are read.
+    nodes
+        Restrict the output: a callable ``(node_id) -> bool`` or an explicit
+        collection of node ids.  Patches are still assembled in full, so a
+        restricted node keeps the value it would have had.
+    index
+        A prebuilt :class:`~femtools.fea.elements.ModelIndex`.
+
+    Returns
+    -------
+    NodalStressResult
+        With :attr:`~NodalStressResult.location` ``"spr"`` and
+        :attr:`~NodalStressResult.patch_terms` recording how many polynomial
+        terms each patch could carry.  A node whose coordinates the model does
+        not give, or whose patch supports nothing but the constant, falls back
+        to the arithmetic mean of its patch -- which is what a one-term fit
+        *is*, so the fallback is the same formula rather than a different one.
+    """
+    if not isinstance(stress, StressResult):
+        raise TypeError(
+            "recover_spr takes the StressResult of recover_stress, got "
+            f"{type(stress).__name__}"
+        )
+    index = ModelIndex.build(model) if index is None else index
+
+    keep: Callable[[Any], bool]
+    if nodes is None:
+        keep = lambda _nid: True  # noqa: E731
+    elif callable(nodes):
+        keep = nodes
+    else:
+        wanted = set(nodes)
+        keep = lambda nid: nid in wanted  # noqa: E731
+
+    connectivity = _connectivity(model, stress.element_ids)
+    samples = np.hstack([stress.stress_basic, stress.strain_basic])
+
+    order: list[Any] = []
+    patches: dict[Any, list[int]] = {}
+    used: list[Any] = []
+    used_types: list[str] = []
+    for i, eid in enumerate(stress.element_ids):
+        node_ids = connectivity.get(eid)
+        if not node_ids:
+            continue
+        used.append(eid)
+        used_types.append(stress.etypes[i])
+        for nid in node_ids:
+            rows = patches.get(nid)
+            if rows is None:
+                rows = patches[nid] = []
+                order.append(nid)
+            rows.append(i)
+
+    selected = [nid for nid in order if keep(nid)]
+    result = NodalStressResult(
+        node_ids=selected,
+        element_ids=used,
+        etypes=used_types,
+        location="spr",
+        layer=stress.layer,
+    )
+    if not selected:
+        return result
+
+    values = np.empty((len(selected), 12))
+    counts = np.empty(len(selected), dtype=int)
+    terms = np.empty(len(selected), dtype=int)
+    xyz = np.empty((len(selected), 3))
+    for row, nid in enumerate(selected):
+        patch = patches[nid]
+        counts[row] = len(patch)
+        xyz[row] = _node_xyz_or_nan(index, nid)
+        data = samples[patch]
+        if not np.all(np.isfinite(xyz[row])):
+            terms[row] = 1
+            values[row] = data.mean(axis=0)
+            continue
+        offsets = stress.centroid[patch] - xyz[row]
+        radius = float(np.max(np.abs(offsets))) if offsets.size else 0.0
+        if radius > 0.0:
+            offsets = offsets / radius
+        values[row], terms[row] = _spr_fit(offsets, data)
+
+    result.count = counts
+    result.patch_terms = terms
+    result.xyz = xyz
+    result.stress = values[:, :6]
+    result.strain = values[:, 6:]
+    return result
