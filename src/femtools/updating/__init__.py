@@ -4,6 +4,7 @@ Public entry points (see ``docs/CONTRACT_API.md``)::
 
     from femtools.updating.sensitivity import sensitivity_matrix
     from femtools.updating.updater import update_model, UpdateResult
+    from femtools.updating.responses import static_displacement_response
     from femtools.updating.force_id import identify_harmonic_forces
     from femtools.updating.frf_updating import update_from_frf
     from femtools.updating.selection import select_parameters
@@ -42,6 +43,7 @@ from .responses import (
     mac_vector,
     modal_response_function,
     pair_by_mac,
+    static_displacement_response,
 )
 from .selection import ParameterSelection, parameter_correlation, select_parameters
 from .sensitivity import (
@@ -93,6 +95,7 @@ __all__ = [
     "ResponseSpec",
     "modal_response_function",
     "frf_response_function",
+    "static_displacement_response",
     "mac_vector",
     "pair_by_mac",
     "have_fea",

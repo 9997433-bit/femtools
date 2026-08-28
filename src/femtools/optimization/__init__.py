@@ -5,6 +5,7 @@ Public entry points (see ``docs/CONTRACT_API.md``)::
     from femtools.optimization.size import size_optimize
     from femtools.optimization.shape import shape_optimize
     from femtools.optimization.topology import topology_simp
+    from femtools.optimization.topometry import topometry_optimize
     from femtools.optimization.doe import latin_hypercube, full_factorial
     from femtools.optimization.surrogate import fit_rsm, predict_rsm
     from femtools.optimization.multi import pareto_weighted
@@ -40,6 +41,7 @@ from .size import (
 )
 from .surrogate import RSMFit, design_matrix, fit_rsm, predict_rsm, rsm_terms
 from .topology import TopologyResult, element_stiffness_q4, topology_simp
+from .topometry import TopometryResult, topometry_optimize
 
 __all__ = [
     "size_optimize",
@@ -53,6 +55,9 @@ __all__ = [
     "topology_simp",
     "TopologyResult",
     "element_stiffness_q4",
+    # topometry (element-wise sizing on an existing mesh)
+    "topometry_optimize",
+    "TopometryResult",
     "latin_hypercube",
     "full_factorial",
     "random_sampling",

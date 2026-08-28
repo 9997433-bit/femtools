@@ -14,7 +14,7 @@ the FEA layer is not yet available.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -35,6 +35,7 @@ __all__ = [
     "solve_modal",
     "modal_response_function",
     "frf_response_function",
+    "static_displacement_response",
     "mac_vector",
     "pair_by_mac",
 ]
@@ -300,6 +301,232 @@ def assemble_response(
     )
     idx = idx[idx < freq.size]
     return freq[idx]
+
+
+#: Local DOF spellings accepted by :func:`static_displacement_response`, mapped
+#: onto the 0-based component convention of :mod:`femtools.core.model`.
+_DOF_ALIASES: dict[str, int] = {
+    "ux": 0, "uy": 1, "uz": 2, "rx": 3, "ry": 4, "rz": 5,
+    "x": 0, "y": 1, "z": 2, "tx": 0, "ty": 1, "tz": 2,
+    "1": 0, "2": 1, "3": 2, "4": 3, "5": 4, "6": 5,
+}
+
+
+def _normalize_component(comp: Any) -> int:
+    """``"uz"`` / ``"3"`` / ``2`` -> the 0-based local DOF index."""
+    if isinstance(comp, (int, np.integer)) and not isinstance(comp, bool):
+        value = int(comp)
+        if not 0 <= value < 6:
+            raise ValueError(f"local dof {comp!r} is outside 0..5")
+        return value
+    key = str(comp).strip().lower()
+    try:
+        return _DOF_ALIASES[key]
+    except KeyError:
+        raise ValueError(
+            f"unknown displacement component {comp!r}; expected 0..5 or one of "
+            f"{sorted(set(_DOF_ALIASES))}"
+        ) from None
+
+
+def _loaded_dofs(model: Any, loads: Any) -> list[tuple[Any, int]]:
+    """The ``(node, dof)`` pairs a load acts on -- the default measurement set."""
+    pairs: list[tuple[Any, int]] = []
+    if isinstance(loads, Mapping):
+        for key in loads:
+            node, comp = key if isinstance(key, tuple) else (key, 0)
+            pairs.append((node, _normalize_component(comp)))
+        return pairs
+    if loads is None:
+        for load in getattr(model, "loads", None) or ():
+            node = getattr(load, "node_id", None)
+            if node is None:
+                continue
+            as_dofs = getattr(load, "as_dof_values", None)
+            if as_dofs is None:  # pragma: no cover - foreign load record
+                continue
+            pairs.extend((node, int(comp)) for comp, _value in as_dofs())
+    return pairs
+
+
+def _normalize_static_loads(model: Any, loads: Any) -> Any:
+    """Expand ``model.loads`` force/moment vectors into ``{(node, dof): value}``.
+
+    The load builder reads component keys, not the vectors
+    :class:`femtools.core.model.Load` stores, so ``loads=None`` is resolved here
+    to keep it meaning "use the loads already on the model".
+    """
+    if loads is not None:
+        return loads
+    pairs: dict[tuple[Any, int], float] = {}
+    for record in getattr(model, "loads", None) or ():
+        node = getattr(record, "node_id", None)
+        expand = getattr(record, "as_dof_values", None)
+        if node is None or expand is None:  # pragma: no cover - foreign load record
+            return None
+        for comp, value in expand():
+            key = (node, int(comp))
+            pairs[key] = pairs.get(key, 0.0) + float(value)
+    return pairs or None
+
+
+def _resolve_response_dofs(model: Any, dofs: Any, loads: Any) -> list[tuple[Any, int] | int]:
+    """Normalise the requested measurement DOFs.
+
+    Accepts ``(node_id, component)`` pairs (component as ``0..5`` or ``"uz"``),
+    a ``{node_id: components}`` mapping, a
+    :class:`~femtools.core.model.DOFSet`, plain global equation numbers, or
+    ``None`` -- which measures wherever the load is applied, i.e. the drive
+    points of the test.
+    """
+    if dofs is None:
+        pairs = _loaded_dofs(model, loads)
+        if not pairs:
+            raise ValueError(
+                "no measurement DOFs given and the model carries no nodal load to take "
+                "them from; pass `dofs=[(node_id, 'uz'), ...]`"
+            )
+        return list(pairs)
+    if isinstance(dofs, Mapping):
+        out: list[tuple[Any, int] | int] = []
+        for node, comps in dofs.items():
+            if isinstance(comps, (str, int, np.integer)):
+                comps = [comps]
+            out.extend((node, _normalize_component(c)) for c in comps)
+        return out
+    resolved: list[tuple[Any, int] | int] = []
+    for item in dofs:
+        if isinstance(item, (int, np.integer)) and not isinstance(item, bool):
+            resolved.append(int(item))
+        elif isinstance(item, (tuple, list)) and len(item) == 2:
+            resolved.append((item[0], _normalize_component(item[1])))
+        else:
+            raise TypeError(
+                f"cannot interpret measurement dof {item!r}; expected (node_id, component) "
+                "or a global equation number"
+            )
+    return resolved
+
+
+def _static_indices(
+    model: Any, pairs: Sequence[tuple[Any, int] | int], assembly: Any = None
+) -> np.ndarray:
+    """Global equation numbers of the requested DOFs."""
+    if assembly is not None:
+        dof_map = assembly.dof_map
+        return np.array(
+            [p if isinstance(p, int) else dof_map.index(p[0], p[1]) for p in pairs], dtype=int
+        )
+    table = model.dof_map() if hasattr(model, "dof_map") else None
+    if table is None:  # pragma: no cover - foreign model without a DOF map
+        raise TypeError(
+            "the static solver returned a bare vector and the model has no dof_map(); "
+            "pass global equation numbers as `dofs`"
+        )
+    return np.array(
+        [p if isinstance(p, int) else table[(p[0], p[1])] for p in pairs], dtype=int
+    )
+
+
+def _default_static_solver() -> Callable[..., Any]:
+    try:
+        from femtools.fea.static import solve_static
+    except Exception as exc:  # pragma: no cover - exercised when fea is absent
+        raise RuntimeError(
+            "femtools.fea is not available; pass an explicit `solver=` callback to "
+            "static_displacement_response."
+        ) from exc
+    return solve_static
+
+
+def static_displacement_response(
+    model: Any,
+    parameters: Any,
+    dofs: Any = None,
+    *,
+    loads: Any = None,
+    solver: Callable[..., Any] | None = None,
+    solver_kwargs: dict[str, Any] | None = None,
+    scale: ArrayLike | None = None,
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Build ``p -> u(p)`` at selected DOFs from a linear static solution.
+
+    This is the static counterpart of :func:`modal_response_function`: a
+    first-class response for :func:`femtools.updating.update_model`, so a model
+    can be updated against measured *deflections* (a static test, a proof load,
+    a dial-gauge or DIC field) instead of, or alongside, measured frequencies.
+
+    Parameters
+    ----------
+    model:
+        :class:`femtools.core.model.FEModel` (or a project wrapper around one).
+        It is deep-copied for every evaluation, so the caller's database is
+        never touched.
+    parameters:
+        Parameter specification -- see :func:`femtools.updating.as_parameters`.
+    dofs:
+        Measurement DOFs: ``(node_id, component)`` pairs with the component
+        given as ``0..5`` or as a label (``"uz"``, ``"z"``, ``"rx"``, ...), a
+        ``{node_id: "xyz"}``-style mapping, a
+        :class:`~femtools.core.model.DOFSet`, or plain global equation numbers.
+        ``None`` (default) measures every loaded DOF.
+    loads:
+        Anything :func:`femtools.fea.loads.build_load_vector` accepts.  ``None``
+        uses the model's own loads.
+    solver:
+        Optional ``solver(model, loads) -> u`` callback replacing
+        :func:`femtools.fea.static.solve_static`.  It may return a full
+        displacement vector or a :class:`~femtools.fea.static.StaticResult`.
+    scale:
+        Optional multiplier applied to the response (a scalar, or one factor per
+        DOF).  Handy to bring millimetre-scale test data and metre-scale FE
+        results onto one residual.
+
+    Returns
+    -------
+    Callable ``p -> ndarray`` of displacements in the basic (global) frame.
+
+    Examples
+    --------
+    Recover a wrong Young's modulus from one measured tip deflection::
+
+        f = static_displacement_response(model, [{"type": "material", "id": 1,
+                                                  "name": "E"}], [(tip, "uz")])
+        res = update_model(model, parameters, targets=[u_measured], response=f)
+    """
+    model = unwrap_model(model)
+    pset: ParameterSet = as_parameters(parameters)
+    base = snapshot_baseline(model, pset)
+    pairs = _resolve_response_dofs(model, dofs, loads)
+    kwargs = dict(solver_kwargs or {})
+    factor = None if scale is None else np.asarray(scale, dtype=float)
+    cached_index: list[np.ndarray | None] = [None]
+
+    def _solve(m: Any) -> np.ndarray:
+        applied = _normalize_static_loads(m, loads)
+        if solver is not None:
+            out = solver(m, applied)
+        else:
+            out = _default_static_solver()(m, applied, full_result=True, **kwargs)
+        assembly = getattr(out, "assembly", None)
+        u = np.asarray(getattr(out, "u", out), dtype=float)
+        if u.ndim != 1:
+            raise ValueError(
+                "static_displacement_response expects one load case; the solver returned "
+                f"a {u.shape} displacement matrix"
+            )
+        if assembly is not None:
+            u = np.asarray(assembly.to_basic(u), dtype=float)
+        if cached_index[0] is None:
+            cached_index[0] = _static_indices(m, pairs, assembly)
+        return u[cached_index[0]]
+
+    def _f(p: np.ndarray) -> np.ndarray:
+        m = apply_parameters(model, pset, p, copy_model=True, baseline=base)
+        values = _solve(m)
+        return values if factor is None else values * factor
+
+    return _f
 
 
 def frf_response_function(
