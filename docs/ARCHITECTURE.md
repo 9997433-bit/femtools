@@ -35,7 +35,8 @@ Layer 0  core         FE/test relational database: nodes, elements, materials, p
                       SPCs, loads, sets, coordinate systems, units, test geometry, channels
 Layer 1  io           UNV, Nastran BDF, project persistence (.ftproj), driver plug-ins
 Layer 2  fea          element library, DOF management, sparse K/M/C assembly, static solver,
-                      eigensolver (ARPACK), complex modes, reduction (Guyan/IRS/SEREP)
+                      eigensolver (ARPACK), complex modes, reduction (Guyan/IRS/SEREP),
+                      stress recovery + RBE2 constraint transform (Round 7, in progress)
 Layer 3  dynamics     modal & direct FRF, harmonic response, time integration,
                       Craig–Bampton CMS, modal-based assembly, residual vectors
 Layer 4  correlation  MAC/CoMAC/POC, cross-orthogonality, FRF correlation, mode pairing
@@ -97,6 +98,7 @@ external post-processors can map results back to the source model.
 | `materials` | material id | `Material(type, E, nu, rho, ...)` | — |
 | `properties` | property id | `Property(type, material_id, A/I/t/k/...)` | `material_id` exists |
 | `spcs` | — | `(node_id, mask: 6×bool)` | node id exists |
+| `rbe2` | — | `RBE2(independent, dependents, components 1..6)` | unique id; node ids exist; independent ∉ dependents |
 | `sets` | name | `NodeSet` / `ElementSet` | member ids exist |
 | `coord_systems` | cs id | `CoordSys(type, origin, rotation)` | — |
 | `units` | — | `UnitSystem` (SI internal; converters at I/O boundary) | — |
@@ -136,8 +138,13 @@ code never branches on data origin.
      See `docs/PRODUCT_MAP.md` (R6, shell drilling).
 * **Constraint elimination.** SPCs are applied by row/column elimination (slicing the CSR
   matrix to the active set), not by penalty terms, so eigenvalues are not polluted by penalty
-  artifacts. MPCs/RBEs (planned R5+) will be applied by null-space transformation `u = T q`
-  with `K_r = Tᵀ K T`, keeping symmetry.
+  artifacts. MPCs/RBEs are applied by null-space transformation `u = T q` with
+  `K_r = Tᵀ K T` (and `M_r = Tᵀ M T`), keeping symmetry. Round 7 freezes this as
+  `fea.mpc.apply_rbe2` / `ConstraintTransform`, consuming the merged `FEModel.rbe2` table
+  (`core.model.RBE2`, shared with the BDF `RBE2` card): the dependent node follows the
+  independent one by the small-rotation rigid-body relation, and `assemble_km` honors
+  `model.rbe2` (or an explicit `mpc=` transform). The transform module is not yet merged on
+  this branch — `docs/PRODUCT_MAP.md` R7-wip; references `docs/SOTA.md` §11.
 
 ## 6. Sparse assembly
 
@@ -181,6 +188,13 @@ ever formed by the framework (dense paths are allowed inside tests and for n < ~
   SEREP as explicit transformation-matrix builders (`ReductionResult` carries `T` with
   `K_r = TᵀKT`, `M_r = TᵀMT`) reused by pretest (test-DOF reduction) and correlation
   (shape expansion via `correlation.expansion.expand_guyan` / `expand_serep`).
+* **Stress recovery (Round 7, in progress — `fea.recover`, `docs/PRODUCT_MAP.md` R7-wip):**
+  `recover_stress` / `recover_strain` evaluate element strain and stress from a displacement
+  solution at the element centroid (or averaged Gauss points) through the same element
+  kernels the assembler uses, returning a `StressResult`. Recovery is an fea-layer
+  capability: it consumes `StaticResult` / `ModalResult` displacement fields and never
+  re-solves. Linear elasticity only, no nodal smoothing; the module does not import from
+  this branch yet. References: `docs/SOTA.md` §11 (Cook et al.; Bathe; Barlow points).
 
 ## 8. Result objects
 
@@ -256,14 +270,24 @@ Policy:
        def read_modal(self, result_file: str | Path) -> ModalResult: ...
    ```
 
-   femtools ships the contract only — no vendor drivers and no proprietary binary
-   parsers. Adapters are built on the text translators of `femtools.io`, which since
+   femtools ships the contract and — once the Round-7 module `drivers.nastran` merges
+   (`docs/PRODUCT_MAP.md` R7-wip; it does not import from this branch yet) — one optional
+   concrete **text** driver, `NastranPunchDriver`: `write_input` emits the model through
+   the public `write_bdf` translator plus a SOL 103 case control requesting punch output,
+   `read_modal` parses the `.pch` text with `read_pch`, `is_available()` probes for a
+   local executable (never raises), and `run()` raises `SolverError` when no installation
+   is present. femtools never bundles, requires, or tests against the vendor binary —
+   everything the driver touches is text, and no proprietary binary parser exists in the
+   codebase. Adapters are built on the text translators of `femtools.io`, which since
    Round 4 include Nastran punch (`.pch`) results (`read_pch`/`write_pch`) and the
    ANSYS CDB NBLOCK/EBLOCK mesh subset (`read_cdb`) alongside the Round-1 BDF/UNV
    read/write. Round 6 added Abaqus INP (`io.inp.read_inp`/`write_inp`) and LS-DYNA K
-   (`io.kfile.read_k`) text-subset translators over publicly documented card layouts.
-   Closed binary result dumps (Nastran OP2, ANSYS rst, Abaqus odb) are out
-   of scope (N/A) — the protocol is the extension point for third-party binary drivers.
+   (`io.kfile.read_k`) text-subset translators over publicly documented card layouts;
+   Round 7 freezes the matching writers (`io.cdb.write_cdb`, `io.kfile.write_k`) and
+   BDF `INCLUDE`/`RBE2` reading, all R7-wip until merged.
+   Closed binary result dumps (Nastran OP2, ANSYS rst, Abaqus odb) remain out
+   of scope (N/A) — Round 7 changes nothing there: still no OP2. The protocol stays the
+   extension point for third-party binary drivers.
    Only a driver may depend on vendor
    formats; results always land as `ModalResult`/`FRFResult`, and a failed external
    run raises `SolverError`.

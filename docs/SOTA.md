@@ -41,6 +41,18 @@ deviations.
   on `1 − MAC` (Hungarian algorithm via `scipy.optimize.linear_sum_assignment`) with a
   configurable frequency-deviation penalty, rather than greedy row-max, to avoid duplicate
   pairings on closely spaced modes.
+* **Nearest-node FE↔test geometry mapping (Round-7 target —
+  `correlation.dofmap.map_nearest_nodes`, PRODUCT_MAP R7-wip).**
+  Nearest-neighbor search over node coordinates
+  via k-d trees: Bentley, J.L., *Multidimensional Binary Search Trees Used for Associative
+  Searching*, Communications of the ACM, 18(9), 1975, pp. 509–517; expected-logarithmic
+  best-match queries: Friedman, J.H., Bentley, J.L., Finkel, R.A., *An Algorithm for Finding
+  Best Matches in Logarithmic Expected Time*, ACM Transactions on Mathematical Software,
+  3(3), 1977, pp. 209–226 (the algorithm behind `scipy.spatial.cKDTree`, which femtools
+  wraps). Input is a test grid `(n, 3)` against model/FE coordinates; output `(fe_ids,
+  distances)`, so two translated copies of the same mesh must match 1–1 with distance equal
+  to the translation. Downstream DOF selection stays typed through `DOFMap` — geometric
+  proximity never silently becomes a DOF-order assumption.
 
 ## 2. Pretest design
 
@@ -185,6 +197,20 @@ deviations.
   SLSQP/trust-constr backends as size optimization, with a mesh-quality safeguard
   (Laplacian-smoothness / minimum-Jacobian barrier) against the element-distortion failure
   mode that the survey literature identifies as the central difficulty of shape variables.
+* **Topometry — element-wise sizing on a fixed mesh (Round-7 target —
+  `optimization.topometry.topometry_optimize`, PRODUCT_MAP R7-wip).** Bendsøe–Sigmund
+  (2003, cited above) organize structural optimization into sizing, shape, and topology
+  design: *topometry* keeps the mesh and connectivity fixed and treats a per-element
+  thickness (or density) as the design variable — element-by-element sizing in the
+  Bendsøe–Sigmund taxonomy — whereas *topology* optimization (our `topology_simp`) decides
+  material existence on a grid it builds itself. The min-compliance formulation,
+  optimality-criteria update, and density filtering reuse the published machinery already
+  cited for SIMP (Sigmund 2001; Bourdin 2001), applied to an existing `FEModel` mesh with a
+  volume / mean-thickness constraint (OC or scipy SLSQP). The name "topometry" for this
+  variant is from the public conference literature — Leiva, J.P., *Topometry Optimization:
+  A New Capability to Perform Element by Element Sizing Optimization of Structures*,
+  Proc. 10th AIAA/ISSMO Multidisciplinary Analysis and Optimization Conference, 2004
+  (AIAA 2004-4595) — cited for terminology only; no commercial-manual material is used.
 * **DOE.** McKay, M.D., Beckman, R.J., Conover, W.J., *A Comparison of Three Methods for
   Selecting Values of Input Variables in the Analysis of Output from a Computer Code*,
   Technometrics, 21(2), 1979, pp. 239–245 (Latin hypercube sampling; femtools requires an
@@ -230,8 +256,9 @@ implementations; `docs/ACCEPTANCE.md` (owned by R1-F3) elaborates the golden cas
 
 Known distances between the merged code and the state of the art it targets. Status tags in
 `docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4/R6 is merged and tested but may still carry
-one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+
-and N/A rows of the product map, not repeated here.
+one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+,
+R7-wip (frozen for Round 7 but not yet merged — §11), and N/A rows of the product map,
+not repeated here.
 
 ### Closed in Round 2
 
@@ -274,6 +301,45 @@ and N/A rows of the product map, not repeated here.
 * **Static typing.** `py.typed` ships and the public API has a full static view
   (`TYPE_CHECKING` re-exports), but mypy still reports a few dozen informational findings in
   internal modules; the CI mypy step is non-blocking.
+
+## 11. FEA kernels — Round-7 targets (stress recovery, rigid constraints)
+
+Round 7 (Cycle C's first round) freezes two fea-layer additions in
+`.agent_workspace/REMAINING.md`; both are tagged **R7-wip** in `docs/PRODUCT_MAP.md` until
+their modules merge. References are textbooks and journal/conference papers only.
+
+* **Linear stress/strain recovery (`fea.recover.recover_stress` / `recover_strain` →
+  `StressResult`).** Element stress from the displacement solution, `σ = D B u` evaluated at
+  sampling points inside each element: Cook, R.D., Malkus, D.S., Plesha, M.E., Witt, R.J.,
+  *Concepts and Applications of Finite Element Analysis*, 4th ed., Wiley, 2002 (stress
+  computation and sampling-point accuracy); Bathe, K.-J., *Finite Element Procedures*,
+  Prentice Hall, 1996 (2nd ed., K.J. Bathe, 2014) — calculation of stresses from the
+  isoparametric displacement field and their convergence behavior. Superconvergent/optimal
+  sampling at the reduced Gauss points: Barlow, J., *Optimal Stress Locations in Finite
+  Element Models*, International Journal for Numerical Methods in Engineering, 10(2), 1976,
+  pp. 243–251. femtools reports one stress/strain state per element at the centroid (or the
+  average of the Gauss-point values) for BAR2, BEAM2, QUAD4, TRIA3, HEX8, TET4 — linear
+  elasticity only, no plasticity. Acceptance is a constant-strain patch test at 1e-12, in
+  the spirit of MacNeal, R.H., Harder, R.L., *A Proposed Standard Set of Problems to Test
+  Finite Element Accuracy*, Finite Elements in Analysis and Design, 1(1), 1985, pp. 3–20:
+  a linear displacement patch is represented exactly by these formulations, so the
+  tolerance is roundoff-only per §9.1. Nodal extrapolation / smoothed recovery
+  (Zienkiewicz–Zhu superconvergent patch recovery) is the known upgrade for nodal stress
+  fields and is out of this round's scope.
+* **RBE2 rigid constraints by master–slave elimination (`fea.mpc.apply_rbe2` /
+  `ConstraintTransform`; the data container `core.model.RBE2` / `FEModel.add_rbe2` is
+  already merged).** Multipoint constraints imposed by the transformation (master–slave /
+  null-space) method — eliminate dependent DOFs through `u = T q` and reduce
+  `K_r = Tᵀ K T`, `M_r = Tᵀ M T` — keeping symmetry and avoiding the eigenvalue pollution
+  of penalty approaches: textbook treatment in Cook–Malkus–Plesha–Witt (2002), constraint
+  chapters, and Bathe (1996), imposition of constraints in the displacement-based
+  formulation. The dependent node follows the independent node by the small-rotation
+  rigid-body relation `u_d = u_i + θ_i × (x_d − x_i)`, which supplies the rows of `T`;
+  `assemble_km` applies `T` once, honoring `model.rbe2` (or an explicit `mpc=` transform).
+  Acceptance per the Round-7 brief: a free-free model with two nodes welded by an RBE2
+  keeps exactly 6 rigid-body modes, and a rigid offset beam transmits the moment. The
+  `RBE2` *card* layout is read from publicly documented card descriptions, like every other
+  BDF card femtools parses; no commercial-manual text is used.
 
 ## Non-infringement note
 
