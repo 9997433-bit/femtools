@@ -1,10 +1,15 @@
 # IO translators — Abaqus INP and LS-DYNA keyword (K) text subsets
 
-Spec for `femtools.io.inp` and `femtools.io.kfile` (owner: R6-F2). Frozen entry points:
+Spec for `femtools.io.inp` and `femtools.io.kfile` (owner: R6-F2), plus the Round-7
+Nastran BDF extensions of §4 (owner: R7-F2). Frozen entry points:
 
 ```python
 from femtools.io.inp import read_inp      # write_inp is optional
 from femtools.io.kfile import read_k
+# Round-7 (REMAINING.md; pending on this tree) — see §4 and ACCEPTANCE Round-7 status:
+from femtools.io.cdb import write_cdb
+from femtools.io.kfile import write_k
+from femtools.io.bdf import read_bdf      # grows INCLUDE + RBE2, §4
 ```
 
 Scope guard (REMAINING.md): **public text card layouts only** — the card grammars below are
@@ -142,3 +147,61 @@ already pin).
 
 Complexity: one pass over the file, $O(n_{lines})$ with $O(1)$ keyword dispatch; memory is
 the model itself plus the raw-card store for the K-file two-phase resolve.
+
+## 4. Nastran BDF extensions — `INCLUDE` and `RBE2` (Round 7, owner R7-F2)
+
+`read_bdf` (Round 1, stable) grows two features frozen in REMAINING.md — pending on this
+tree as of 2026-08-28. Both are public card/statement layouts (MSC/NX Quick Reference
+Guide); no copyrighted deck content is reproduced anywhere.
+
+### 4.1 `INCLUDE` statement resolution
+
+Grammar: the statement keyword `INCLUDE` (case-insensitive) followed by a filename,
+quoted with `'...'` or `"..."` (quotes optional for paths without blanks); it may appear
+anywhere card-sized input is legal. Wrapped multi-line quoted filenames exist in the wild
+but are out of the Round-7 subset — a clear error beats a silent mis-parse. Resolution
+rules, all load-bearing:
+
+- **Relative paths resolve against the directory of the *including* file**, never the
+  process CWD — nested includes chain through their own directories, which is the whole
+  point of deck-relative includes.
+- **Depth ≤ 8**: a ninth nested level raises `BdfError` carrying the include chain.
+- **Cycle-safe**: keep the stack of currently-open files as `os.path.realpath`-normalized
+  paths; re-entering a file already on the stack raises with the cycle spelled out.
+  (Note: a *diamond* — the same file included twice sequentially — is not a cycle; it is
+  legal and simply parsed twice, duplicate-id errors then surface as such.)
+- A missing file raises with the including file and line number.
+
+Implementation shape: the line reader becomes a stack of `(path, line_iterator)` sources
+and included text is spliced in place; everything downstream (free/small/large-field card
+parsing, continuations) is untouched and continuation cards may not straddle an include
+boundary. Errors keep reporting `(file, line)` per source, not a global line count.
+
+### 4.2 `RBE2` card
+
+Public small/large/free-field layout:
+
+```text
+RBE2  EID  GN  CM  GM1  GM2  GM3 ...  (ALPHA)
+```
+
+`GN` is the **independent** grid, `CM` the constrained component codes as a digit string
+of 1..6 (e.g. `123456`), `GM1..GMi` the dependent grids, continuing over standard
+continuation lines. The optional trailing `ALPHA` (thermal expansion coefficient) is
+recognized and skipped with one aggregated warning — femtools carries no thermal strain.
+Disambiguation of the tail is the documented one: grid ids are integers, `ALPHA` is a
+real (contains `.` or an exponent).
+
+Maps directly onto the merged, stable container — **do not invent a parallel table**:
+
+```python
+model.add_rbe2(id=EID, independent=GN, dependents=(GM1, ..., GMi),
+               components=tuple(int(c) for c in str(CM)))
+```
+
+which is the same `core.model.RBE2` list that `fea.mpc.apply_rbe2` consumes for the
+condensation $u = Tq$ (`fea.md` §11) — reading a deck and assembling it therefore honors
+the rigid constraints with no extra plumbing. Validation (duplicate id, missing nodes,
+independent ∈ dependents) lives in the container, not the parser. `RBE3` (interpolation,
+*not* rigid) is optional Round-7 scope: if unimplemented it must take the standard
+aggregated warn-and-skip path, and it must never be stored as an `RBE2`.

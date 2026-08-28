@@ -1,4 +1,4 @@
-# Optimization algorithms — size (SLSQP), topology (SIMP), shape, DOE
+# Optimization algorithms — size (SLSQP), topology (SIMP), shape, topometry, DOE
 
 Spec for `femtools.optimization` (owner: R1-O4). Frozen entry points:
 
@@ -8,6 +8,8 @@ from femtools.optimization.topology import topology_simp
 from femtools.optimization.doe import latin_hypercube, full_factorial
 # Round-6 addition (REMAINING.md, owner R6-O4) — see §4:
 from femtools.optimization.shape import shape_optimize, ShapeResult
+# Round-7 addition (REMAINING.md, owner R7-O4; pending on this tree) — see §5:
+from femtools.optimization.topometry import topometry_optimize, TopometryResult
 ```
 
 ## 1. Size optimization — `size_optimize`
@@ -201,12 +203,65 @@ definition (report which); fixed topology means large shape changes starve the m
 the quality barrier going active for many iterations is the signal to stop trusting the
 result, report `quality_history`.
 
-## 5. Complexity summary
+## 5. Topometry optimization — `topometry_optimize` (Round 7, owner R7-O4)
+
+Element-wise sizing on an **existing** `FEModel` mesh: one design variable per element
+(shell/membrane thickness $t_e$, or a density-like modulus scale $x_e$ for element types
+without a thickness), minimum compliance under a volume / mean-thickness constraint.
+Frozen entry point (REMAINING.md; module pending on this tree as of 2026-08-28):
+
+```python
+from femtools.optimization.topometry import topometry_optimize, TopometryResult
+# design field: per-element thickness (shell properties) or density (E-scale),
+# objective: min compliance under given loads; constraint: volume or mean thickness;
+# update: OC or SLSQP. Works on the model's own mesh — nothing is re-meshed.
+```
+
+How it differs from its two neighbours, since all three share the compliance machinery:
+`topology_simp` (§2) builds its **own** structured grid and drives fictitious densities to
+0/1 with the SIMP power $p = 3$ — the answer is a *layout*. `shape_optimize` (§4) moves
+**node coordinates** on a fixed mesh — the answer is a *boundary*. Topometry (the term is
+Vanderplaats'; the capability shipped in Genesis) keeps the user's mesh *and* keeps the
+variables physical: a per-element thickness distribution is manufacturable at intermediate
+values, so **no penalization is needed** ($p = 1$) when the field is a real shell
+thickness; an optional $p > 1$ is only meaningful when the field is reinterpreted as a
+0/1 material indicator, which is then just element-wise SIMP on an unstructured mesh.
+
+Sensitivities are analytic and self-adjoint, exactly as §2: with the element stiffness
+split into its thickness powers — membrane $\propto t$, plate bending $\propto t^3$,
+i.e. $k_e(t_e) = t_e\, k_e^m + t_e^3\, k_e^b$ (both parts integrated once at unit
+thickness) —
+
+$$\frac{\partial c}{\partial t_e} = -u_e^\top \frac{\partial k_e}{\partial t_e} u_e
+= -u_e^\top \left( k_e^m + 3 t_e^2\, k_e^b \right) u_e \le 0,
+\qquad \frac{\partial V}{\partial t_e} = A_e,$$
+
+so one static solve per iteration prices every element. For the density variant replace
+$t_e$ by $x_e^p$ scaling the whole $k_e^0$ (§2 formulas verbatim, $v_e$ fixed). Update:
+the §2.2 optimality-criteria fixed point with bisection on the volume multiplier (the
+sensitivity signs and the monotone-compliance argument carry over unchanged), or SLSQP
+via the §1 machinery when extra constraints (per-element bounds beyond boxes, frequency
+floors) are requested. The §2.1 density filter is available and recommended — a thickness
+field is physical so checkerboarding is less poisonous than in topology, but mesh
+dependence of the optimum is not, and the filter is the standard cure either way.
+
+Gates (ACCEPTANCE Round-7 status, `tests/test_round7_o4.py`): a clamped cantilever plate
+started from uniform thickness must end with strictly lower compliance at the same
+volume, every $t_e$ within bounds, no inverted/degenerate element ever handed to the
+solver (the mesh never moves, so this is a bounds question, not a Jacobian question),
+monotone OC history, input model not mutated. References: Bendsøe & Sigmund, *Topology
+Optimization* (2003) ch. 1 (sizing vs topology taxonomy); Sigmund, "A 99 line topology
+optimization code written in Matlab", *SMO* 21 (2001) — OC/filter machinery reused here;
+Vanderplaats, "Structural optimization for statics, dynamics and beyond", *J. Braz. Soc.
+Mech. Sci. Eng.* 28 (2006) — topometry naming and scope.
+
+## 6. Complexity summary
 
 | Kernel | Cost |
 |---|---|
 | SLSQP iteration | QP $O(n_x^3)$ + 1 modal/static solve + analytic gradients |
 | SIMP iteration | 1 static solve (reused pattern) + $O(nnz_W)$ filter + $O(40 n_e)$ bisection |
 | Shape iteration | 1 modal/static solve + $O(n_s \bar n_{adj})$ element re-integrations + QP $O(n_s^3)$ |
+| Topometry iteration | 1 static solve + $O(n_e)$ analytic gradients + $O(40 n_e)$ OC bisection (+ filter $O(nnz_W)$) |
 | LHS | $O(\text{iters} \cdot n^2 k)$ maximin, $O(nk)$ plain |
 | Full factorial | $O(\prod_k L_k)$ — memory bound |

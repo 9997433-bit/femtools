@@ -9,6 +9,9 @@ from femtools.fea.eigen import solve_modes           # -> ModalResult
 from femtools.fea.elements import available_elements
 # Round-4 additions (REMAINING.md, owner R4-O1) — see §9:
 from femtools.fea.reduction import guyan, irs, serep, ReductionResult
+# Round-7 additions (REMAINING.md, owner R7-O1; pending on this tree) — see §10–§11:
+from femtools.fea.recover import recover_stress, recover_strain, StressResult
+from femtools.fea.mpc import apply_rbe2, ConstraintTransform
 ```
 
 Notation: $K$, $M$ global stiffness/mass (`scipy.sparse.csr_matrix`, symmetric),
@@ -427,3 +430,125 @@ Verification: `examples/guyan_serep.py` (static exactness 1e-12 measured, upper-
 property, IRS mean improvement, SEREP round-off reproduction), ACCEPTANCE case 17, and
 `tests/test_round4_reduction.py` (R4-G1: 3-DOF closed-form Guyan basis, 5-DOF chain IRS
 improving the first eigenvalue error by ≥ 10×, SEREP reconstruction at 1e-13).
+
+## 10. Stress and strain recovery — `recover_stress` / `recover_strain` (Round 7, owner R7-O1)
+
+Frozen entry points (REMAINING.md; module pending on this tree as of 2026-08-28):
+
+```python
+from femtools.fea.recover import recover_stress, recover_strain, StressResult
+# element-centroid stress/strain for BAR2, BEAM2, QUAD4, TRIA3, HEX8, TET4
+# from a static displacement vector (solve_static) or one mode column.
+# Linear elastic only — no nonlinearity, no plasticity, no failure criteria.
+```
+
+Recovery is *differentiate, then constitute*, evaluated per element at the centroid
+(or as the average over the element's Gauss points — same value for the constant-strain
+gates below): gather the element displacements $u_e$ from the global vector through
+`dof_map`, rotate to the element local frame, evaluate the strain–displacement matrix at
+the recovery point, and back-substitute the constitutive law:
+
+$$\varepsilon = B(\xi_c)\, u_e^{loc}, \qquad \sigma = D\, \varepsilon,$$
+
+with $D$ the same plane-stress / 3-D isotropic matrix the element stiffness was built
+from (§2.3–§2.5) — recovery must share the element's $B$ and $D$ code paths, otherwise
+the patch gate below tests the wrong thing. Per element type:
+
+- **BAR2**: constant axial strain $\varepsilon_x = (u_{x2} - u_{x1})/L$ in the bar frame,
+  $\sigma_x = E \varepsilon_x$ (with `J` set, the torsional moment $GJ\,\theta'_x$ is the
+  analogous constant resultant). Exact everywhere, not just at the centroid.
+- **BEAM2**: Euler–Bernoulli resultants from the local DOFs — axial force $N = EA\,u'_x$,
+  torque $T = GJ\,\theta'_x$, and bending moments $M_y = EI_y\, w''$, $M_z = EI_z\, v''$
+  from the second derivatives of the Hermite interpolation (§2.2) at $\xi = 1/2$. Since
+  the Hermite curvature is linear in $\xi$, the centroid value is the element mean.
+  Report the axial fiber stress as $\sigma_x = N/A \pm M c / I$ with $c$ the section
+  extreme-fiber distance when the property carries it; the resultants are the primary
+  output.
+- **TRIA3 / TET4**: the strain field is constant (CST, §2.3) — the centroid value is the
+  exact element strain; these two make the patch gate sharp.
+- **QUAD4**: evaluate $B$ at the single point $\xi = \eta = 0$. The centroid is the
+  bilinear element's superconvergent sampling point (Barlow points; for the in-plane
+  shear of a distorted QUAD4 it is the *only* reliable point — corner extrapolation is a
+  postprocessing choice deliberately out of scope). Flat-shell recovery reports the
+  membrane strain of the mid-surface and the plate bending curvatures separately;
+  combined fiber values $\sigma = \sigma_m \pm z\,\sigma_b$ are derived quantities.
+- **HEX8**: evaluate the compatible $B$ at $\xi = \eta = \zeta = 0$. This is consistent
+  with the incompatible-modes formulation of §2.5 *at the centroid specifically*: the
+  Wilson/EAS enhancement shape functions are even ($1 - \xi^2$, …), so their strain
+  contribution is odd and vanishes at the element center — no recovery of the condensed
+  internal parameters is needed there, and under a constant-strain state the enhanced
+  parameters are exactly zero anyway (that is the §2.5 patch-test property). Recovering
+  anywhere *other* than the centroid would require re-solving the condensed
+  $\alpha = -H^{-1} \Gamma u_e$ per element; out of Round-7 scope.
+
+Frames and outputs: strains are computed in the element local frame; solid/membrane
+components are rotated to global (Voigt transformation) before reporting, beam/bar
+resultants stay in the element frame (they are meaningless elsewhere). `StressResult`
+carries per-element components keyed by element id, plus derived von Mises
+$\sigma_{vm} = \sqrt{\tfrac{1}{2}\left[(\sigma_1-\sigma_2)^2 + (\sigma_2-\sigma_3)^2 +
+(\sigma_3-\sigma_1)^2\right]}$ for continuum elements. `recover_strain` is the same walk
+stopping before $D$.
+
+Acceptance gate (`tests/test_round7_o1.py`, ACCEPTANCE Round-7 status): impose a linear
+displacement field $u = A x$ on every supported element type — the recovered strain must
+equal $\mathrm{sym}(A)$ and the stress $D\,\mathrm{sym}(A)$ to **1e-12** on every element
+(constant-strain patch), including distorted meshes. References: Cook, Malkus, Plesha &
+Witt, *Concepts and Applications of Finite Element Analysis* (4th ed.) ch. 3/6 (stress
+computation, optimal sampling); Barlow, "Optimal stress locations in finite element
+models", *IJNME* 10 (1976); Bathe, *Finite Element Procedures* §4.3.6.
+
+## 11. RBE2 rigid constraints — condensation $u = Tq$ (Round 7, owner R7-O1)
+
+Frozen entry points (REMAINING.md; module pending on this tree as of 2026-08-28):
+
+```python
+from femtools.fea.mpc import apply_rbe2, ConstraintTransform
+# T built from model.rbe2 (and/or an explicit list); assemble_km(..., mpc=T)
+# or assemble_km honors model.rbe2 by default.
+```
+
+The data container is the **merged and stable** `core.model.RBE2`
+(`id, independent, dependents, components (Nastran 1..6)`) via `FEModel.add_rbe2` —
+shared with the BDF `RBE2` card (io.md §4.2); the Round-7 work is only the constraint
+transform. Validation already pinned by the dataclass: components in 1..6, at least one
+dependent, independent ∉ dependents, duplicate ids raise.
+
+Kinematics — small-rotation rigid link. Dependent node $d$ at offset
+$r = x_d - x_i$ from independent node $i$ moves as
+
+$$u_d = u_i + \theta_i \times r, \qquad \theta_d = \theta_i
+\quad\Longleftrightarrow\quad
+\begin{bmatrix} u_d \\ \theta_d \end{bmatrix} =
+\begin{bmatrix} I & -S(r) \\ 0 & I \end{bmatrix}
+\begin{bmatrix} u_i \\ \theta_i \end{bmatrix},$$
+
+with $S(r)$ the skew matrix of $r$ ($S(r)v = r \times v$; the sign comes from
+$\theta \times r = -S(r)\,\theta$). Only the dependent components listed on the RBE2 are
+constrained; unlisted dependent components remain free DOFs of their own.
+
+Transform assembly: partition the global DOFs into the surviving set $q$ (everything not
+listed as a dependent component) and the eliminated set. $T$ is the identity on surviving
+DOFs; each eliminated row gets the matching row of the $6 \times 6$ block above, scattered
+to the independent node's columns. Then
+
+$$\hat K = T^\top K T, \qquad \hat M = T^\top M T, \qquad \hat f = T^\top f,$$
+
+solve on $q$, recover $u = Tq$. This is exact **null-space (transformation) elimination**
+— no penalty stiffness, no Lagrange saddle point — so symmetry and positive
+semi-definiteness survive, no artificial stiffness ratio enters the conditioning ($T$
+entries are lever arms, i.e. lengths), and rigid-body modes are preserved *exactly*: a
+global RBM restricted to $q$ maps under $T$ onto the full RBM, hence the acceptance gate
+that two free–free nodes welded by an RBE2 still show exactly **6** zero modes, and a
+rigid offset correctly turns a tip force into force + moment at the independent node
+($\hat f = T^\top f$ carries the $S(r)^\top$ couple) — the "rigid offset beam carries
+moment" check.
+
+Ordering vs SPC elimination (§4): build $T$ on the full DOF set first, then eliminate
+SPCs in the reduced coordinates. An SPC on a *dependent* component is a conflict (it
+would constrain the independent node implicitly) — raise, do not resolve silently. Also
+raise on over-determination: a DOF dependent in two RBE2s, or chains where a dependent
+node of one RBE2 is the independent node of another (topological resolution is a later
+round if ever). Complexity: building $T$ is $O(n_{dep})$; the triple products are sparse
+and dominated by `assemble_km` itself. References: Cook et al. ch. 13 (transformation
+equations for constraints); Craig & Kurdila, *Fundamentals of Structural Dynamics* §14
+(constraint reduction); the RBE2 layout is the public MSC/NX card.

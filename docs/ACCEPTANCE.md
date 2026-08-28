@@ -72,29 +72,99 @@ that were previously quoted from throwaway reference implementations.
       stabilisation sweep (`order=20, n_modes=3`), rel f err ≤ **0.10 %** (tol 2 %),
       rel ζ err ≤ **11 %** (tol 50 %), MAC ≥ **0.9998** (tol > 0.9)
 
-### Round-6 status (2026-08-27, R6-F3 audit)
+### Round-6 status (2026-08-28, R7-F3 re-audit — kernels landed, cases 21–28 measured)
 
-All eight `examples/*.py` re-run on this tree: **8/8 PASS** (unchanged). Importability of
-the Round-6 frozen APIs (`REMAINING.md`) on this tree, checked by import:
+All eight `examples/*.py` re-run on this tree: **8/8 PASS** (unchanged), and `pytest tests/`
+is green (**191 passed, 3 perf skips**). Every Round-6 frozen API that the 2026-08-27 audit
+found absent now imports, and cases 21–28 are **measured passing**. Test files:
+`tests/test_round6_o4.py` (21 tests — cases 21–23), `tests/test_round6_io.py` (18 tests —
+cases 24–25), `tests/test_round6_o1.py` (31 tests — case 28 + FEA golden regressions);
+cases 26–27 have no dedicated pytest yet and were measured by direct probe (numbers below).
 
-- [ ] `femtools.updating.uq` (`parameter_covariance`, `monte_carlo_update`, `UQResult`) —
+- [x] **21** UQ first-order covariance + seeded MC — `femtools.updating.uq`
+      (`parameter_covariance`, `monte_carlo_update`, `UQResult`) imports;
+      `tests/test_round6_o4.py` green: closed-form LS covariance reproduced to 1e-12,
+      sandwich collapse for $W = C_z^{-1}$ to 1e-10, Gauss–Markov inflation for unit
+      weighting, prior shrinkage, seeded-MC reproducibility (exact) and MC-vs-first-order
+      agreement on a linear problem, residual/start-point resampling on the beam.
+- [x] **22** shape optimization — `femtools.optimization.shape` (`shape_optimize`,
+      `ShapeResult`) imports; `tests/test_round6_o4.py` green: two-bar-arch $f_1$ raise
+      and compliance drop, mesh-quality barrier stop, QUAD4 plate stays valid while
+      improving, `element_size_ratios` flags a folded shell, impossible requests rejected.
+      The §10.2 cantilever-plate example construction stays frozen (examples note below).
+- [x] **23** SSI-DATA — `femtools.mpe.ssi.ssi_data` imports; `tests/test_round6_o4.py`
+      green (SDOF recovery, cross-method vs `ssi_cov` on a 2-DOF record, CVA weighting +
+      reference channels, argument validation, `block_hankel`). §10.3 measured verbatim on
+      this tree (2026-08-28, case-20 records: seed 11, `order=20, n_modes=3,
+      f_range=(1, 12)`): rel f err ≤ **1.3e-3** (tol 2e-2), rel ζ err ≤ **14 %** (tol
+      50 %), MAC vs truth ≥ **0.9997** (tol > 0.9); cross-method `ssi_data` vs `ssi_cov`
+      |Δf|/f ≤ **3.5e-4** (tol 5e-3), cross-MAC ≥ **0.99999** (tol > 0.99).
+- [x] **24** Abaqus INP round-trip — `femtools.io.inp.read_inp` imports;
+      `tests/test_round6_io.py` green: HEX8 cube reads and assembles, shell sections and
+      boundary forms, beam general/rect/circ sections, truss area, unknown-keyword
+      warn-once with the material surviving, malformed decks raise, write→read
+      round-trip on the cube/plate/beam deck.
+- [x] **25** LS-DYNA K round-trip + cross-format identity — `femtools.io.kfile.read_k`
+      imports; `tests/test_round6_io.py` green: fixed and free formats, degenerate
+      tria-as-quad and solid degeneracies (incl. TET10 two-line midside drop), TC/RC
+      constraint-code lookup table, beam resultant/rect/tube sections;
+      `test_acceptance_cube_plate_beam_as_inp_and_k` pins the §10.4 same-deck
+      INP-vs-K $K$/$M$ identity.
+- [x] **26** NMD / MACX identities — `femtools.correlation.mac.nmd` / `.macx` import;
+      no dedicated pytest yet — measured by direct probe (2026-08-28):
+      $\mathrm{nmd}(x, x)$ = **0.0** exactly, range $[0, 1]$ holds,
+      $\max|\mathrm{nmd}^2 + \mathrm{MAC} - 1|$ = **0.0** (tol 1e-12); `macx` ≡
+      `mac_matrix` on real modes to **0.0**, complex-scale invariance dev **1.1e-16**
+      (tol 1e-12). `mac_matrix` numerics unchanged (`tests/test_mac.py` green).
+- [x] **27** modal strain/kinetic energy — `femtools.dynamics.energy` imports;
+      no dedicated pytest yet — measured by direct probe on the case-2 cantilever
+      (2026-08-28): max rel $|\mathrm{MSE}_r - \lambda_r/2|$ = **5.3e-13** (tol 1e-10).
+      Convention note: the implemented `modal_kinetic_energy` is the *unit-amplitude*
+      generalized KE $\mathrm{diag}(\Phi^\top M \Phi)/2$ — measured
+      $\max|\mathrm{MKE}_r - 1/2|$ = **2.2e-16** — so the §10.6 equality reads
+      $\mathrm{MSE}_r = \omega_r^2\,\mathrm{MKE}_r$, measured to **5.3e-13** rel.
+      Element split (`element_modal_energy`) closes on the totals to **1.5e-15**
+      (tol 1e-10, `meta["closure"]`).
+- [x] **28** shell drilling 6-RBM — per-node rotational frames landed (R6-O1);
+      `tests/test_round6_o1.py` green. `shell_drilling_orientation_gap` measured on this
+      tree (2026-08-28): QUAD4 **6 / 6** aligned/oblique zero modes (first elastic
+      34.412 Hz both orientations, rel dev 2.6e-13), TRIA3 **6 / 6** (33.775 Hz, rel dev
+      6.0e-13), `oblique_warned = 0`, 16 framed nodes on the oblique plate; HEX8 98.6 %
+      tip ratio, MITC4, BEAM2 EB and `solve_static(enforced=)` goldens unchanged
+      (same test file).
+
+Consequence for examples: the §10.2–§10.4 constructions are now exercised by the Round-6
+test files (and the §10.3 verbatim probe above), so `examples/shape_plate.py`,
+`examples/ssi_data_oma.py` and `examples/read_inp_k.py` remain optional; the example set
+deliberately stays at the same eight this round — the only new examples sanctioned by the
+Round-7 brief (`examples/rbe2_rigid.py`, `examples/topometry_plate.py`) are blocked on
+kernels that do not import yet (Round-7 status below).
+
+### Round-7 status (2026-08-28, R7-F3 audit)
+
+Round-7 frozen APIs (`REMAINING.md` / `ROUND7_BRIEF.md`), checked by import on this tree.
+The R7-O2 kernels already import locally (`dynamics.superelement.dump_cms` / `load_cms`,
+`psd_response(base_accel=)`); the rows below are **pending**, none importable yet:
+
+- [ ] **R7 stress recovery** — `femtools.fea.recover` (`recover_stress`,
+      `recover_strain`, `StressResult`; BAR2/BEAM2/QUAD4/TRIA3/HEX8/TET4 centroids;
+      constant-strain patch ≤ 1e-12, `fea.md` §10) — **pending**, module absent
+- [ ] **R7 RBE2 condensation** — `femtools.fea.mpc` (`apply_rbe2`,
+      `ConstraintTransform`; `assemble_km` honoring `model.rbe2`; welded free–free pair
+      keeps 6 RBM; a rigid offset beam carries moment, `fea.md` §11) — **pending**,
+      module absent (the `core.model.RBE2` container and `FEModel.add_rbe2` are merged
+      and stable)
+- [ ] **R7 write_cdb / write_k** — `femtools.io.cdb.write_cdb` /
+      `femtools.io.kfile.write_k` (round-trip the Round-6 HEX8/QUAD4/BEAM2 acceptance
+      decks through `assemble_km`) — **pending**, symbols absent (both readers import)
+- [ ] **R7 topometry** — `femtools.optimization.topometry` (`topometry_optimize`,
+      `TopometryResult`; element-wise thickness/density field on an *existing* mesh,
+      min compliance under a volume/mean-thickness constraint; a cantilever plate must
+      beat the uniform start with no inverted elements, `optimization.md` §5) —
       **pending**, module absent
-- [ ] `femtools.optimization.shape` (`shape_optimize`, `ShapeResult`) — **pending**, module absent
-- [ ] `femtools.mpe.ssi.ssi_data` — **pending**, `femtools.mpe.ssi` imports but has no `ssi_data`
-- [ ] `femtools.io.inp` (`read_inp`) / `femtools.io.kfile` (`read_k`) — **pending**, modules absent
-- [ ] `femtools.correlation.mac.nmd` / `.macx` — **pending**, module imports but symbols absent
-- [ ] `femtools.dynamics.energy` (`modal_strain_energy`, `modal_kinetic_energy`) —
-      **pending**, module absent
-- [ ] **28** shell drilling 6-RBM — `fea.verification.shell_drilling_orientation_gap` runs,
-      but the contract is **not yet met**: measured QUAD4 aligned/oblique zero-mode counts
-      **6 / 7** (first elastic 34.412 Hz both, rel dev 2.4e-13), TRIA3 **6 / 7**
-      (33.775 Hz, rel dev 1.0e-14); `oblique_warned=1`. The per-node rotational frames
-      (R6-O1) must bring the oblique count to 6 — see case 28 and §10.7.
-
-Consequence for examples: `examples/shape_plate.py`, `examples/ssi_data_oma.py` and
-`examples/read_inp_k.py` are **deliberately not added yet** — a broken example in the CI-run
-path is worse than none. Their constructions are frozen in §10.2–§10.4; add them verbatim
-once the corresponding imports succeed.
+- [ ] **R7 map_nearest_nodes** — `femtools.correlation.dofmap.map_nearest_nodes`
+      (two translated copies of the same 8-node cube match 1–1 with
+      distance = translation) — **pending**, symbol absent (module imports)
 
 ## 0. Master table
 
@@ -137,8 +207,9 @@ once the corresponding imports succeed.
 | 27 | Modal strain/kinetic energy (§10.6) | $\mathrm{MSE}_r = \mathrm{MKE}_r = \lambda_r / 2$ (mass-normalized); element sums = totals | rel dev | 1e-10 |
 | 28 | Shell drilling 6-RBM contract (§10.7) | oblique free–free flat plate: 6 zero modes; elastic spectrum orientation-invariant | zero count / rel $f_{el}$ dev / goldens | = 6 / 1e-8 / unchanged |
 
-Rows 21–28 are Round-6 contracts; their kernels are not importable on this tree yet
-(status block above), so every one is **pending** — constructions in §10.
+Rows 21–28 are Round-6 contracts; as of the 2026-08-28 R7-F3 re-audit their kernels all
+import on this tree and every row is **measured passing** (status block above) —
+constructions in §10.
 
 ## 1. Axial bar
 
@@ -376,12 +447,13 @@ rel damping error < 50 % (measured ≤ 11 %), MAC > 0.9 when shapes are returned
 ≥ 0.9998). Spurious poles are rejected by the sweep and the `n_modes`/`f_range`
 selection, and the nearest-frequency matching tolerates any that remain.
 
-## 10. Round-6 golden constructions (pending until the kernels land)
+## 10. Round-6 golden constructions (kernels landed — cases 21–28 measured)
 
-As of the 2026-08-27 R6-F3 audit none of the Round-6 frozen APIs are importable on this
-tree (status block above), except the drilling *reproduction* of §10.7 which measurably
-still shows the defect. Every case below is therefore **pending**: the constructions are
-frozen here so tests and examples can be added verbatim the moment the kernels land.
+The 2026-08-27 R6-F3 audit found none of the Round-6 frozen APIs importable; as of the
+2026-08-28 R7-F3 re-audit they all import and cases 21–28 are **measured passing**
+(status block above, test files `tests/test_round6_o1.py` / `test_round6_io.py` /
+`test_round6_o4.py`). The constructions below stay as the normative reference for the
+gates those tests pin.
 Formulas live in the matching `docs/algorithms/` files (updating.md §6, optimization.md §4,
 mpe_rbpe.md §7, io.md).
 
@@ -397,7 +469,7 @@ exactly — hit it to 1e-6. `monte_carlo_update` (200 samples, required seed, e.
 covariance within 30 % of first-order (sampling scatter $\approx \sqrt{2/199} \approx 10\%$
 leaves headroom), identical output for identical seed (exact), input model not mutated.
 
-### 10.2 Shape — cantilever plate (case 22, planned `examples/shape_plate.py`)
+### 10.2 Shape — cantilever plate (case 22, optional `examples/shape_plate.py`)
 
 Clamped rectangular QUAD4 plate; design variables = in-plane coordinates of the free-edge
 node column; objective: maximize $f_1$ under a total-mass equality constraint (tapering
@@ -407,7 +479,7 @@ above the initial value, $\min_e q_e \ge q_{min}$ for every evaluated design (no
 element ever reaches the eigensolver), mass constraint met to 1e-6 relative, input model
 not mutated, `ShapeResult.converged` true.
 
-### 10.3 SSI-DATA (case 23, planned `examples/ssi_data_oma.py`)
+### 10.3 SSI-DATA (case 23, optional `examples/ssi_data_oma.py`)
 
 Feed `ssi_data` the *identical* records, orders and gates as case 20 (§9.4:
 `synthetic_response`, 600 s at 64 Hz, seed 11, 2 % noise, `order=20, n_modes=3,
@@ -416,7 +488,7 @@ gates, the cross-method gate is the point: `ssi_data` vs `ssi_cov` pole frequenc
 0.5 % and shape cross-MAC > 0.99 on all three modes (both methods share the SVD +
 shift-invariance path, so disagreement isolates the Hankel/projection stage).
 
-### 10.4 INP / K text subsets (cases 24–25, planned `examples/read_inp_k.py`)
+### 10.4 INP / K text subsets (cases 24–25, optional `examples/read_inp_k.py`)
 
 Minimal decks per `io.md` §3: one HEX8 cube (8 nodes), one QUAD4 patch, one BEAM2 member,
 with materials, sections and one boundary card each. Gates: node/element counts and ids
@@ -445,19 +517,30 @@ mode (rigid-body modes: both exactly 0). With per-element output enabled, elemen
 contributions must sum to the totals to 1e-10 relative — the partition, not the total, is
 the diagnostic content.
 
+Implemented convention (R6, `femtools.dynamics.energy`): `modal_kinetic_energy` returns
+the *unit-amplitude* generalized KE $\mathrm{diag}(\Phi^\top M \Phi)/2 = 1/2$ per
+mass-normalized mode (the $\omega_r^2$ factor is deliberately not folded in), so the
+equality above is checked as $\mathrm{MSE}_r = \omega_r^2\,\mathrm{MKE}_r$ — the
+equipartition a normal mode satisfies by definition. Measured 2026-08-28 on the case-2
+cantilever: $\max$ rel $|\mathrm{MSE}_r - \lambda_r/2|$ = 5.3e-13,
+$\max|\mathrm{MKE}_r - 1/2|$ = 2.2e-16, element-split closure 1.5e-15
+(`element_modal_energy(...).meta["closure"]`).
+
 ### 10.7 Shell drilling 6-RBM contract (case 28)
 
 `fea.verification.shell_drilling_orientation_gap(etype)` builds a free–free flat plate
 twice — normal along a global axis, and rotated to a generic orientation — and counts
-near-zero frequencies. Measured on this tree (2026-08-27): QUAD4 **6 aligned / 7 oblique**
-(first elastic 34.412 Hz, rel dev 2.4e-13 between orientations), TRIA3 **6 / 7**
-(33.775 Hz, rel dev 1.0e-14), `oblique_warned = 1` — i.e. the fictitious drilling mechanism
-is present and correctly warned about. Contract after R6-O1's per-node rotational frames
-(local 3-axis = averaged shell normal, drilling auto-constrained for arbitrary
-orientation): `oblique_zero_modes` = **6** for both element types, first elastic frequency
-unchanged between orientations to 1e-8 relative, no warning, and the existing goldens
-untouched (HEX8 98.6 % tip ratio, 6 RBM on the cube, MITC4 thin plate, patch tests, BEAM2
-EB, `solve_static(enforced=)`).
+near-zero frequencies. Pre-R6-O1 reproduction (2026-08-27): QUAD4 **6 aligned / 7
+oblique**, TRIA3 **6 / 7**, `oblique_warned = 1` — the fictitious drilling mechanism was
+present and correctly warned about. Contract, **met on this tree** since R6-O1's per-node
+rotational frames (local 3-axis = averaged shell normal, drilling auto-constrained for
+arbitrary orientation): `oblique_zero_modes` = **6** for both element types, first elastic
+frequency unchanged between orientations to 1e-8 relative, no warning, and the existing
+goldens untouched (HEX8 98.6 % tip ratio, 6 RBM on the cube, MITC4 thin plate, patch
+tests, BEAM2 EB, `solve_static(enforced=)`). Measured 2026-08-28: QUAD4 **6 / 6**
+(first elastic 34.412 Hz both orientations, rel dev 2.6e-13), TRIA3 **6 / 6**
+(33.775 Hz, rel dev 6.0e-13), `oblique_warned = 0`, 16 framed nodes on the oblique plate;
+pinned by `tests/test_round6_o1.py` (31 tests).
 
 ## 11. Determinism requirements (all tests)
 
