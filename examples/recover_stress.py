@@ -31,7 +31,7 @@ try:
     from femtools.fea import assemble_km, recover_stress, solve_static
 except ImportError as exc:  # kernels not on this tree yet
     print(f"SKIP: stress recovery kernels not importable on this tree ({exc})")
-    raise SystemExit(0)
+    raise SystemExit(0) from None
 
 E, NU, RHO = 210.0e9, 0.3, 7850.0
 

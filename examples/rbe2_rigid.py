@@ -31,7 +31,7 @@ try:
     from femtools.fea import apply_rbe2, assemble_km, solve_modes, solve_static
 except ImportError as exc:  # kernels not on this tree yet
     print(f"SKIP: RBE2 kernels not importable on this tree ({exc})")
-    raise SystemExit(0)
+    raise SystemExit(0) from None
 
 E, NU, RHO = 2.1e11, 0.3, 7800.0
 ARM = np.array([0.4, 0.0, 0.3])          # rigid offset r from beam tip to node 3

@@ -28,7 +28,7 @@ try:
     from femtools.optimization import topometry_optimize
 except ImportError as exc:  # kernels not on this tree yet
     print(f"SKIP: topometry kernels not importable on this tree ({exc})")
-    raise SystemExit(0)
+    raise SystemExit(0) from None
 
 NX, NY = 6, 3                # element grid (elements numbered column by column)
 LX, LY = 0.9, 0.45           # m
