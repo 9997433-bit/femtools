@@ -337,6 +337,41 @@ def test_filtering_smooths_the_design() -> None:
     assert filtered.volume == pytest.approx(filtered.initial_volume, rel=1.0e-6)
 
 
+def test_density_filter_reports_both_fields() -> None:
+    model, _tip = cantilever_plate()
+    result = topometry_optimize(model, max_iter=20, filter_radius=0.35, filter="density")
+
+    raw = result.extras["design_variables"]
+    assert raw.shape == result.x.shape
+    assert not np.allclose(raw, result.x)  # the filter really does something
+    # `x` is the field the returned model carries.
+    on_model = np.array(
+        [result.model.properties[result.model.elements[eid].property_id].t
+         for eid in result.element_ids]
+    )
+    assert np.allclose(on_model, result.x, rtol=0.0, atol=0.0)
+
+
+def test_oc_stops_when_the_compliance_stops_moving() -> None:
+    model, _tip = cantilever_plate()
+    result = topometry_optimize(model, tol=0.0, objective_tol=1.0e-3, max_iter=60)
+
+    assert result.converged
+    assert "stagnated" in result.message
+    assert result.iterations < 60
+
+
+def test_topometry_callback_sees_every_iteration() -> None:
+    model, _tip = cantilever_plate(nx=2, ny=2)
+    seen: list[tuple[int, float]] = []
+    result = topometry_optimize(
+        model, max_iter=4, tol=0.0, callback=lambda i, x, c: seen.append((i, float(c)))
+    )
+
+    assert [i for i, _ in seen] == list(range(1, result.iterations + 1))
+    assert seen[-1][1] == pytest.approx(result.compliance)
+
+
 def test_sensitivity_filter_runs_and_keeps_the_constraint() -> None:
     model, _tip = cantilever_plate()
     result = topometry_optimize(model, max_iter=25, filter_radius=0.3)

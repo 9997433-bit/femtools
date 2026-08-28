@@ -928,8 +928,9 @@ def topometry_optimize(
     method: str = "oc",
     move: float = 0.2,
     damping: float = 0.5,
-    max_iter: int = 60,
-    tol: float = 1.0e-3,
+    max_iter: int = 100,
+    tol: float = 1.0e-2,
+    objective_tol: float = 1.0e-6,
     filter_radius: float = 0.0,
     filter: str = "sensitivity",  # noqa: A002 - the literature's name for it
     solver_kwargs: dict[str, Any] | None = None,
@@ -983,6 +984,15 @@ def topometry_optimize(
     move, damping:
         OC move limit (as a fraction of each variable's range) and the exponent
         :math:`\\eta` of the update.
+    max_iter, tol, objective_tol:
+        The OC iteration stops when the largest design change falls below
+        ``tol`` (as a fraction of each variable's range -- the same measure and
+        the same default as :func:`topology_simp`), or when a feasible design
+        has changed the compliance by less than ``objective_tol`` relatively
+        for two iterations in a row.  A minimum-compliance sizing problem with
+        several near-equivalent optima can keep shuffling a few elements long
+        after the compliance has settled, so running out of iterations is a
+        normal, and reported, outcome.
     filter_radius, filter:
         Radius (in model length units) and kind of Sigmund's mesh-independence
         filter, applied over element-centroid distances: ``"sensitivity"``
@@ -1090,8 +1100,10 @@ def topometry_optimize(
             }
         )
     else:
+        stagnant = 0
         for it in range(1, int(max_iter) + 1):
             state = problem.analyse(x)
+            previous = float(state["compliance"])
             x_new = _oc_update(
                 x,
                 np.asarray(state["dc"], dtype=float),
@@ -1126,6 +1138,16 @@ def topometry_optimize(
             if change < tol:
                 converged = True
                 message = f"design change below tol ({tol:g})"
+                break
+            # The OC fixed point can spend many iterations shuffling a few
+            # elements around a design whose compliance no longer moves; a
+            # feasible design that has stopped paying for the shuffling is
+            # converged for every practical purpose.
+            drop = abs(record["compliance"] - previous) / max(abs(previous), 1.0e-300)
+            stagnant = stagnant + 1 if drop < objective_tol else 0
+            if stagnant >= 2 and record["volume"] <= limit * (1.0 + 1.0e-6):
+                converged = True
+                message = f"compliance stagnated (< {objective_tol:g} per iteration)"
                 break
 
     final = problem.analyse(x)
