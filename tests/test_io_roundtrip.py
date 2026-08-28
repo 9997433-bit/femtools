@@ -89,6 +89,14 @@ def _rbe2_model() -> FEModel:
     return model
 
 
+def _rbe3_model() -> FEModel:
+    model = FEModel(name="rbe3-validation")
+    model.add_node(1, (0.0, 0.0, 0.0))
+    model.add_node(2, (1.0, 0.0, 0.0))
+    model.add_node(3, (0.0, 1.0, 0.0))
+    return model
+
+
 def test_add_rbe2_stores_valid_constraint_on_model() -> None:
     model = _rbe2_model()
 
@@ -149,6 +157,86 @@ def test_add_rbe2_rejects_components_outside_one_through_six(
         model.add_rbe2(10, independent=1, dependents=(2,), components=components)
 
     assert model.rbe2 == []
+
+
+def test_add_rbe3_rejects_duplicate_id() -> None:
+    model = _rbe3_model()
+    original = model.add_rbe3(10, dependent=1, independents=(2, 3))
+
+    with pytest.raises(ModelError, match="duplicate RBE3 id 10"):
+        model.add_rbe3(10, dependent=2, independents=(1, 3))
+
+    assert model.rbe3 == [original]
+
+
+@pytest.mark.parametrize(
+    ("dependent", "independents"),
+    [
+        (99, (2, 3)),
+        (1, (2, 99)),
+    ],
+)
+def test_add_rbe3_rejects_missing_nodes(
+    dependent: int,
+    independents: tuple[int, ...],
+) -> None:
+    model = _rbe3_model()
+
+    with pytest.raises(ModelError, match=r"RBE3 10: undefined node\(s\) \[99\]"):
+        model.add_rbe3(10, dependent=dependent, independents=independents)
+
+    assert model.rbe3 == []
+
+
+def test_add_rbe3_rejects_dependent_node_in_independents() -> None:
+    model = _rbe3_model()
+
+    with pytest.raises(ModelError, match="dependent node cannot also be independent"):
+        model.add_rbe3(10, dependent=1, independents=(1, 2))
+
+    assert model.rbe3 == []
+
+
+@pytest.mark.parametrize(
+    ("weights", "message"),
+    [
+        ((1.0,), "1 weights for 2 independents"),
+        ((1.0, 0.0), "weights must be positive"),
+        ((1.0, -1.0), "weights must be positive"),
+    ],
+)
+def test_add_rbe3_rejects_bad_weights(
+    weights: tuple[float, ...],
+    message: str,
+) -> None:
+    model = _rbe3_model()
+
+    with pytest.raises(ModelError, match=message):
+        model.add_rbe3(10, dependent=1, independents=(2, 3), weights=weights)
+
+    assert model.rbe3 == []
+
+
+@pytest.mark.parametrize(
+    ("component_field", "components"),
+    [
+        ("components", (0,)),
+        ("components", (7,)),
+        ("independent_components", (0,)),
+        ("independent_components", (7,)),
+    ],
+)
+def test_add_rbe3_rejects_components_outside_one_through_six(
+    component_field: str,
+    components: tuple[int, ...],
+) -> None:
+    model = _rbe3_model()
+    kwargs: dict[str, Any] = {component_field: components}
+
+    with pytest.raises(ModelError, match=rf"{component_field} must be in 1\.\.6"):
+        model.add_rbe3(10, dependent=1, independents=(2, 3), **kwargs)
+
+    assert model.rbe3 == []
 
 
 def test_project_roundtrip_preserves_model(
