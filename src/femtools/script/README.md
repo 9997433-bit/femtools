@@ -57,7 +57,7 @@ femtools script -c "NEW PROJECT; ADD NODE 1 0 0 0; PRINT SUMMARY"
 script     = { statement , ( ";" | newline ) } ;
 statement  = new | add_node | add_mat | add_prop | add_elem | add_load
            | add_rbe2 | add_rbe3 | spc | set | solve | recover | mac
-           | save | print ;
+           | update | dump | save | print ;
 
 new        = "NEW" , "PROJECT" , [ name ] ;
 add_node   = "ADD" , "NODE" , id , number , number , number ;
@@ -79,6 +79,10 @@ solve      = "SOLVE" , ( "MODES" , [ "N=" int ] , [ "SHIFT=" number ] ,
                        | "STATIC" , [ "NAME=" name ] ) ;
 recover    = "RECOVER" , "STRESS" , [ "NAME=" name ] , [ "RESULT=" name ] ;
 mac        = "MAC" , [ "A=" name ] , [ "B=" name ] , [ "NAME=" name ] ;
+update     = "UPDATE" , "STATIC" , "MEASURE=" measurelist ,
+             [ "NAME=" name ] , [ "APPLY=" yesno ] ;
+dump       = "DUMP" , "FRF" , path , [ "RESULT=" name ] ,
+             [ "COMPRESS=" yesno ] ;
 save       = "SAVE" , path ;
 print      = "PRINT" , [ "SUMMARY" | "RESULTS" ] ;
 
@@ -87,8 +91,11 @@ component  = ("FX"|"FY"|"FZ"|"MX"|"MY"|"MZ") , "=" , number ;
 assignment = name , "=" , value ;
 idlist     = id , { "," , id } ;
 numberlist = number , { "," , number } ;
+measurelist= measure , { "," , measure } ;
+measure    = id , ":" , dof number 1..6 , ":" , number ;
 comps      = DOF numbers 1..6 : comma list ("1,2,3") or compact ("123") ;
 mask       = six characters from {"0","1"} , e.g. "111000" ;
+yesno      = "YES" | "NO" | "1" | "0" ;
 ```
 
 ## Command reference
@@ -207,6 +214,34 @@ results (`femtools.correlation.mac.mac_matrix`). Both operands default to
 the most recent `SOLVE MODES` result (self-MAC). The matrix is stored in
 `engine.results[NAME]` (default `"mac"`).
 
+### `UPDATE STATIC MEASURE=<node>:<dof>:<value>[,...] [NAME=<name>] [APPLY=YES|NO]`
+
+Updates the active model against measured static deflections
+(`femtools.updating.updater.update_from_static`): one relative Young's
+modulus multiplier is fitted with the kernel's Gauss–Newton loop, driven
+by the loads accumulated with `ADD LOAD`. Each `MEASURE` item is
+`<node>:<dof>:<value>` with a 1-based DOF number (1–6: ux uy uz rx ry
+rz); several measurements form a comma list. The `UpdateResult` is
+stored in `engine.results[NAME]` (default `"update"`; read the fitted
+multipliers from `result.parameters`), and the updated model copy
+**replaces the active project** unless `APPLY=NO` is given.
+
+```text
+ADD LOAD 2 FX=1000
+UPDATE STATIC MEASURE=2:1:5.29e-5
+```
+
+### `DUMP FRF <path> [RESULT=<name>] [COMPRESS=YES|NO]`
+
+Writes a stored FRF block to a reloadable `.npz` archive
+(`femtools.dynamics.frf.dump_frf`; read it back with `load_frf` or
+inspect it with `femtools load-frf`). `RESULT` names the result to dump
+and defaults to the most recent stored result carrying `H` and
+`freq_hz` — FSL has no FRF-producing command yet, so such a result is
+typically placed in `engine.results` by embedding code. `H` and
+`freq_hz` round-trip bit-identical; `COMPRESS=YES` writes a compressed
+archive.
+
 ### `SAVE <path>`
 
 Saves the active project with `femtools.io.project.save_project`
@@ -223,10 +258,11 @@ All parse and execution failures raise `femtools.script.ScriptError`,
 which reports the offending statement and its 1-based index within the
 script. Commands that need sibling modules (`SOLVE MODES` /
 `SOLVE STATIC` / `RECOVER STRESS` -> `femtools.fea`, `MAC` ->
-`femtools.correlation`, `SAVE` -> `femtools.io`, `NEW PROJECT` ->
-`femtools.core`) raise a clear `ScriptError` if the module is not
-installed, rather than failing at import time. Referencing an
-unassigned `$variable` is a `ScriptError` too.
+`femtools.correlation`, `UPDATE STATIC` -> `femtools.updating`,
+`DUMP FRF` -> `femtools.dynamics`, `SAVE` -> `femtools.io`,
+`NEW PROJECT` -> `femtools.core`) raise a clear `ScriptError` if the
+module is not installed, rather than failing at import time.
+Referencing an unassigned `$variable` is a `ScriptError` too.
 
 ## Embedding
 

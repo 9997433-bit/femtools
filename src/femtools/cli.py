@@ -328,8 +328,8 @@ def _model_load_mapping(model: Any) -> dict[tuple[int, int], float] | None:
     return mapping or None
 
 
-def _parse_point_load(spec: str) -> tuple[int, int, float]:
-    """Parse a ``--load`` spec 'NODE:DOF=VALUE' (DOF 1-6: fx fy fz mx my mz)."""
+def _parse_point_load(spec: str, option: str = "--load") -> tuple[int, int, float]:
+    """Parse a 'NODE:DOF=VALUE' spec (DOF 1-6) of ``--load`` / ``--measure``."""
     head, sep, value_str = spec.partition("=")
     try:
         node_str, dof_str = head.split(":")
@@ -340,7 +340,7 @@ def _parse_point_load(spec: str) -> tuple[int, int, float]:
         sep = ""
     if not sep or not 1 <= dof <= 6:
         err_console.print(
-            f"[red]error:[/red] bad --load spec {spec!r} "
+            f"[red]error:[/red] bad {option} spec {spec!r} "
             "(expected NODE:DOF=VALUE with DOF 1-6, e.g. 2:3=-1000)")
         raise typer.Exit(code=2)
     return node, dof, value
@@ -406,6 +406,21 @@ def _stress_parts(result: Any) -> tuple[list[Any] | None, Any, Any]:
             comps, None if vm is None else np.asarray(vm, dtype=float).reshape(-1))
 
 
+def _apply_load_specs(model: Any, load: list[str] | None) -> None:
+    """Apply repeatable ``--load`` 'NODE:DOF=VALUE' specs to a model."""
+    for spec in load or []:
+        node, dof, value = _parse_point_load(spec)
+        vec = [0.0, 0.0, 0.0]
+        vec[(dof - 1) % 3] = value
+        try:
+            model.add_load(node_id=node,
+                           force=vec if dof <= 3 else None,
+                           moment=vec if dof > 3 else None)
+        except ValueError as exc:
+            err_console.print(f"[red]error:[/red] bad --load {spec!r}: {exc}")
+            raise typer.Exit(code=2) from exc
+
+
 def _recover_pipeline(model_file: Path, load: list[str] | None) -> tuple[Any, Any]:
     """Shared solve+recover pipeline of ``recover-stress`` / ``plot-stress``.
 
@@ -424,17 +439,7 @@ def _recover_pipeline(model_file: Path, load: list[str] | None) -> tuple[Any, An
         raise _missing("the static solver", exc) from exc
 
     model = _load_model(model_file)
-    for spec in load or []:
-        node, dof, value = _parse_point_load(spec)
-        vec = [0.0, 0.0, 0.0]
-        vec[(dof - 1) % 3] = value
-        try:
-            model.add_load(node_id=node,
-                           force=vec if dof <= 3 else None,
-                           moment=vec if dof > 3 else None)
-        except ValueError as exc:
-            err_console.print(f"[red]error:[/red] bad --load {spec!r}: {exc}")
-            raise typer.Exit(code=2) from exc
+    _apply_load_specs(model, load)
     if not getattr(model, "loads", None):
         err_console.print(
             "[yellow]warning:[/yellow] the model carries no loads and none were "
@@ -838,29 +843,16 @@ def _parse_dof_list(spec: str, option: str) -> list[tuple[int, int]]:
     return pairs
 
 
-@app.command("frf")
-def frf_cmd(
-    model_file: Annotated[Path, typer.Argument(exists=True, help="Model file.")],
-    input_dofs: Annotated[str, typer.Option(
-        "--input", "-i",
-        help="Excitation DOFs 'NODE:DOF[,NODE:DOF...]' (DOF 1-6).")],
-    output_dofs: Annotated[str, typer.Option(
-        "--response", "--output-dof", "-r",
-        help="Response DOFs 'NODE:DOF[,NODE:DOF...]'.")],
-    fmin: Annotated[float, typer.Option("--fmin", help="Start frequency [Hz].")] = 0.0,
-    fmax: Annotated[float, typer.Option("--fmax", help="End frequency [Hz].")] = 100.0,
-    n_freq: Annotated[int, typer.Option("--n-freq", min=2,
-                                        help="Frequency points.")] = 500,
-    n_modes: Annotated[int, typer.Option("--n-modes", "-n", min=1,
-                                         help="Modes kept in the modal basis.")] = 20,
-    damping: Annotated[str, typer.Option(
-        "--damping", "-z", help=_DAMPING_HELP)] = "0.02",
-    output: Annotated[Path | None, typer.Option(
-        "--output", "-o", help="Save FRF to .npz (freq_hz, H).")] = None,
-    plot: Annotated[Path | None, typer.Option(
-        "--plot", help="Save a Bode plot (PNG).")] = None,
-) -> None:
-    """Synthesize modal FRFs between input and response DOFs."""
+def _synth_frf(model_file: Path, input_dofs: str, output_dofs: str,
+               fmin: float, fmax: float, n_freq: int, n_modes: int,
+               damping: str) -> tuple[Any, Any, Any, int, int]:
+    """Shared modal-FRF synthesis pipeline of ``frf`` / ``dump-frf``.
+
+    Solves the modal basis, maps the NODE:DOF selections and calls
+    :func:`femtools.dynamics.frf.modal_frf` (imported lazily: an
+    installation shipping without it exits with code 3).  Returns
+    ``(freq_hz, frf, damping_spec, n_inputs, n_outputs)``.
+    """
     import numpy as np
 
     damping_spec = _parse_damping_spec(damping)
@@ -890,6 +882,36 @@ def frf_cmd(
     except ImportError as exc:
         raise _missing("FRF synthesis", exc) from exc
     frf = modal_frf(modal, inputs, outputs, freq_hz, damping_spec)
+    return freq_hz, frf, damping_spec, len(input_pairs), len(output_pairs)
+
+
+@app.command("frf")
+def frf_cmd(
+    model_file: Annotated[Path, typer.Argument(exists=True, help="Model file.")],
+    input_dofs: Annotated[str, typer.Option(
+        "--input", "-i",
+        help="Excitation DOFs 'NODE:DOF[,NODE:DOF...]' (DOF 1-6).")],
+    output_dofs: Annotated[str, typer.Option(
+        "--response", "--output-dof", "-r",
+        help="Response DOFs 'NODE:DOF[,NODE:DOF...]'.")],
+    fmin: Annotated[float, typer.Option("--fmin", help="Start frequency [Hz].")] = 0.0,
+    fmax: Annotated[float, typer.Option("--fmax", help="End frequency [Hz].")] = 100.0,
+    n_freq: Annotated[int, typer.Option("--n-freq", min=2,
+                                        help="Frequency points.")] = 500,
+    n_modes: Annotated[int, typer.Option("--n-modes", "-n", min=1,
+                                         help="Modes kept in the modal basis.")] = 20,
+    damping: Annotated[str, typer.Option(
+        "--damping", "-z", help=_DAMPING_HELP)] = "0.02",
+    output: Annotated[Path | None, typer.Option(
+        "--output", "-o", help="Save FRF to .npz (freq_hz, H).")] = None,
+    plot: Annotated[Path | None, typer.Option(
+        "--plot", help="Save a Bode plot (PNG).")] = None,
+) -> None:
+    """Synthesize modal FRFs between input and response DOFs."""
+    import numpy as np
+
+    freq_hz, frf, damping_spec, n_in, n_out = _synth_frf(
+        model_file, input_dofs, output_dofs, fmin, fmax, n_freq, n_modes, damping)
 
     H = None
     for attr in ("H", "h", "frf", "data", "values"):
@@ -899,7 +921,7 @@ def frf_cmd(
     if H is None:
         H = np.asarray(frf)
     console.print(
-        f"FRF computed: {len(output_pairs)} outputs x {len(input_pairs)} inputs x {n_freq} "
+        f"FRF computed: {n_out} outputs x {n_in} inputs x {n_freq} "
         f"frequencies ({fmin:g}-{fmax:g} Hz), damping: {_describe_damping(damping_spec)}"
     )
 
@@ -910,6 +932,168 @@ def frf_cmd(
         from femtools.viz import plot_frf
 
         plot_frf(frf, 0, 0, freq=freq_hz, outfile=str(plot))
+        console.print(f"saved FRF plot to [bold]{plot}[/bold]")
+
+
+# ----------------------------------------------------------------------
+# dump-frf / load-frf
+# ----------------------------------------------------------------------
+_FRF_H_KEYS = ("H", "h", "frf")
+_FRF_FREQ_KEYS = ("freq_hz", "freqs_hz", "freq", "freqs", "f")
+
+
+@app.command("dump-frf")
+def dump_frf_cmd(
+    source_file: Annotated[Path, typer.Argument(
+        exists=True, readable=True,
+        help="Model file to synthesize from, or a plain .npz carrying "
+             "'freq_hz' and 'H' (e.g. saved by 'frf -o' / 'estimate-frf -o').")],
+    output: Annotated[Path, typer.Option(
+        "--output", "-o", help="FRF archive to write (.npz).")],
+    input_dofs: Annotated[str | None, typer.Option(
+        "--input", "-i",
+        help="Excitation DOFs 'NODE:DOF[,NODE:DOF...]' (DOF 1-6); required "
+             "when synthesizing from a model file.")] = None,
+    output_dofs: Annotated[str | None, typer.Option(
+        "--response", "--output-dof", "-r",
+        help="Response DOFs 'NODE:DOF[,NODE:DOF...]'; required when "
+             "synthesizing from a model file.")] = None,
+    fmin: Annotated[float, typer.Option("--fmin", help="Start frequency [Hz].")] = 0.0,
+    fmax: Annotated[float, typer.Option("--fmax", help="End frequency [Hz].")] = 100.0,
+    n_freq: Annotated[int, typer.Option("--n-freq", min=2,
+                                        help="Frequency points.")] = 500,
+    n_modes: Annotated[int, typer.Option("--n-modes", "-n", min=1,
+                                         help="Modes kept in the modal basis.")] = 20,
+    damping: Annotated[str, typer.Option(
+        "--damping", "-z", help=_DAMPING_HELP)] = "0.02",
+    compress: Annotated[bool, typer.Option(
+        "--compress/--no-compress", help="Write a compressed archive.")] = False,
+) -> None:
+    """Write a reloadable FRF archive (``femtools.dynamics.frf.dump_frf``).
+
+    Synthesizes modal FRFs like the ``frf`` command (or canonicalizes a
+    plain ``.npz`` that already carries ``freq_hz`` and ``H``) and stores
+    them with the format tag ``load-frf`` checks for; ``H`` and
+    ``freq_hz`` round-trip bit-identical.  Requires the FRF kernel
+    (``femtools.dynamics.frf``); an installation shipping without it
+    exits with code 3, like every other lazily bound subcommand.
+    """
+    import numpy as np
+
+    try:
+        from femtools.dynamics.frf import dump_frf
+    except ImportError as exc:
+        raise _missing("FRF archiving", exc) from exc
+
+    if source_file.suffix.lower() == ".npz":
+        try:
+            data = np.load(str(source_file))
+        except (OSError, ValueError) as exc:
+            err_console.print(f"[red]error:[/red] cannot read {source_file}: {exc}")
+            raise typer.Exit(code=2) from exc
+        block: dict[str, Any] = {}
+        for name, keys in (("H", _FRF_H_KEYS), ("freq_hz", _FRF_FREQ_KEYS)):
+            for key in keys:
+                if key in data:
+                    block[name] = data[key]
+                    break
+        missing = [name for name in ("H", "freq_hz") if name not in block]
+        if missing:
+            err_console.print(
+                f"[red]error:[/red] {source_file} has no {'/'.join(missing)} array "
+                f"(found: {sorted(data.keys())}); expected an .npz saved by "
+                "'frf -o' or 'estimate-frf -o'")
+            raise typer.Exit(code=2)
+        frf: Any = block
+        meta: dict[str, Any] = {"source": source_file.name}
+    else:
+        if input_dofs is None or output_dofs is None:
+            err_console.print(
+                "[red]error:[/red] synthesizing an FRF from a model file needs "
+                "--input and --response DOF selections")
+            raise typer.Exit(code=2)
+        _, frf, damping_spec, _, _ = _synth_frf(
+            source_file, input_dofs, output_dofs, fmin, fmax, n_freq, n_modes, damping)
+        meta = {"source": source_file.name,
+                "damping": _describe_damping(damping_spec)}
+
+    try:
+        saved = dump_frf(frf, output, compress=compress, meta=meta)
+    except (TypeError, ValueError) as exc:
+        err_console.print(f"[red]error:[/red] cannot archive FRF: {exc}")
+        raise typer.Exit(code=2) from exc
+
+    H = np.asarray(frf["H"] if isinstance(frf, dict) else frf.H)
+    if H.ndim == 2:
+        H = H[:, None, :]
+    console.print(
+        f"archived FRF block {H.shape[0]} outputs x {H.shape[1]} inputs x "
+        f"{H.shape[2]} frequencies to [bold]{saved}[/bold]")
+
+
+@app.command("load-frf")
+def load_frf_cmd(
+    archive: Annotated[Path, typer.Argument(
+        exists=True, readable=True, help="FRF archive written by dump-frf.")],
+    plot: Annotated[Path | None, typer.Option(
+        "--plot", help="Save a Bode plot (PNG).")] = None,
+    output_index: Annotated[int, typer.Option(
+        "--plot-output", min=0, help="Output row to plot (0-based).")] = 0,
+    input_index: Annotated[int, typer.Option(
+        "--plot-input", min=0, help="Input column to plot (0-based).")] = 0,
+) -> None:
+    """Inspect an FRF archive written by ``dump-frf``.
+
+    Loads the archive with ``femtools.dynamics.frf.load_frf``, prints a
+    summary (shape, response type, frequency band, provenance) and
+    optionally saves a Bode plot of one curve.  Requires the FRF kernel;
+    an installation shipping without it exits with code 3.
+    """
+    import zipfile
+
+    import numpy as np
+
+    try:
+        from femtools.dynamics.frf import load_frf
+    except ImportError as exc:
+        raise _missing("FRF archiving", exc) from exc
+
+    try:
+        frf = load_frf(archive)
+    except (ValueError, OSError, zipfile.BadZipFile) as exc:
+        err_console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    freq = np.asarray(frf.freq_hz, dtype=float).reshape(-1)
+    table = Table(title=f"FRF archive {archive.name}")
+    table.add_column("field", justify="left")
+    table.add_column("value", justify="left")
+    table.add_row("shape", f"{frf.n_out} outputs x {frf.n_in} inputs x "
+                           f"{frf.n_freq} frequencies")
+    if freq.size:
+        table.add_row("band", f"{float(freq[0]):g} - {float(freq[-1]):g} Hz")
+    table.add_row("response", str(frf.response))
+    if frf.method:
+        table.add_row("method", str(frf.method))
+    for name in ("outputs", "inputs"):
+        dofs = getattr(frf, name, None)
+        if dofs is not None:
+            values = np.asarray(dofs).reshape(-1).tolist()
+            table.add_row(f"{name} (DOF ids)", ", ".join(str(int(v)) for v in values))
+    for key, value in (frf.meta or {}).items():
+        if key != "loaded_from":
+            table.add_row(f"meta.{key}", str(value))
+    console.print(table)
+
+    if plot is not None:
+        if output_index >= frf.n_out or input_index >= frf.n_in:
+            err_console.print(
+                f"[red]error:[/red] curve ({output_index},{input_index}) is out of "
+                f"range for a {frf.n_out}x{frf.n_in} block")
+            raise typer.Exit(code=2)
+        from femtools.viz import plot_frf
+
+        plot_frf(frf, output_index, input_index, outfile=str(plot))
         console.print(f"saved FRF plot to [bold]{plot}[/bold]")
 
 
@@ -1408,6 +1592,85 @@ def update_cmd(
 
     if output is not None:
         updated = getattr(result, "model", model)
+        try:
+            from femtools.io.project import save_project
+        except ImportError as exc:
+            raise _missing("saving projects", exc) from exc
+        save_project(updated, str(output))
+        console.print(f"saved updated model to [bold]{output}[/bold]")
+
+
+# ----------------------------------------------------------------------
+# update-static
+# ----------------------------------------------------------------------
+@app.command("update-static")
+def update_static_cmd(
+    model_file: Annotated[Path, typer.Argument(
+        exists=True, readable=True, help="Model file.")],
+    measure: Annotated[list[str], typer.Option(
+        "--measure", "-m",
+        help="Measured static deflection 'NODE:DOF=VALUE' (DOF 1-6: "
+             "ux uy uz rx ry rz); repeatable.")],
+    load: Annotated[list[str] | None, typer.Option(
+        "--load", "-l",
+        help="Add the test load 'NODE:DOF=VALUE' (DOF 1-6: fx fy fz mx my mz); "
+             "repeatable.  Loads stored in the model file are kept.")] = None,
+    config_file: Annotated[Path | None, typer.Option(
+        "--config", "-c", exists=True, readable=True,
+        help="JSON file with extra update_from_static keyword arguments "
+             "(parameters, max_iter, ...).")] = None,
+    output: Annotated[Path | None, typer.Option(
+        "--output", "-o", help="Save the updated model (.ftproj).")] = None,
+) -> None:
+    """Update the model against measured static deflections.
+
+    Wraps ``femtools.updating.updater.update_from_static``: the measured
+    deflections drive the same Gauss-Newton loop as modal updating, with
+    one relative Young's modulus multiplier as the default parameter
+    (override via ``--config``).  Requires the updating kernel; an
+    installation shipping without it exits with code 3, like every
+    other lazily bound subcommand.
+    """
+    try:
+        from femtools.updating.updater import update_from_static
+    except ImportError as exc:
+        raise _missing("static model updating", exc) from exc
+
+    model = _load_model(model_file)
+    _apply_load_specs(model, load)
+    if not getattr(model, "loads", None):
+        err_console.print(
+            "[yellow]warning:[/yellow] the model carries no loads and none were "
+            "given with --load; a static update needs the test load that "
+            "produced the measured deflections")
+
+    # (node, 0-based component) keys are the kernel's self-describing form
+    measured = {}
+    for spec in measure:
+        node, dof, value = _parse_point_load(spec, option="--measure")
+        measured[(node, dof - 1)] = value
+
+    config: dict[str, Any] = {}
+    if config_file is not None:
+        with open(config_file, encoding="utf-8") as fh:
+            config = json.load(fh)
+        if not isinstance(config, dict):
+            err_console.print("[red]error:[/red] update config must be a JSON object")
+            raise typer.Exit(code=2)
+
+    try:
+        result = update_from_static(model, measured, **config)
+    except (TypeError, ValueError, ArithmeticError, RuntimeError) as exc:
+        # TypeError/ValueError cover bad config keys and inconsistent
+        # measurements, RuntimeError a singular static solve
+        err_console.print(f"[red]error:[/red] static updating failed: {exc}")
+        raise typer.Exit(code=2) from exc
+
+    summary = getattr(result, "summary", None)
+    console.print(summary() if callable(summary) else repr(result))
+
+    if output is not None:
+        updated = getattr(result, "model", None) or model
         try:
             from femtools.io.project import save_project
         except ImportError as exc:

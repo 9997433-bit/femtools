@@ -8,9 +8,10 @@ grammar.
 
 The engine binds lazily to the rest of femtools: ``femtools.core`` is
 only imported when ``NEW PROJECT`` runs, ``femtools.fea`` when
-``SOLVE MODES`` / ``SOLVE STATIC`` / ``RECOVER STRESS`` runs, and so
-on.  Missing siblings produce a clear :class:`ScriptError` instead of
-an import-time crash.
+``SOLVE MODES`` / ``SOLVE STATIC`` / ``RECOVER STRESS`` runs,
+``femtools.updating`` when ``UPDATE STATIC`` runs, ``femtools.dynamics``
+when ``DUMP FRF`` runs, and so on.  Missing siblings produce a clear
+:class:`ScriptError` instead of an import-time crash.
 
 ``SET name=value`` assigns a script variable; later statements can
 reference it as ``$name`` anywhere a token is expected (``$$`` writes a
@@ -201,6 +202,45 @@ def _parse_weights(spec: Any) -> tuple[float, ...]:
         return tuple(float(v) for v in values)
     except (TypeError, ValueError):
         raise ScriptError(f"WEIGHTS must be a comma list of numbers, got {spec!r}") from None
+
+
+def _parse_bool_option(spec: Any, key: str) -> bool:
+    """Parse a YES/NO (also TRUE/FALSE, ON/OFF, 1/0) option value."""
+    if isinstance(spec, bool):
+        return spec
+    if isinstance(spec, int):
+        return spec != 0
+    word = str(spec).strip().upper()
+    if word in ("YES", "TRUE", "ON", "1"):
+        return True
+    if word in ("NO", "FALSE", "OFF", "0"):
+        return False
+    raise ScriptError(f"{key} must be YES or NO (also 1/0), got {spec!r}")
+
+
+def _parse_measure_spec(spec: Any) -> dict[tuple[int, int], float]:
+    """Parse ``MEASURE=<node>:<dof>:<value>[,...]`` into ``{(node, comp0): value}``.
+
+    DOF numbers are 1-based like everywhere else in FSL; the updating
+    kernel's self-describing measured mapping uses 0-based components.
+    """
+    items = spec if isinstance(spec, tuple) else (spec,)
+    measured: dict[tuple[int, int], float] = {}
+    for item in items:
+        parts = str(item).split(":")
+        try:
+            if len(parts) != 3:
+                raise ValueError
+            node, dof, value = int(parts[0]), int(parts[1]), float(parts[2])
+        except ValueError:
+            raise ScriptError(
+                f"cannot parse MEASURE item {item!r}: expected <node>:<dof>:<value> "
+                "with DOF 1..6, e.g. MEASURE=2:1:5.3e-5"
+            ) from None
+        if not 1 <= dof <= 6:
+            raise ScriptError(f"MEASURE DOF numbers must be 1..6, got {dof}")
+        measured[(node, dof - 1)] = value
+    return measured
 
 
 class ScriptEngine:
@@ -659,6 +699,89 @@ class ScriptEngine:
         phi_b = getattr(self.results[b_name], "modes", self.results[b_name])
         self.results[name] = mac_matrix(phi_a, phi_b)
 
+    def _cmd_update(self, rest: list[str], statement: str) -> None:
+        args, opts = _split_args_options(rest)
+        if len(args) != 1 or str(args[0]).upper() != "STATIC":
+            raise ScriptError(
+                "expected UPDATE STATIC MEASURE=<node>:<dof>:<value>[,...] "
+                "[NAME=..] [APPLY=YES|NO]",
+                statement=statement,
+            )
+        model = self._require_model(statement)
+        spec = opts.pop("MEASURE", opts.pop("MEASURED", None))
+        name = str(opts.pop("NAME", "update"))
+        apply_spec = opts.pop("APPLY", "YES")
+        if opts:
+            raise ScriptError(f"unexpected options {sorted(opts)}", statement=statement)
+        if spec is None:
+            raise ScriptError(
+                "UPDATE STATIC requires MEASURE=<node>:<dof>:<value>[,...] "
+                "(the measured static deflections)",
+                statement=statement,
+            )
+        measured = _parse_measure_spec(spec)
+        apply_model = _parse_bool_option(apply_spec, "APPLY")
+        try:
+            from femtools.updating.updater import update_from_static
+        except ImportError as exc:
+            raise ScriptError(
+                "femtools.updating is not available; UPDATE STATIC needs the "
+                "updating kernel"
+            ) from exc
+        try:
+            result = update_from_static(model, measured)
+        except (TypeError, ValueError, ArithmeticError, RuntimeError) as exc:
+            # e.g. a load-free model whose static response is identically
+            # zero, or a singular stiffness factorization
+            raise ScriptError(f"UPDATE STATIC failed: {exc}", statement=statement) from exc
+        self.results[name] = result
+        updated = getattr(result, "model", None)
+        if apply_model and updated is not None:
+            self.model = updated
+
+    def _cmd_dump(self, rest: list[str], statement: str) -> None:
+        args, opts = _split_args_options(rest)
+        if len(args) != 2 or str(args[0]).upper() != "FRF":
+            raise ScriptError(
+                "expected DUMP FRF <path> [RESULT=<name>] [COMPRESS=YES|NO]",
+                statement=statement,
+            )
+        path = str(args[1])
+        result_name = opts.pop("RESULT", None)
+        compress = _parse_bool_option(opts.pop("COMPRESS", "NO"), "COMPRESS")
+        if opts:
+            raise ScriptError(f"unexpected options {sorted(opts)}", statement=statement)
+        if result_name is not None:
+            result_name = str(result_name)
+            result = self.results.get(result_name)
+            if result is None:
+                raise ScriptError(f"no result named {result_name!r} "
+                                  f"(available: {sorted(self.results)})",
+                                  statement=statement)
+        else:
+            result = None
+            for candidate in self.results.values():
+                if (getattr(candidate, "H", None) is not None
+                        and getattr(candidate, "freq_hz", None) is not None):
+                    result = candidate
+            if result is None:
+                raise ScriptError(
+                    "no FRF result to dump: store one carrying H and freq_hz "
+                    "in the engine, or pass RESULT=<name>",
+                    statement=statement,
+                )
+        try:
+            from femtools.dynamics.frf import dump_frf
+        except ImportError as exc:
+            raise ScriptError(
+                "femtools.dynamics is not available; DUMP FRF needs the FRF kernel"
+            ) from exc
+        try:
+            dump_frf(result, path, compress=compress)
+        except (TypeError, ValueError, OSError) as exc:
+            # TypeError: the named result carries no H/freq_hz block
+            raise ScriptError(f"DUMP FRF failed: {exc}", statement=statement) from exc
+
     def _cmd_set(self, rest: list[str], statement: str) -> None:
         if not rest:
             raise ScriptError("expected SET NAME=value [NAME=value ...]",
@@ -718,6 +841,8 @@ class ScriptEngine:
         "SOLVE": _cmd_solve,
         "RECOVER": _cmd_recover,
         "MAC": _cmd_mac,
+        "UPDATE": _cmd_update,
+        "DUMP": _cmd_dump,
         "SAVE": _cmd_save,
         "PRINT": _cmd_print,
     }

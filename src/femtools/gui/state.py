@@ -137,6 +137,34 @@ class GuiState:
                 "results": self.results_summary()["results"],
             }
 
+    def _latest_static(self) -> tuple[Any, str | None]:
+        """The most recent stored result carrying a displacement field.
+
+        Call with the lock held.  Returns ``(None, None)`` when no
+        static result is stored.
+        """
+        static, static_name = None, None
+        for rname, result in self.engine.results.items():
+            if (getattr(result, "u", None) is not None
+                    and getattr(result, "modes", None) is None):
+                static, static_name = result, rname
+        return static, static_name
+
+    @staticmethod
+    def _recover_stress(model: Any, static: Any) -> Any:
+        """``recover_stress`` with GUI-facing (HTTP 400) failure modes."""
+        try:
+            from femtools.fea.recover import recover_stress
+        except ImportError as exc:
+            raise GuiApiError(
+                "stress recovery is unavailable: femtools module "
+                f"{exc.name or exc} is not installed"
+            ) from exc
+        try:
+            return recover_stress(model, static)
+        except (ValueError, KeyError) as exc:
+            raise GuiApiError(f"stress recovery failed: {exc}") from exc
+
     def stress_table(self, name: str | None = None, max_rows: Any = 20) -> dict:
         """Recover element stresses from a stored static result, as JSON.
 
@@ -158,8 +186,6 @@ class GuiState:
             if model is None:
                 raise GuiApiError("no model loaded")
 
-            static = None
-            static_name = None
             if name:
                 static = self.engine.results.get(name)
                 if static is None:
@@ -170,25 +196,12 @@ class GuiState:
                                       "(it carries no displacement field)")
                 static_name = name
             else:
-                for rname, result in self.engine.results.items():
-                    if (getattr(result, "u", None) is not None
-                            and getattr(result, "modes", None) is None):
-                        static, static_name = result, rname
+                static, static_name = self._latest_static()
             if static is None:
                 raise GuiApiError(
                     "no static result: run SOLVE STATIC (script tab) first")
 
-            try:
-                from femtools.fea.recover import recover_stress
-            except ImportError as exc:
-                raise GuiApiError(
-                    "stress recovery is unavailable: femtools module "
-                    f"{exc.name or exc} is not installed"
-                ) from exc
-            try:
-                stress = recover_stress(model, static)
-            except (ValueError, KeyError) as exc:
-                raise GuiApiError(f"stress recovery failed: {exc}") from exc
+            stress = self._recover_stress(model, static)
 
             ids = list(getattr(stress, "element_ids", []))
             if not ids:
@@ -218,7 +231,7 @@ class GuiState:
 
     # ------------------------------------------------------------------
     def render_png(self, kind: str, *, name: str = "mac", index: int = 0) -> bytes:
-        """Render a plot ('mesh', 'mac' or 'mode') to PNG bytes (Agg)."""
+        """Render a plot ('mesh', 'mac', 'mode' or 'stress') to PNG bytes (Agg)."""
         import matplotlib
 
         matplotlib.use("Agg", force=False)
@@ -251,6 +264,15 @@ class GuiState:
                     raise GuiApiError("no modal result; run SOLVE MODES first")
                 fig = viz.plot_mode(self.model, modal, index=index,
                                     backend="matplotlib")
+            elif kind == "stress":
+                if self.model is None:
+                    raise GuiApiError("no model loaded")
+                static, static_name = self._latest_static()
+                if static is None:
+                    raise GuiApiError("no static result; run SOLVE STATIC first")
+                stress = self._recover_stress(self.model, static)
+                fig = viz.plot_stress(self.model, stress, backend="matplotlib",
+                                      title=f"von Mises stress ({static_name})")
             else:
                 raise GuiApiError(f"unknown plot kind {kind!r}")
             buf = io.BytesIO()

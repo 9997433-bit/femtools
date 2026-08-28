@@ -125,6 +125,11 @@ MAC</textarea>
       <div id="results">none</div>
     </section>
     <section style="margin-top:18px">
+      <h2>Stress</h2>
+      <div id="stress" style="overflow:auto"><em style="color:var(--muted)">run
+        SOLVE STATIC to recover element stresses</em></div>
+    </section>
+    <section style="margin-top:18px">
       <h2>Plots</h2>
       <div class="plots" id="plots"><em style="color:var(--muted)">run a
         script to render plots</em></div>
@@ -167,11 +172,54 @@ function renderResults(list) {
   }).join('');
 }
 
+function fmtNum(x) {
+  return (typeof x === 'number' && isFinite(x)) ? x.toPrecision(4) : '—';
+}
+
+function renderStress(data, message) {
+  if (!data) {  // expected 400s: no model / no static result / missing kernel
+    $('stress').innerHTML =
+      `<em style="color:var(--muted)">${message || 'no stress data'}</em>`;
+    return;
+  }
+  const comps = data.components || [];
+  const header = '<tr><th>element</th><th>type</th>'
+    + comps.map(c => `<th>s${c}</th>`).join('') + '<th>von Mises</th></tr>';
+  const rows = (data.elements || []).map(e =>
+    `<tr><td>${e.element}</td><td>${e.type}</td>`
+    + comps.map((c, i) => `<td>${fmtNum((e.stress || [])[i])}</td>`).join('')
+    + `<td><b>${fmtNum(e.von_mises)}</b></td></tr>`).join('');
+  const shown = (data.elements || []).length;
+  const note = `${data.n_elements} element${data.n_elements === 1 ? '' : 's'}`
+    + (data.truncated ? ` (first ${shown} shown)` : '')
+    + ` — max von Mises ${fmtNum(data.max_von_mises)}`
+    + (data.result ? ` — result: ${data.result}` : '');
+  $('stress').innerHTML = `<table>${header}${rows}</table>`
+    + `<p class="hint">${note}</p>`;
+}
+
+async function refreshStress() {
+  let payload;
+  try {
+    const r = await fetch('/api/stress?max_rows=15');
+    payload = await r.json();  // both backends answer 400s with JSON too
+  } catch (e) { renderStress(null, 'stress unavailable'); return; }
+  if (payload && payload.ok) renderStress(payload);
+  else renderStress(null, (payload && payload.error) || 'no stress data');
+}
+
 async function refreshData() {
   try {
     renderModel(await jget('/api/model'));
     renderResults((await jget('/api/results')).results);
   } catch (e) { /* server gone */ }
+  refreshStress();
+}
+
+function plotNames(results) {
+  const names = ['mesh', 'mode', 'mac'];
+  if ((results || []).some(r => /static/i.test(r.type || ''))) names.push('stress');
+  return names;
 }
 
 function showPlots(names) {
@@ -193,12 +241,13 @@ $('run').onclick = async () => {
       $('log').innerHTML = `<span class="ok">ok</span> — executed `
         + `${data.executed.length} statements\\n` + data.executed.join('\\n');
       renderModel(data.model); renderResults(data.results || []);
-      showPlots(['mesh', 'mode', 'mac']);
+      showPlots(plotNames(data.results));
     } else {
       $('log').innerHTML = `<span class="err">error</span>\\n${data.error}\\n\\nexecuted:\\n`
         + (data.executed || []).join('\\n');
       renderModel(data.model);
     }
+    refreshStress();
   } catch (e) { $('log').innerHTML = `<span class="err">request failed:</span> ${e}`; }
 };
 $('loadform').onsubmit = async (ev) => {
@@ -214,10 +263,11 @@ $('loadform').onsubmit = async (ev) => {
       $('log').innerHTML = `<span class="ok">ok</span> — loaded ${data.path} `
         + `(${data.format})`;
       renderModel(data.model); renderResults(data.results || []);
-      showPlots((data.results || []).length ? ['mesh', 'mode', 'mac'] : ['mesh']);
+      showPlots((data.results || []).length ? plotNames(data.results) : ['mesh']);
     } else {
       $('log').innerHTML = `<span class="err">error</span>\\n${data.error}`;
     }
+    refreshStress();
   } catch (e) { $('log').innerHTML = `<span class="err">request failed:</span> ${e}`; }
 };
 $('refresh').onclick = () => { refreshStatus(); refreshData(); };
