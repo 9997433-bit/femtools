@@ -1,10 +1,12 @@
-"""Nastran punch file (.pch) translator for real modal results.
+"""Nastran punch file (.pch) translator for real modal and static results.
 
 The punch file is the 80-column text sibling of the OP2: each line carries
 72 characters of data plus a sequence number in columns 73-80.  This module
 reads and writes the real-eigenvector subset produced by
-``DISPLACEMENT(PUNCH) = ALL`` in a SOL 103 run (an original parser -- no
-Nastran or pyNastran code involved; **no binary OP2 support**, by design):
+``DISPLACEMENT(PUNCH) = ALL`` in a SOL 103 run and reads the real static
+``$DISPLACEMENTS`` blocks the same request punches in a SOL 101 run (an
+original parser -- no Nastran or pyNastran code involved; **no binary OP2
+support**, by design):
 
 ::
 
@@ -32,6 +34,23 @@ Nastran or pyNastran code involved; **no binary OP2 support**, by design):
   (``$DISPLACEMENTS``, ``$SPCF``, ...) are skipped with one warning per
   kind, never an error.
 
+:func:`read_pch_static` is the SOL 101 sibling of :func:`read_pch`: it
+reads the public static punch layout below into a
+:class:`~femtools.core.results.StaticResult` (one column per
+``$SUBCASE``), skipping eigenvector and complex blocks the same tolerant
+way :func:`read_pch` skips ``$DISPLACEMENTS``:
+
+::
+
+    $TITLE   = CANTILEVER                                                  1
+    $SUBTITLE= SOL 101                                                     2
+    $LABEL   =                                                             3
+    $DISPLACEMENTS                                                         4
+    $REAL OUTPUT                                                           5
+    $SUBCASE ID =           1                                              6
+             1       G      0.000000E+00      0.000000E+00  ...            7
+    -CONT-                  0.000000E+00      0.000000E+00  ...            8
+
 What the format cannot carry (documented losses):
 
 * generalized (modal) mass -- Nastran punch has no such record;
@@ -56,9 +75,9 @@ from pathlib import Path
 import numpy as np
 
 from ..core.errors import FileFormatError
-from ..core.results import DofPair, ModalResult
+from ..core.results import DofPair, ModalResult, StaticResult
 
-__all__ = ["read_pch", "write_pch", "PchError"]
+__all__ = ["read_pch", "read_pch_static", "write_pch", "PchError"]
 
 
 class PchError(FileFormatError):
@@ -69,6 +88,8 @@ class PchError(FileFormatError):
 _EIGENVALUE_RE = re.compile(
     r"\$\s*EIGENVALUE\s*=\s*([-+]?[0-9.]+(?:[EeDd][-+]?\d+)?)\s+MODE\s*=\s*(\d+)"
 )
+
+_SUBCASE_RE = re.compile(r"\$\s*SUBCASE\s+(?:ID\s*)?=\s*(\d+)")
 
 #: point-type codes: components carried per point
 _POINT_NDOF = {"G": 6, "S": 1, "E": 1, "M": 1}
@@ -90,6 +111,81 @@ def _to_float(tok: str) -> float:
 # ---------------------------------------------------------------------------
 # reading
 # ---------------------------------------------------------------------------
+
+#: one parsed result block: node id -> (point type, component values)
+_PointBlock = dict[int, tuple[str, list[float]]]
+
+
+def _read_point_line(
+    stripped: str,
+    lineno: int,
+    path: Path,
+    points: _PointBlock,
+    last_point: list[float] | None,
+) -> list[float]:
+    """Parse one punch data line (point or ``-CONT-``) into ``points``.
+
+    Returns the value list continuation lines should extend.
+    """
+    toks = stripped.split()
+    try:
+        if toks[0] == "-CONT-":
+            if last_point is None:
+                raise PchError(
+                    "-CONT- line without a point line", file=path.name, line=lineno
+                )
+            last_point.extend(_to_float(t) for t in toks[1:])
+            return last_point
+        nid = int(toks[0])
+        ptype = toks[1].upper() if len(toks) > 1 and toks[1].isalpha() else "G"
+        first = 2 if len(toks) > 1 and toks[1].isalpha() else 1
+        values = [_to_float(t) for t in toks[first:]]
+        points[nid] = (ptype, values)
+        return values
+    except PchError:
+        raise
+    except (ValueError, IndexError) as exc:
+        raise PchError(
+            f"cannot parse punch data line {lineno}: {stripped!r}",
+            file=path.name,
+            line=lineno,
+        ) from exc
+
+
+def _stack_point_blocks(
+    blocks: list[_PointBlock], path: Path
+) -> tuple[tuple[DofPair, ...], np.ndarray, bool]:
+    """Union (node, dof) row labels over blocks and stack them column-wise.
+
+    Returns ``(dof_index, matrix, uneven)`` where ``matrix`` is
+    ``(n_dof, len(blocks))`` with missing entries zero-filled and ``uneven``
+    flags blocks that list different node sets.
+    """
+    ndof_by_node: dict[int, int] = {}
+    for points in blocks:
+        for nid, (ptype, values) in points.items():
+            n = _POINT_NDOF.get(ptype)
+            if n is None:
+                raise PchError(f"unknown point type {ptype!r} for node {nid}", file=path.name)
+            n = max(n, min(len(values), 6))
+            ndof_by_node[nid] = max(ndof_by_node.get(nid, 0), n)
+
+    dof_index: list[DofPair] = []
+    row_of: dict[DofPair, int] = {}
+    for nid in sorted(ndof_by_node):
+        for d in range(ndof_by_node[nid]):
+            row_of[(nid, d)] = len(dof_index)
+            dof_index.append((nid, d))
+
+    matrix = np.zeros((len(dof_index), len(blocks)))
+    uneven = False
+    for j, points in enumerate(blocks):
+        if len(points) != len(ndof_by_node):
+            uneven = True
+        for nid, (_ptype, values) in points.items():
+            for d, v in enumerate(values[:6]):
+                matrix[row_of[(nid, d)], j] = v
+    return tuple(dof_index), matrix, uneven
 
 
 class _ModeBlock:
@@ -182,29 +278,7 @@ def read_pch(path: str | Path) -> ModalResult:
         if not in_vector or current is None or current.is_complex:
             continue  # data of a skipped/complex block
 
-        toks = stripped.split()
-        try:
-            if toks[0] == "-CONT-":
-                if last_point is None:
-                    raise PchError(
-                        "-CONT- line without a point line", file=path.name, line=lineno
-                    )
-                last_point.extend(_to_float(t) for t in toks[1:])
-            else:
-                nid = int(toks[0])
-                ptype = toks[1].upper() if len(toks) > 1 and toks[1].isalpha() else "G"
-                first = 2 if len(toks) > 1 and toks[1].isalpha() else 1
-                values = [_to_float(t) for t in toks[first:]]
-                current.points[nid] = (ptype, values)
-                last_point = values
-        except PchError:
-            raise
-        except (ValueError, IndexError) as exc:
-            raise PchError(
-                f"cannot parse punch data line {lineno}: {stripped!r}",
-                file=path.name,
-                line=lineno,
-            ) from exc
+        last_point = _read_point_line(stripped, lineno, path, current.points, last_point)
 
     flush()
 
@@ -216,39 +290,20 @@ def read_pch(path: str | Path) -> ModalResult:
             stacklevel=2,
         )
     for name, count in sorted(skipped_blocks.items()):
+        hint = (
+            " -- read_pch_static reads static displacement blocks"
+            if name.startswith("DISPLACEMENT")
+            else ""
+        )
         warnings.warn(
-            f"read_pch({path.name}): skipped non-eigenvector block {name} (x{count})",
+            f"read_pch({path.name}): skipped non-eigenvector block {name} (x{count}){hint}",
             UserWarning,
             stacklevel=2,
         )
     if not modes:
         raise PchError("no real eigenvector data found in punch file", file=path.name)
 
-    # -- union DOF index over all modes ------------------------------------
-    ndof_by_node: dict[int, int] = {}
-    for blk in modes:
-        for nid, (ptype, values) in blk.points.items():
-            n = _POINT_NDOF.get(ptype)
-            if n is None:
-                raise PchError(f"unknown point type {ptype!r} for node {nid}", file=path.name)
-            n = max(n, min(len(values), 6))
-            ndof_by_node[nid] = max(ndof_by_node.get(nid, 0), n)
-
-    dof_index: list[DofPair] = []
-    row_of: dict[DofPair, int] = {}
-    for nid in sorted(ndof_by_node):
-        for d in range(ndof_by_node[nid]):
-            row_of[(nid, d)] = len(dof_index)
-            dof_index.append((nid, d))
-
-    shapes = np.zeros((len(dof_index), len(modes)))
-    uneven = False
-    for j, blk in enumerate(modes):
-        if len(blk.points) != len(ndof_by_node):
-            uneven = True
-        for nid, (_ptype, values) in blk.points.items():
-            for d, v in enumerate(values[:6]):
-                shapes[row_of[(nid, d)], j] = v
+    dof_index, shapes, uneven = _stack_point_blocks([blk.points for blk in modes], path)
     if uneven:
         warnings.warn(
             f"read_pch({path.name}): modes list different node sets; "
@@ -266,6 +321,157 @@ def read_pch(path: str | Path) -> ModalResult:
         generalized_mass=np.ones(len(modes)),
         dof_index=tuple(dof_index),
     )
+
+
+class _CaseBlock:
+    """One $DISPLACEMENTS block (a static subcase) while being parsed."""
+
+    __slots__ = ("subcase", "points", "is_complex")
+
+    def __init__(self, subcase: int | None) -> None:
+        self.subcase = subcase
+        self.points: _PointBlock = {}
+        self.is_complex = False
+
+
+def read_pch_static(path: str | Path) -> StaticResult:
+    """Read real static displacements from a Nastran punch file (SOL 101).
+
+    Parses the public ``$DISPLACEMENTS`` blocks a
+    ``DISPLACEMENT(PUNCH) = ALL`` request punches in a static run into a
+    :class:`~femtools.core.results.StaticResult`.  Rows are labelled by
+    ``dof_index`` exactly like :func:`read_pch` (6 DOFs per ``G`` point, 1
+    per scalar point, nodes ascending); one column per ``$SUBCASE``, with
+    ``load_case`` carrying the subcase ids (1-based position when a block
+    has no ``$SUBCASE`` header).  A single subcase returns a 1-D ``u``.
+    Eigenvector blocks, complex-output blocks and other result kinds
+    (``$SPCF``, stresses, ...) are skipped with one warning per kind;
+    a file with no readable displacement data raises :class:`PchError`.
+    """
+    path = Path(path)
+    text = path.read_text(encoding="utf-8", errors="replace")
+
+    cases: list[_CaseBlock] = []
+    current: _CaseBlock | None = None
+    complex_section = False  # sticky until a "$REAL OUTPUT" header
+    pending_subcase: int | None = None
+    skipped_blocks: dict[str, int] = {}
+    n_complex = 0
+    n_eigen = 0
+    last_point: list[float] | None = None
+
+    def flush() -> None:
+        nonlocal current, last_point, n_complex
+        if current is not None:
+            if current.is_complex:
+                n_complex += 1
+            elif current.points:
+                cases.append(current)
+        current = None
+        last_point = None
+
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = _strip_seq(raw)
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("$"):
+            upper = stripped.upper()
+            m = _SUBCASE_RE.match(upper)
+            if m:
+                sid = int(m.group(1))
+                if current is not None and not current.points:
+                    current.subcase = sid  # $SUBCASE follows $DISPLACEMENTS
+                elif current is not None:
+                    # next subcase without a repeated $DISPLACEMENTS header
+                    flush()
+                    current = _CaseBlock(sid)
+                    current.is_complex = complex_section
+                else:
+                    pending_subcase = sid  # $SUBCASE precedes $DISPLACEMENTS
+                continue
+            if upper.startswith("$DISPLACEMENT"):
+                flush()
+                current = _CaseBlock(pending_subcase)
+                current.is_complex = complex_section
+                pending_subcase = None
+                last_point = None
+                continue
+            # output-type markers appear between $DISPLACEMENTS and the data
+            if upper.startswith(_COMPLEX_MARKERS):
+                complex_section = True
+                if current is not None and not current.points:
+                    current.is_complex = True
+                else:
+                    flush()
+                continue
+            if upper.startswith("$REAL OUTPUT"):
+                complex_section = False
+                if current is not None and not current.points:
+                    current.is_complex = False
+                continue
+            if upper.startswith("$EIGENVALUE"):
+                flush()
+                n_eigen += 1
+                continue
+            if upper.startswith("$EIGENVECTOR"):
+                flush()
+                continue
+            if upper.startswith(("$TITLE", "$SUBTITLE", "$LABEL", "$POINT")):
+                continue
+            # any other result block ($SPCF, stresses, ...)
+            name = upper[1:].split("=")[0].strip() or "?"
+            skipped_blocks[name] = skipped_blocks.get(name, 0) + 1
+            flush()
+            continue
+
+        if current is None or current.is_complex:
+            continue  # data of a skipped/eigenvector/complex block
+
+        last_point = _read_point_line(stripped, lineno, path, current.points, last_point)
+
+    flush()
+
+    if n_eigen:
+        warnings.warn(
+            f"read_pch_static({path.name}): skipped {n_eigen} eigenvector block(s) "
+            "-- read_pch reads modal punch content",
+            UserWarning,
+            stacklevel=2,
+        )
+    if n_complex:
+        warnings.warn(
+            f"read_pch_static({path.name}): skipped {n_complex} complex displacement "
+            "block(s); only real static output is read",
+            UserWarning,
+            stacklevel=2,
+        )
+    for name, count in sorted(skipped_blocks.items()):
+        warnings.warn(
+            f"read_pch_static({path.name}): skipped non-displacement block {name} (x{count})",
+            UserWarning,
+            stacklevel=2,
+        )
+    if not cases:
+        raise PchError(
+            "no real static $DISPLACEMENTS data found in punch file", file=path.name
+        )
+
+    dof_index, u, uneven = _stack_point_blocks([case.points for case in cases], path)
+    if uneven:
+        warnings.warn(
+            f"read_pch_static({path.name}): subcases list different node sets; "
+            "missing entries were zero-filled",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    load_case = [
+        case.subcase if case.subcase is not None else j + 1 for j, case in enumerate(cases)
+    ]
+    if len(cases) == 1:
+        return StaticResult(u=u[:, 0], dof_index=dof_index, load_case=load_case[0])
+    return StaticResult(u=u, dof_index=dof_index, load_case=tuple(load_case))
 
 
 # ---------------------------------------------------------------------------
