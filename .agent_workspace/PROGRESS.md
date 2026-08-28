@@ -6,5 +6,6 @@ Branch `cursor/femtools-cycle-c-d551` (from main @ R6) — PR https://github.com
 |-------|--------|
 | R1–R6 | done on main |
 | Round 7 | **closed** — stress/RBE2, write_cdb/write_k/INCLUDE, NastranPunchDriver, topometry, nearest-node, PSD base_accel, CMS dump, CLI/script/viz; top-level `_EXPORTS` promoted |
-| Round 8 | **in_flight** — RBE3 interpolation, nodal stress average, Ansys/Abaqus text drivers, dump_frf, mapped shapes, plot_stress, update_from_static |
+| Round 8 | **closed** — RBE3 interpolation, nodal stress average, Ansys/Abaqus text drivers, dump_frf, mapped shapes, plot_stress, update_from_static; `_EXPORTS` 138 |
 | Round 9 | pending |
+

@@ -34,6 +34,9 @@ Round-6 names (``read_inp``, ``read_k``, ``shape_optimize``, ``ssi_data``, ``nmd
 Round-7 names (``recover_stress``, ``apply_rbe2``, ``write_cdb``, ``write_k``,
 ``NastranPunchDriver``, ``dump_cms``, ``map_nearest_nodes``, ``topometry_optimize``,
 ``static_displacement_response``, …) follow after the Cycle-C kernels merged.
+Round-8 names (``apply_rbe3``, ``average_nodal``, ``AnsysCdbDriver``,
+``AbaqusInpDriver``, ``dump_frf``, ``mapped_mode_matrix``, ``plot_stress``,
+``update_from_static``, …) follow the same way.
 """
 
 from __future__ import annotations
@@ -44,9 +47,9 @@ from typing import TYPE_CHECKING
 __version__ = "0.1.0"
 
 # Top-level name -> defining module (contract API of docs/CONTRACT_API.md, the frozen
-# Round-4 / Round-6 / Round-7 APIs of .agent_workspace/REMAINING.md — docs/PRODUCT_MAP.md
-# tags R4 / R6 / R7 — plus the exception hierarchy promised at package root by
-# docs/ARCHITECTURE.md §9).
+# Round-4 / Round-6 / Round-7 / Round-8 APIs of .agent_workspace/REMAINING.md —
+# docs/PRODUCT_MAP.md tags R4 / R6 / R7 / R8 — plus the exception hierarchy promised
+# at package root by docs/ARCHITECTURE.md §9).
 _EXPORTS: dict[str, str] = {
     # error hierarchy
     "FemtoolsError": "femtools.core.errors",
@@ -91,6 +94,8 @@ _EXPORTS: dict[str, str] = {
     # solver drivers
     "SolverDriver": "femtools.drivers.base",
     "NastranPunchDriver": "femtools.drivers.nastran",
+    "AnsysCdbDriver": "femtools.drivers.ansys",
+    "AbaqusInpDriver": "femtools.drivers.abaqus",
     # FEA
     "assemble_km": "femtools.fea.assemble",
     "AssemblyResult": "femtools.fea.assemble",
@@ -109,11 +114,15 @@ _EXPORTS: dict[str, str] = {
     "recover_strain": "femtools.fea.recover",
     "StressResult": "femtools.fea.recover",
     "apply_rbe2": "femtools.fea.mpc",
+    "apply_rbe3": "femtools.fea.mpc",
     "ConstraintTransform": "femtools.fea.mpc",
+    "average_nodal": "femtools.fea.recover",
     # dynamics
     "modal_frf": "femtools.dynamics.frf",
     "direct_frf": "femtools.dynamics.frf",
     "FRFResult": "femtools.dynamics.frf",
+    "dump_frf": "femtools.dynamics.frf",
+    "load_frf": "femtools.dynamics.frf",
     "harmonic_response": "femtools.dynamics.harmonic",
     "modal_based_assembly": "femtools.dynamics.mba",
     "craig_bampton": "femtools.dynamics.craig_bampton",
@@ -137,6 +146,7 @@ _EXPORTS: dict[str, str] = {
     "macx": "femtools.correlation.mac",
     "mac_contribution": "femtools.correlation.mac",
     "map_nearest_nodes": "femtools.correlation.dofmap",
+    "mapped_mode_matrix": "femtools.correlation.dofmap",
     "pair_modes": "femtools.correlation.pairing",
     "frac": "femtools.correlation.frf_corr",
     "csac": "femtools.correlation.frf_corr",
@@ -156,6 +166,7 @@ _EXPORTS: dict[str, str] = {
     # updating
     "sensitivity_matrix": "femtools.updating.sensitivity",
     "update_model": "femtools.updating.updater",
+    "update_from_static": "femtools.updating.updater",
     "UpdateResult": "femtools.updating.updater",
     "update_from_frf": "femtools.updating.frf_updating",
     "select_parameters": "femtools.updating.selection",
@@ -187,6 +198,8 @@ _EXPORTS: dict[str, str] = {
     "ssi_cov": "femtools.mpe.ssi",
     "ssi_data": "femtools.mpe.ssi",
     "rigid_body_properties": "femtools.rbpe.rbfit",
+    # viz
+    "plot_stress": "femtools.viz.plots",
     # scripting
     "ScriptEngine": "femtools.script.engine",
 }
@@ -296,6 +309,7 @@ if TYPE_CHECKING:
     from femtools.core.validation import validate_model as validate_model
     from femtools.correlation.alignment import align_geometry as align_geometry
     from femtools.correlation.dofmap import map_nearest_nodes as map_nearest_nodes
+    from femtools.correlation.dofmap import mapped_mode_matrix as mapped_mode_matrix
     from femtools.correlation.expansion import (
         expand_guyan as expand_guyan,
     )
@@ -314,6 +328,8 @@ if TYPE_CHECKING:
     from femtools.correlation.mac import poc as poc
     from femtools.correlation.orthogonality import cross_orthogonality as cross_orthogonality
     from femtools.correlation.pairing import pair_modes as pair_modes
+    from femtools.drivers.abaqus import AbaqusInpDriver as AbaqusInpDriver
+    from femtools.drivers.ansys import AnsysCdbDriver as AnsysCdbDriver
     from femtools.drivers.base import SolverDriver as SolverDriver
     from femtools.drivers.nastran import NastranPunchDriver as NastranPunchDriver
     from femtools.dynamics.cms_free import (
@@ -337,6 +353,12 @@ if TYPE_CHECKING:
     )
     from femtools.dynamics.frf import (
         direct_frf as direct_frf,
+    )
+    from femtools.dynamics.frf import (
+        dump_frf as dump_frf,
+    )
+    from femtools.dynamics.frf import (
+        load_frf as load_frf,
     )
     from femtools.dynamics.frf import (
         modal_frf as modal_frf,
@@ -370,7 +392,9 @@ if TYPE_CHECKING:
     from femtools.fea.elements import available_elements as available_elements
     from femtools.fea.mpc import ConstraintTransform as ConstraintTransform
     from femtools.fea.mpc import apply_rbe2 as apply_rbe2
+    from femtools.fea.mpc import apply_rbe3 as apply_rbe3
     from femtools.fea.recover import StressResult as StressResult
+    from femtools.fea.recover import average_nodal as average_nodal
     from femtools.fea.recover import recover_strain as recover_strain
     from femtools.fea.recover import recover_stress as recover_stress
     from femtools.fea.reduction import (
@@ -464,7 +488,9 @@ if TYPE_CHECKING:
     from femtools.updating.selection import select_parameters as select_parameters
     from femtools.updating.sensitivity import sensitivity_matrix as sensitivity_matrix
     from femtools.updating.updater import UpdateResult as UpdateResult
+    from femtools.updating.updater import update_from_static as update_from_static
     from femtools.updating.updater import update_model as update_model
     from femtools.updating.uq import UQResult as UQResult
     from femtools.updating.uq import monte_carlo_update as monte_carlo_update
     from femtools.updating.uq import parameter_covariance as parameter_covariance
+    from femtools.viz.plots import plot_stress as plot_stress

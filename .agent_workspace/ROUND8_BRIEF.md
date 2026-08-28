@@ -7,7 +7,15 @@ No DAQ, no OP2/RST/ODB.
 Frozen names: `.agent_workspace/REMAINING.md` (Round 8 section).
 File ownership: `.agent_workspace/FILE_OWNERSHIP.md`.
 
-Parent already added `RBE3` / `FEModel.add_rbe3` / top-level `RBE3` export. Consume it; do not replace the dataclass.
+## Close-out
+
+All ten Round-8 agents delivered. Kernels and tests are merged on
+`cursor/femtools-cycle-c-d551`. Parent glue: top-level `_EXPORTS` (138 names),
+PRODUCT_MAP R8-wip → R8, ACCEPTANCE Round-8 rows measured. Goldens unchanged
+(HEX8 98.6%, Rubin 0.028%, H1/H2=γ², tilted-shell 6 RBM, 10% E recovery).
+DAQ / OP2 / RST / ODB remain N/A.
+
+The per-agent briefs below are historical.
 
 ## R8-O1 — RBE3 interpolation + nodal stress average (cloud)
 

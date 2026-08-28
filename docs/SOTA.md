@@ -255,10 +255,9 @@ implementations; `docs/ACCEPTANCE.md` (owned by R1-F3) elaborates the golden cas
 ## 10. Merged-code gap (Round-2 closure and residual distances)
 
 Known distances between the merged code and the state of the art it targets. Status tags in
-`docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4/R6/R7 is merged and tested but may still carry
-one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+,
-R8-wip, and N/A rows of the product map,
-not repeated here.
+`docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4/R6/R7/R8 is merged and tested but may still carry
+one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+
+and N/A rows of the product map, not repeated here.
 
 ### Closed in Round 2
 
@@ -342,12 +341,11 @@ References are textbooks and journal/conference papers only.
   `RBE2` *card* layout is read from publicly documented card descriptions, like every other
   BDF card femtools parses; no commercial-manual text is used.
 
-## 12. Round 8 targets (in progress) — interpolation constraints, nodal averaging, text drivers
+## 12. Round 8 — interpolation constraints, nodal averaging, text drivers
 
-Round 8 (Cycle C's second round) freezes the APIs of `.agent_workspace/REMAINING.md`
-(Round 8 section). At the time of writing none of these kernels imports from this branch —
-every row is tagged **R8-wip** in `docs/PRODUCT_MAP.md` (only the `core.model.RBE3` data
-container is merged). References are public textbooks and journal papers only.
+Round 8 (Cycle C's second round) merged the APIs of `.agent_workspace/REMAINING.md`
+(Round 8 section). Every row is tagged **R8** in `docs/PRODUCT_MAP.md`. References
+are public textbooks and journal papers only.
 
 * **RBE3 interpolation constraint (`fea.mpc.apply_rbe3` → the shared
   `ConstraintTransform`; container `core.model.RBE3` / `FEModel.add_rbe3` already

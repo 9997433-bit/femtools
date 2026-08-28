@@ -37,7 +37,7 @@ Layer 1  io           UNV, Nastran BDF, project persistence (.ftproj), driver pl
 Layer 2  fea          element library, DOF management, sparse K/M/C assembly, static solver,
                       eigensolver (ARPACK), complex modes, reduction (Guyan/IRS/SEREP),
                       stress recovery + RBE2 constraint transform (Round 7); RBE3
-                      interpolation transform + nodal stress averaging (Round 8, in progress)
+                      interpolation transform + nodal stress averaging (Round 8)
 Layer 3  dynamics     modal & direct FRF, harmonic response, time integration,
                       Craig–Bampton CMS, modal-based assembly, residual vectors
 Layer 4  correlation  MAC/CoMAC/POC, cross-orthogonality, FRF correlation, mode pairing
@@ -145,8 +145,8 @@ code never branches on data origin.
   `fea.mpc.apply_rbe2` / `ConstraintTransform`, consuming the merged `FEModel.rbe2` table
   (`core.model.RBE2`, shared with the BDF `RBE2` card): the dependent node follows the
   independent one by the small-rotation rigid-body relation, and `assemble_km` honors
-  `model.rbe2` (or an explicit `mpc=` transform). Round 8 (in progress, PRODUCT_MAP
-  R8-wip) adds the interpolation variant `fea.mpc.apply_rbe3` over the merged
+  `model.rbe2` (or an explicit `mpc=` transform). Round 8 (PRODUCT_MAP
+  R8) adds the interpolation variant `fea.mpc.apply_rbe3` over the merged
   `FEModel.rbe3` table: the dependent node's listed components follow the *weighted
   average* of the independents (equal weights by default, or `RBE3.weights`) — an
   interpolation constraint, not the RBE2 rigid weld, with no penalty springs.
@@ -202,7 +202,7 @@ ever formed by the framework (dense paths are allowed inside tests and for n < ~
   kernels the assembler uses, returning a `StressResult`. Recovery is an fea-layer
   capability: it consumes `StaticResult` / `ModalResult` displacement fields and never
   re-solves. Linear elasticity only; Round 7 does no nodal smoothing. Round 8
-  (in progress, PRODUCT_MAP R8-wip) adds `fea.recover.average_nodal`: the centroid
+  (PRODUCT_MAP R8) adds `fea.recover.average_nodal`: the centroid
   `StressResult` averaged onto incident nodes with `1/n_adj` weights — plain nodal
   averaging, deliberately not Zienkiewicz–Zhu SPR — exact at every node on a
   constant-stress patch.
@@ -225,7 +225,7 @@ All result objects are immutable after construction, carry provenance metadata
 
 The `.npz` serialization promise is realized per result type as rounds land: Round 7
 shipped `dynamics.superelement.dump_cms` / `load_cms` for CMS reduced models; Round 8
-(in progress, PRODUCT_MAP R8-wip) adds `dynamics.frf.dump_frf` / `load_frf` for
+(PRODUCT_MAP R8) adds `dynamics.frf.dump_frf` / `load_frf` for
 `FRFResult`, with `H` and `freq_hz` bit-identical after a load round trip.
 
 Shape/DOF compatibility between two results (e.g. FE vs. test in MAC) is established through
@@ -302,7 +302,7 @@ Policy:
    (`io.kfile.read_k`) text-subset translators over publicly documented card layouts;
    Round 7 added the matching writers (`io.cdb.write_cdb`, `io.kfile.write_k`) and
    BDF `INCLUDE`/`RBE2` reading.
-   Round 8 (in progress, `docs/PRODUCT_MAP.md` R8-wip) extends the same pattern with two
+   Round 8 (`docs/PRODUCT_MAP.md` R8) extends the same pattern with two
    more optional **text** drivers: `drivers.ansys.AnsysCdbDriver` (`write_input` =
    `write_cdb`; `is_available()` probes `shutil.which` for `ansys`/`mapdl`-style
    aliases and never raises; `run()` raises `SolverError` on a missing executable,

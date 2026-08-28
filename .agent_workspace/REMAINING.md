@@ -7,6 +7,9 @@ Round 7 freezes the APIs below. Existing `docs/CONTRACT_API.md` still holds; do 
 **Round 7 landed** on `cursor/femtools-cycle-c-d551` (PR #3). The names below import and are
 stable top-level exports.
 
+**Round 8 landed** on `cursor/femtools-cycle-c-d551` (PR #3). The names below import and are
+stable top-level exports. Round 9 is not opened from this close-out.
+
 ## Round 8 frozen APIs
 
 Round 8 thickens the 1:1 workflow on top of Round 7: interpolation MPCs, nodal stress
