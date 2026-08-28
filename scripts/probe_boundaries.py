@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any
@@ -370,6 +370,296 @@ def probe_modal_strain_energy() -> dict[str, Any]:
     return {"energy": result.tolist(), "convention": convention}
 
 
+def _bar_model(name: str) -> Any:
+    from femtools.core.model import FEModel
+
+    model = FEModel(name=name)
+    model.add_node(id=1, xyz=(0.0, 0.0, 0.0))
+    model.add_node(id=2, xyz=(1.0, 0.0, 0.0))
+    model.add_material(id=1, type="isotropic", E=210.0e9, nu=0.3, rho=7850.0)
+    model.add_property(id=1, type="bar", material_id=1, A=1.0e-4)
+    model.add_element(id=1, type="BAR2", nodes=(1, 2), property_id=1)
+    model.add_spc(node_id=1, mask=(True, True, True, True, True, True))
+    return model
+
+
+def _solid_cube_model(name: str) -> Any:
+    from femtools.core.model import FEModel
+
+    model = FEModel(name=name)
+    coordinates = (
+        (0.0, 0.0, 0.0),
+        (1.0, 0.0, 0.0),
+        (1.0, 1.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (0.0, 0.0, 1.0),
+        (1.0, 0.0, 1.0),
+        (1.0, 1.0, 1.0),
+        (0.0, 1.0, 1.0),
+    )
+    for node_id, xyz in enumerate(coordinates, start=1):
+        model.add_node(id=node_id, xyz=xyz)
+    model.add_material(id=1, type="isotropic", E=70.0e9, nu=0.3, rho=2700.0)
+    model.add_property(id=1, type="solid", material_id=1)
+    model.add_element(id=1, type="HEX8", nodes=tuple(range(1, 9)), property_id=1)
+    return model
+
+
+def _result_field(
+    result: Any,
+    names: tuple[str, ...],
+    element_id: int | None = 1,
+) -> np.ndarray:
+    value = result
+    for name in names:
+        if hasattr(result, name):
+            value = getattr(result, name)
+            break
+        if isinstance(result, Mapping) and name in result:
+            value = result[name]
+            break
+    if isinstance(value, Mapping) and element_id is not None:
+        if element_id not in value:
+            raise AssertionError(f"result field does not contain element {element_id}")
+        value = value[element_id]
+    elif isinstance(value, Mapping):
+        value = [value[key] for key in sorted(value)]
+    array = np.asarray(value, dtype=float).squeeze()
+    if array.size == 0 or not np.all(np.isfinite(array)):
+        raise AssertionError("result field is empty or non-finite")
+    return array
+
+
+def probe_recover_stress() -> dict[str, Any]:
+    from femtools.fea.recover import recover_stress
+
+    model = _bar_model("stress-boundary-probe")
+    displacement = np.zeros(model.ndof)
+    displacement[model.dof_map()[(2, 0)]] = 1.0e-3
+    result = recover_stress(model, displacement)
+    stress = _result_field(
+        result,
+        ("stress", "stresses", "element_stress", "values", "data"),
+    )
+    expected = 210.0e6
+    recovered = float(np.max(np.abs(stress)))
+    relative_error = abs(recovered - expected) / expected
+    if relative_error > 1.0e-10:
+        raise AssertionError(
+            f"BAR2 constant axial-stress error is {relative_error:.3e}"
+        )
+    return {
+        "shape": list(stress.shape),
+        "max_abs_stress": recovered,
+        "relative_error": relative_error,
+    }
+
+
+def _probe_hex8_writer(
+    writer: Callable[[Any, Path], Any],
+    reader: Callable[[Path], Any],
+    suffix: str,
+    markers: tuple[str, ...],
+) -> dict[str, Any]:
+    from femtools.fea.assemble import assemble_km
+
+    model = _solid_cube_model(f"{suffix[1:]}-writer-boundary-probe")
+    reference = assemble_km(model).K.toarray()
+    with TemporaryDirectory(prefix=f"femtools-{suffix[1:]}-writer-probe-") as tmp:
+        path = Path(tmp) / f"cube{suffix}"
+        writer(model, path)
+        text = path.read_text(encoding="utf-8")
+        loaded_result = reader(path)
+        loaded = getattr(loaded_result, "model", loaded_result)
+        size = path.stat().st_size
+
+    upper = text.upper()
+    missing = [marker for marker in markers if marker not in upper]
+    if missing:
+        raise AssertionError(f"{suffix} deck is missing records {missing}")
+    if sorted(loaded.nodes) != list(range(1, 9)) or sorted(loaded.elements) != [1]:
+        raise AssertionError(f"{suffix} HEX8 round-trip changed model entities")
+    element = loaded.elements[1]
+    if str(element.type).upper() != "HEX8" or tuple(element.nodes) != tuple(range(1, 9)):
+        raise AssertionError(f"{suffix} HEX8 round-trip changed connectivity")
+
+    roundtrip = assemble_km(loaded).K.toarray()
+    scale = max(float(np.max(np.abs(reference))), 1.0)
+    stiffness_error = float(np.max(np.abs(roundtrip - reference)) / scale)
+    if roundtrip.shape != reference.shape or stiffness_error > 1.0e-10:
+        raise AssertionError(
+            f"{suffix} round-trip stiffness error is {stiffness_error:.3e}"
+        )
+    return {
+        "bytes": size,
+        "nodes": len(loaded.nodes),
+        "elements": len(loaded.elements),
+        "relative_stiffness_error": stiffness_error,
+    }
+
+
+def probe_write_cdb() -> dict[str, Any]:
+    from femtools.io.cdb import read_cdb, write_cdb
+
+    return _probe_hex8_writer(write_cdb, read_cdb, ".cdb", ("NBLOCK", "EBLOCK"))
+
+
+def probe_write_k() -> dict[str, Any]:
+    from femtools.io.kfile import read_k, write_k
+
+    return _probe_hex8_writer(
+        write_k,
+        read_k,
+        ".k",
+        ("*NODE", "*ELEMENT_SOLID"),
+    )
+
+
+def probe_map_nearest_nodes() -> dict[str, Any]:
+    from femtools.correlation.dofmap import map_nearest_nodes
+
+    model = _solid_cube_model("nearest-node-boundary-probe")
+    xyz_fe = np.vstack([model.nodes[node_id].xyz for node_id in model.node_ids()])
+    translation = np.array([0.125, -0.25, 0.0625])
+    fe_ids, distances = map_nearest_nodes(xyz_fe + translation, model)
+    fe_ids = np.asarray(fe_ids, dtype=int).reshape(-1)
+    distances = np.asarray(distances, dtype=float).reshape(-1)
+    expected_ids = np.arange(1, 9)
+    expected_distance = float(np.linalg.norm(translation))
+    distance_error = float(np.max(np.abs(distances - expected_distance)))
+    if not np.array_equal(fe_ids, expected_ids):
+        raise AssertionError(f"translated cube mapped to node ids {fe_ids.tolist()}")
+    if distances.shape != (8,) or distance_error > 1.0e-12:
+        raise AssertionError(
+            f"translated-cube nearest-node distance error is {distance_error:.3e}"
+        )
+    return {
+        "node_ids": fe_ids.tolist(),
+        "distance": expected_distance,
+        "max_distance_error": distance_error,
+    }
+
+
+def _cantilever_plate_model() -> Any:
+    from femtools.core.model import FEModel
+
+    model = FEModel(name="topometry-boundary-probe")
+    nx, ny = 4, 2
+
+    def node_id(ix: int, iy: int) -> int:
+        return ix * (ny + 1) + iy + 1
+
+    for ix in range(nx + 1):
+        for iy in range(ny + 1):
+            model.add_node(node_id(ix, iy), (float(ix), float(iy), 0.0))
+    model.add_material(id=1, type="isotropic", E=70.0e9, nu=0.3, rho=2700.0)
+    element_id = 0
+    for ix in range(nx):
+        for iy in range(ny):
+            element_id += 1
+            model.add_property(
+                id=element_id,
+                type="shell",
+                material_id=1,
+                t=0.05,
+            )
+            model.add_element(
+                id=element_id,
+                type="QUAD4",
+                nodes=(
+                    node_id(ix, iy),
+                    node_id(ix + 1, iy),
+                    node_id(ix + 1, iy + 1),
+                    node_id(ix, iy + 1),
+                ),
+                property_id=element_id,
+            )
+    for iy in range(ny + 1):
+        model.add_spc(
+            node_id=node_id(0, iy),
+            mask=(True, True, True, True, True, True),
+        )
+    return model, node_id(nx, ny // 2)
+
+
+def probe_topometry_optimize() -> dict[str, Any]:
+    from femtools.optimization.topometry import topometry_optimize
+
+    model, tip_node = _cantilever_plate_model()
+    result = topometry_optimize(
+        model,
+        loads={(tip_node, 2): -1.0e3},
+        volume_fraction=0.7,
+        max_iter=6,
+    )
+    design = _result_field(
+        result,
+        (
+            "thickness",
+            "thicknesses",
+            "density",
+            "densities",
+            "design",
+            "element_values",
+            "x",
+            "rho",
+        ),
+        element_id=None,
+    ).reshape(-1)
+    if design.shape != (len(model.elements),) or np.any(design <= 0.0):
+        raise AssertionError(
+            f"topometry design has shape {design.shape} or non-positive values"
+        )
+
+    compliance_value = None
+    for name in ("compliance", "final_compliance", "value", "objective_value"):
+        if hasattr(result, name):
+            compliance_value = float(getattr(result, name))
+            break
+    if compliance_value is None or not np.isfinite(compliance_value) or compliance_value <= 0.0:
+        raise AssertionError("topometry returned no finite positive compliance")
+
+    initial = getattr(result, "initial_compliance", None)
+    if initial is not None and compliance_value > float(initial) * (1.0 + 1.0e-8):
+        raise AssertionError("topometry increased compliance from its uniform start")
+    return {
+        "elements": len(model.elements),
+        "compliance": compliance_value,
+        "design_min": float(np.min(design)),
+        "design_max": float(np.max(design)),
+    }
+
+
+def probe_nastran_punch_driver() -> dict[str, Any]:
+    from femtools.core.errors import SolverError
+    from femtools.drivers.base import SolverDriver
+    from femtools.drivers.nastran import NastranPunchDriver
+
+    executable = "__femtools_boundary_probe_missing_nastran__"
+    driver = NastranPunchDriver(executable=executable)
+    if not isinstance(driver, SolverDriver):
+        raise AssertionError("NastranPunchDriver does not satisfy SolverDriver")
+    if driver.is_available():
+        raise AssertionError(f"unexpected executable found for {executable!r}")
+
+    with TemporaryDirectory(prefix="femtools-nastran-driver-probe-") as tmp:
+        deck = Path(driver.write_input(_bar_model("nastran-driver-probe"), tmp))
+        text = deck.read_text(encoding="utf-8").upper()
+        if "SOL 103" not in text or "PUNCH" not in text:
+            raise AssertionError("Nastran modal deck lacks SOL 103 punch requests")
+        try:
+            driver.run(deck, timeout=1.0)
+        except SolverError:
+            pass
+        else:
+            raise AssertionError("missing Nastran executable did not raise SolverError")
+    return {
+        "name": driver.name,
+        "available": False,
+        "missing_executable_raises": "SolverError",
+    }
+
+
 PROBES: tuple[tuple[str, Callable[[], dict[str, Any]]], ...] = (
     ("core_model", probe_core_model),
     ("mac", probe_mac),
@@ -384,6 +674,12 @@ PROBES: tuple[tuple[str, Callable[[], dict[str, Any]]], ...] = (
     ("ssi_data", probe_ssi_data),
     ("parameter_covariance", probe_parameter_covariance),
     ("modal_strain_energy", probe_modal_strain_energy),
+    ("recover_stress", probe_recover_stress),
+    ("write_cdb", probe_write_cdb),
+    ("write_k", probe_write_k),
+    ("map_nearest_nodes", probe_map_nearest_nodes),
+    ("topometry_optimize", probe_topometry_optimize),
+    ("nastran_punch_driver", probe_nastran_punch_driver),
 )
 
 
