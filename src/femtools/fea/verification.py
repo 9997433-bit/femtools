@@ -84,6 +84,13 @@ a mass hung on the reference grid of a free-free spider leaves exactly six
 rigid body modes and arrives in full at the weighted centroid of the
 independents, and a force on that grid is shared out in proportion to the
 weights -- equally, for equal weights, whatever the geometry.
+
+``mpc_mixed_chain`` runs the two card types in one model, hanging a rigid arm
+off an interpolated reference grid and (with ``direction="rbe3_on_rbe2"``) the
+other way round.  :func:`femtools.fea.mpc.apply_mpc` composes them into one
+transform, so the case is what says the composition is still exact: six rigid
+body modes and not a seventh, no stiffness anywhere on the constraint, and the
+hung mass delivered in full to the point the two kinematics carry it to.
 """
 
 from __future__ import annotations
@@ -106,6 +113,7 @@ from .static import solve_static
 
 __all__ = [
     "DISTORTIONS",
+    "MPC_CHAIN_DIRECTIONS",
     "PATCH_GRADIENT",
     "PATCH_TYPES",
     "beam_cantilever",
@@ -117,6 +125,7 @@ __all__ = [
     "hex8_patch_test_error",
     "hex8_rigid_body_frequencies",
     "hex_cantilever",
+    "mpc_mixed_chain",
     "rbe2_offset_moment",
     "rbe2_rigid_pair",
     "rbe3_load_path",
@@ -1500,4 +1509,156 @@ def rbe3_load_path(
         "dependent": dependent,
         "analytic_dependent": float(np.sum(w * exact)),
         "average_gap": abs(dependent - float(w @ extension)) / abs(dependent),
+    }
+
+
+# ---------------------------------------------------------------------------
+# the two card types in one model
+# ---------------------------------------------------------------------------
+
+#: Which card hangs off which in :func:`mpc_mixed_chain`.
+MPC_CHAIN_DIRECTIONS: tuple[str, ...] = ("rbe2_on_rbe3", "rbe3_on_rbe2")
+
+#: Section and material of the free-free ``BEAM2`` triangle the chain hangs on.
+_CHAIN_MATERIAL = {"E": 7.0e10, "nu": 0.3, "rho": 2700.0}
+_CHAIN_SECTION = {
+    "type": "beam",
+    "material_id": 1,
+    "A": 8.0e-4,
+    "Iy": 3.0e-8,
+    "Iz": 6.0e-8,
+    "J": 9.0e-8,
+    "orientation": (0.0, 0.0, 1.0),
+}
+
+
+def mpc_mixed_chain(
+    direction: str = "rbe2_on_rbe3",
+    *,
+    weights: Any = None,
+    mass: float = 2.5,
+    radius: float = 0.6,
+    arm: Any = (0.15, -0.1, 0.4),
+) -> dict[str, float]:
+    """An ``RBE2`` and an ``RBE3`` chained together, free-free.
+
+    A closed ``BEAM2`` triangle is the structure -- a frame, so all six
+    components of all three nodes carry stiffness and inertia -- and two extra
+    nodes hang off it through one card of each type, composed by
+    :func:`femtools.fea.mpc.apply_mpc`:
+
+    ``direction="rbe2_on_rbe3"``
+        node 4 is the reference grid of an ``RBE3`` interpolating the three
+        vertices, and node 5 is welded to node 4 by an ``RBE2``.  The rigid arm
+        therefore hangs off a node that is itself only an average.
+    ``direction="rbe3_on_rbe2"``
+        the reverse: node 4 is welded to vertex 1 by an ``RBE2``, and node 5 is
+        the reference grid of an ``RBE3`` whose independents include that rigid
+        node.
+
+    The mass sits on node 5, at the far end of the chain, so it can only be
+    delivered by both kinematics working in series.  Where it is delivered *to*
+    is analytic and is the interesting part.  An ``RBE2`` carries a rigid body
+    motion exactly and moves the mass by its own lever, while an ``RBE3``
+    carries it to the *weighted centroid* of the independents (see
+    :func:`rbe3_spider`), so the point the two hand it to is
+
+    * ``sum_i w_i x_i + (x_5 - x_4)`` in the first direction, and
+    * ``sum_i w_i x_i`` over the independents of the ``RBE3`` -- one of which
+      is the rigid node -- in the second.
+
+    Reports the zero-frequency count, the first elastic frequency, the size of
+    the solved set, the largest entry of ``G^T K G`` minus the unconstrained
+    ``K`` (the constraint may not add stiffness), the idempotency residual
+    ``max|G G - G|`` (which is what says the chain was resolved rather than
+    left nested), and the relative error of the reduced rigid body mass against
+    the bare triangle plus a point mass at that delivered position.
+    """
+    if direction not in MPC_CHAIN_DIRECTIONS:
+        raise ValueError(
+            f"unknown chain direction {direction!r}; expected one of {MPC_CHAIN_DIRECTIONS}"
+        )
+    from .mpc import apply_mpc  # local: verification is imported on demand
+
+    coords = _triangle(radius)
+    lever = np.asarray(arm, dtype=float).reshape(3)
+    w = (
+        np.full(3, 1.0 / 3.0)
+        if weights is None
+        else np.asarray(weights, dtype=float) / float(np.sum(weights))
+    )
+    spelled = {} if weights is None else {"weights": tuple(weights)}
+    nodes: dict[int, Any] = {nid: {"xyz": xyz} for nid, xyz in coords.items()}
+
+    if direction == "rbe2_on_rbe3":
+        nodes[4] = {"xyz": (0.0, 0.0, 0.0)}
+        nodes[5] = {"xyz": tuple(float(v) for v in lever)}
+        rbe3 = [
+            {
+                "id": 1,
+                "dependent": 4,
+                "independents": (1, 2, 3),
+                "components": (1, 2, 3, 4, 5, 6),
+                **spelled,
+            }
+        ]
+        rbe2 = [{"id": 1, "independent": 4, "dependents": (5,)}]
+        centroid = sum(w[i] * np.asarray(coords[i + 1]) for i in range(3))
+        delivered = centroid + (np.asarray(nodes[5]["xyz"]) - np.asarray(nodes[4]["xyz"]))
+    else:
+        nodes[4] = {"xyz": tuple(float(v) for v in np.asarray(coords[1]) + lever)}
+        nodes[5] = {"xyz": (0.0, 0.0, 0.0)}
+        rbe2 = [{"id": 1, "independent": 1, "dependents": (4,)}]
+        rbe3 = [
+            {
+                "id": 1,
+                "dependent": 5,
+                "independents": (4, 2, 3),
+                "components": (1, 2, 3, 4, 5, 6),
+                **spelled,
+            }
+        ]
+        driving = (np.asarray(nodes[4]["xyz"]), np.asarray(coords[2]), np.asarray(coords[3]))
+        delivered = sum(w[i] * driving[i] for i in range(3))
+
+    beams = {
+        eid: {"type": "BEAM2", "property_id": 1, "nodes": conn}
+        for eid, conn in enumerate(((1, 2), (2, 3), (3, 1)), start=1)
+    }
+    common = {
+        "nodes": nodes,
+        "materials": {1: dict(_CHAIN_MATERIAL)},
+        "properties": {1: dict(_CHAIN_SECTION)},
+        "spcs": [],
+    }
+    bare = {**common, "elements": dict(beams)}
+    model = {
+        **common,
+        "elements": {**beams, 4: {"type": "MASS", "nodes": (5,), "m": mass}},
+        "rbe2": rbe2,
+        "rbe3": rbe3,
+    }
+
+    asm = assemble_km(model)
+    reference = assemble_km(bare, mpc=False)
+    frequencies = np.asarray(solve_modes(model, n_modes=10, assembly=asm).freq_hz)
+
+    transform = apply_mpc(model)
+    G = transform.G.toarray()
+    R = _rigid_body_vectors(asm.dof_map, {nid: node["xyz"] for nid, node in nodes.items()})
+    got = R.T @ (asm.M @ R)
+    expected = R.T @ (reference.M @ R) + _point_mass_rigid_body(mass, delivered)
+    gap = asm.K - reference.K
+
+    return {
+        "zero_modes": float(np.count_nonzero(frequencies < 1.0e-6)),
+        "first_elastic_hz": float(frequencies[6]),
+        "free_dof": float(asm.n_free),
+        "dependent_dof": float(transform.n_dependent),
+        "constraint_stiffness": float(abs(gap).max()) if gap.nnz else 0.0,
+        "idempotency": float(np.max(np.abs(G @ G - G))),
+        "rigid_mass_error": float(np.max(np.abs(got - expected)) / np.max(np.abs(expected))),
+        "delivered_x": float(delivered[0]),
+        "delivered_y": float(delivered[1]),
+        "delivered_z": float(delivered[2]),
     }

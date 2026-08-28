@@ -70,12 +70,27 @@ because the chain resolution of :meth:`ConstraintTransform.from_rows` leaves
 every row purely independent; the two card types are resolved together, so an
 ``RBE3`` may hang off a node driven by an ``RBE2`` and the other way round.
 
-The transform is consumed by :func:`femtools.fea.assemble.assemble_km`, which
-honours ``model.rbe2`` and ``model.rbe3`` together by default;
-:func:`apply_rbe2`, :func:`apply_rbe3` and :func:`apply_mpc` build one
-explicitly.  The records themselves live on
-:class:`femtools.core.model.FEModel` (``add_rbe2`` / ``add_rbe3``) and are read
-duck-typed, like everything else the kernel consumes.
+One composer
+------------
+
+:func:`apply_mpc` is the public entry point, and there is deliberately only
+one: it reads ``model.rbe2`` *and* ``model.rbe3``, puts both card types into
+the same set of dependent rows and resolves them together, so a chain that
+crosses from one type to the other is substituted away like any other and the
+resulting ``G`` is idempotent whichever card sits on top.  That single
+composition is what :func:`femtools.fea.assemble.assemble_km` applies, through
+:func:`resolve_mpc`.
+
+:func:`apply_rbe2` and :func:`apply_rbe3` are thin wrappers that call it with
+the other table set to ``()``.  They exist to name the two cards, not to
+implement them: with an empty second table the rows, their insertion order and
+therefore ``G`` itself are the ones :func:`apply_mpc` would have built anyway,
+entry for entry, so a model that uses one card type gets exactly the transform
+it got before the other existed.
+
+The records themselves live on :class:`femtools.core.model.FEModel`
+(``add_rbe2`` / ``add_rbe3``) and are read duck-typed, like everything else the
+kernel consumes.
 """
 
 from __future__ import annotations
@@ -503,6 +518,10 @@ def apply_rbe2(
 ) -> ConstraintTransform:
     """Build the :class:`ConstraintTransform` of a model's rigid bodies.
 
+    A thin wrapper over :func:`apply_mpc` with an empty ``rbe3`` table, which
+    is what makes the two agree entry for entry on a model that carries only
+    rigid bodies.  Use ``apply_mpc`` directly when both card types are in play.
+
     Parameters
     ----------
     model
@@ -650,6 +669,10 @@ def apply_rbe3(
     :func:`apply_rbe2`: the independents are not welded to each other, so the
     dependent node can be given mass or load without stiffening the patch it
     hangs on, and a free-free structure keeps exactly its six rigid body modes.
+
+    Like :func:`apply_rbe2` this is a thin wrapper over :func:`apply_mpc`, here
+    with an empty ``rbe2`` table; the composer is the one place the rows are
+    built.
 
     Unlike a rigid body the constraint reads no coordinates at all -- a
     weighted average is a statement about components, not about levers -- so it
@@ -819,6 +842,20 @@ def _add_rbe3_rows(
 # ---------------------------------------------------------------------------
 
 
+def _reject_transform(records: Any, what: str) -> None:
+    """``rbe2=`` / ``rbe3=`` take cards, not a matrix and not a built transform."""
+    if isinstance(records, ConstraintTransform):
+        raise TypeError(
+            f"{what}= takes RBE2 / RBE3 records, not a ConstraintTransform; a transform "
+            "that is already built is used directly, or handed to assemble_km(mpc=...)"
+        )
+    if sp.issparse(records) or isinstance(records, np.ndarray):
+        raise TypeError(
+            f"{what}= takes RBE2 / RBE3 records, not a bare matrix; the multipoint "
+            "constraint is written as cards and G is what comes out of it"
+        )
+
+
 def apply_mpc(
     model: Any,
     *,
@@ -830,15 +867,42 @@ def apply_mpc(
 ) -> ConstraintTransform:
     """One :class:`ConstraintTransform` for a model's rigid *and* interpolation MPCs.
 
-    This is what :func:`~femtools.fea.assemble.assemble_km` calls: the rigid
-    bodies of ``model.rbe2`` and the interpolation constraints of
-    ``model.rbe3`` are collected into a single set of dependent rows and
-    resolved together, so one may hang off the other in either direction and
-    the resulting ``G`` is still idempotent.  A DOF eliminated by both is an
-    error, whichever card claimed it first.
+    This is the public composer, and what
+    :func:`~femtools.fea.assemble.assemble_km` calls: the rigid bodies of
+    ``model.rbe2`` and the interpolation constraints of ``model.rbe3`` are
+    collected into a single set of dependent rows and resolved together, so one
+    may hang off the other in either direction and the resulting ``G`` is still
+    idempotent.  A DOF eliminated by both is an error, whichever card claimed it
+    first.
 
-    Pass ``()`` for either table to leave it out; ``None`` reads the model's.
+    Parameters
+    ----------
+    model
+        Anything satisfying :class:`~femtools.fea.protocols.ModelLike`.
+    rbe2, rbe3
+        The tables to apply.  ``None`` (the default) reads the model's own;
+        ``()`` leaves that card type out entirely, which is all
+        :func:`apply_rbe2` and :func:`apply_rbe3` do.  A list, a mapping or a
+        single record is accepted, and a mixed container may be passed as both
+        because each card type is recognised by its own field names
+        (:func:`is_rbe3`).
+    dof_map
+        DOF numbering to write the transform against.  Built from the model's
+        nodes -- exactly as :func:`~femtools.fea.assemble.assemble_km` builds
+        it -- when omitted.
+    dofs_per_node
+        Six for the standard 3D structural model; ignored when *dof_map* is
+        given, which carries its own.
+
+    Returns
+    -------
+    ConstraintTransform
+        Empty (:attr:`~ConstraintTransform.is_identity`) when neither table has
+        a record, in which case nothing is materialised and the congruence is a
+        no-op.
     """
+    _reject_transform(rbe2, "rbe2")
+    _reject_transform(rbe3, "rbe3")
     index = ModelIndex.build(model) if index is None else index
     if dof_map is None:
         dof_map = DofMap.from_nodes(index.nodes, dofs_per_node)
