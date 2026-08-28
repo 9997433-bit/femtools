@@ -2,8 +2,9 @@
 
 Typer application exposed as the ``femtools`` console script
 (``femtools.cli:app``).  Subcommands: ``solve-modes``, ``read-mesh``,
-``mac``, ``report-mac``, ``frf``, ``reduce``, ``estimate-frf``,
-``update``, ``pretest``, ``script``, ``gui``.
+``write-mesh``, ``recover-stress``, ``mac``, ``report-mac``, ``frf``,
+``reduce``, ``estimate-frf``, ``update``, ``pretest``, ``script``,
+``gui``.
 
 Sibling packages (``femtools.core``, ``femtools.fea``, ...) are imported
 lazily inside each command; if one is missing the command prints a clear
@@ -221,6 +222,296 @@ def read_mesh_cmd(
 
         plot_mesh(model, outfile=str(plot))
         console.print(f"saved mesh plot to [bold]{plot}[/bold]")
+
+
+# ----------------------------------------------------------------------
+# write-mesh
+# ----------------------------------------------------------------------
+_WRITE_SUFFIX_HELP = ".cdb (ANSYS), .k/.key (LS-DYNA), .inp (Abaqus), " \
+                     ".bdf/.nas/.dat (Nastran), .unv/.uff, .ftproj"
+
+
+def _mesh_writer(suffix: str) -> Any:
+    """Import the mesh writer for an output suffix (lazy, may raise ImportError)."""
+    if suffix == ".cdb":
+        from femtools.io.cdb import write_cdb
+        return write_cdb
+    if suffix in (".k", ".key"):
+        from femtools.io.kfile import write_k
+        return write_k
+    if suffix == ".inp":
+        from femtools.io.inp import write_inp
+        return write_inp
+    if suffix in (".bdf", ".nas", ".dat"):
+        from femtools.io.bdf import write_bdf
+        return write_bdf
+    if suffix in (".unv", ".uff"):
+        from femtools.io.unv import write_unv
+        return write_unv
+    err_console.print(
+        f"[red]error:[/red] unsupported output suffix {suffix!r} "
+        f"(expected one of: {_WRITE_SUFFIX_HELP})")
+    raise typer.Exit(code=2)
+
+
+@app.command("write-mesh")
+def write_mesh_cmd(
+    model_file: Annotated[Path, typer.Argument(
+        exists=True, readable=True,
+        help="Input model file (any suffix read-mesh accepts).")],
+    output: Annotated[Path, typer.Argument(
+        help=f"Output deck; the format is chosen by its suffix: {_WRITE_SUFFIX_HELP}.")],
+) -> None:
+    """Export a model as a solver deck chosen by the output file suffix.
+
+    The writer kernels are imported lazily: an installation shipping
+    without one exits with code 3 and a clear message, exactly like
+    ``read-mesh`` for ``.inp``/``.k`` inputs.
+    """
+    model = _load_model(model_file)
+    suffix = output.suffix.lower()
+
+    if suffix == ".ftproj":
+        try:
+            from femtools.io.project import save_project
+        except ImportError as exc:
+            raise _missing("saving projects", exc) from exc
+        save_project(model, str(output))
+    else:
+        try:
+            writer = _mesh_writer(suffix)
+        except ImportError as exc:
+            raise _missing(f"writing {suffix!r} files", exc) from exc
+        try:
+            # the io writers accept (path, model) or (model, path); try the
+            # canonical order first and fall back for kernels that only take
+            # the other one (a str duck-typed as a model surfaces either as
+            # TypeError or as AttributeError)
+            try:
+                writer(str(output), model)
+            except (TypeError, AttributeError):
+                writer(model, str(output))
+        except (ValueError, OSError) as exc:
+            err_console.print(f"[red]error:[/red] cannot write {output}: {exc}")
+            raise typer.Exit(code=2) from exc
+
+    console.print(
+        f"wrote [bold]{getattr(model, 'name', '?')}[/bold] "
+        f"({len(getattr(model, 'nodes', {}))} nodes, "
+        f"{len(getattr(model, 'elements', {}))} elements) "
+        f"to [bold]{output}[/bold]")
+
+
+# ----------------------------------------------------------------------
+# recover-stress
+# ----------------------------------------------------------------------
+def _model_load_mapping(model: Any) -> dict[tuple[int, int], float] | None:
+    """Flatten ``model.loads`` records into ``{(node_id, dof): value}``.
+
+    The static solver reads that mapping directly, whereas the shape of a
+    stored core ``Load`` record (``force``/``moment`` vectors) is not among
+    the record layouts its load builder probes for.  Returns ``None`` when
+    the model carries no loads (or record types the kernel should
+    interpret itself).
+    """
+    records = getattr(model, "loads", None)
+    if not records:
+        return None
+    mapping: dict[tuple[int, int], float] = {}
+    try:
+        for record in records:
+            for dof, value in record.as_dof_values():
+                key = (record.node_id, dof)
+                mapping[key] = mapping.get(key, 0.0) + value
+    except (AttributeError, TypeError):
+        return None
+    return mapping or None
+
+
+def _parse_point_load(spec: str) -> tuple[int, int, float]:
+    """Parse a ``--load`` spec 'NODE:DOF=VALUE' (DOF 1-6: fx fy fz mx my mz)."""
+    head, sep, value_str = spec.partition("=")
+    try:
+        node_str, dof_str = head.split(":")
+        node, dof, value = int(node_str), int(dof_str), float(value_str)
+    except ValueError:
+        node = dof = 0
+        value = 0.0
+        sep = ""
+    if not sep or not 1 <= dof <= 6:
+        err_console.print(
+            f"[red]error:[/red] bad --load spec {spec!r} "
+            "(expected NODE:DOF=VALUE with DOF 1-6, e.g. 2:3=-1000)")
+        raise typer.Exit(code=2)
+    return node, dof, value
+
+
+def _stack_components(values: Any) -> Any:
+    """Stack per-element component vectors, NaN-padding ragged lengths.
+
+    Mixed element types can recover different component counts (a bar
+    has one axial stress, a solid six); padding keeps one rectangular
+    array for the table and the .npz payload.
+    """
+    import numpy as np
+
+    rows = [np.atleast_1d(np.asarray(v, dtype=float)).reshape(-1) for v in values]
+    width = max((r.size for r in rows), default=0)
+    out = np.full((len(rows), width), np.nan)
+    for i, r in enumerate(rows):
+        out[i, : r.size] = r
+    return out
+
+
+def _stress_parts(result: Any) -> tuple[list[Any] | None, Any, Any]:
+    """Duck-typed unpack of a stress result into ``(ids, components, von_mises)``.
+
+    Accepts a ``StressResult``-like object (element ids plus a component
+    array and optionally a von Mises vector) or a plain mapping
+    ``{element_id: components}``.  Missing pieces come back as ``None``.
+    """
+    import numpy as np
+
+    if isinstance(result, dict):
+        return list(result.keys()), _stack_components(result.values()), None
+
+    ids = None
+    for attr in ("element_ids", "eids", "elements", "ids"):
+        ids = getattr(result, attr, None)
+        if ids is not None:
+            break
+    comps = None
+    for attr in ("stress", "sigma", "values", "data"):
+        comps = getattr(result, attr, None)
+        if comps is not None:
+            break
+    vm = None
+    for attr in ("von_mises", "vm", "mises"):
+        vm = getattr(result, attr, None)
+        if vm is not None:
+            break
+
+    if isinstance(comps, dict):
+        ids = list(comps.keys())
+        comps = _stack_components(comps.values())
+    elif comps is not None:
+        try:
+            arr = np.asarray(comps, dtype=float)
+        except ValueError:  # ragged per-element vectors
+            arr = None
+        comps = arr if arr is not None and arr.ndim == 2 else _stack_components(comps)
+    if ids is None and comps is not None:
+        ids = list(range(1, comps.shape[0] + 1))
+    return (list(np.atleast_1d(np.asarray(ids)).tolist()) if ids is not None else None,
+            comps, None if vm is None else np.asarray(vm, dtype=float).reshape(-1))
+
+
+@app.command("recover-stress")
+def recover_stress_cmd(
+    model_file: Annotated[Path, typer.Argument(
+        exists=True, readable=True, help="Model file.")],
+    load: Annotated[list[str] | None, typer.Option(
+        "--load", "-l",
+        help="Add a nodal load 'NODE:DOF=VALUE' (DOF 1-6: fx fy fz mx my mz); "
+             "repeatable.  Loads stored in the model file are kept.")] = None,
+    output: Annotated[Path | None, typer.Option(
+        "--output", "-o",
+        help="Save element_ids, stress (and von_mises) to .npz.")] = None,
+    max_rows: Annotated[int, typer.Option(
+        "--max-rows", min=1, help="Table rows to print.")] = 20,
+) -> None:
+    """Solve a linear static case and recover element centroid stresses.
+
+    Requires the stress-recovery kernel (``femtools.fea.recover``); an
+    installation shipping without it exits with code 3, like every
+    other lazily bound subcommand.
+    """
+    import numpy as np
+
+    try:
+        from femtools.fea.recover import recover_stress
+    except ImportError as exc:
+        raise _missing("stress recovery", exc) from exc
+    try:
+        from femtools.fea.static import solve_static
+    except ImportError as exc:
+        raise _missing("the static solver", exc) from exc
+
+    model = _load_model(model_file)
+    for spec in load or []:
+        node, dof, value = _parse_point_load(spec)
+        vec = [0.0, 0.0, 0.0]
+        vec[(dof - 1) % 3] = value
+        try:
+            model.add_load(node_id=node,
+                           force=vec if dof <= 3 else None,
+                           moment=vec if dof > 3 else None)
+        except ValueError as exc:
+            err_console.print(f"[red]error:[/red] bad --load {spec!r}: {exc}")
+            raise typer.Exit(code=2) from exc
+    if not getattr(model, "loads", None):
+        err_console.print(
+            "[yellow]warning:[/yellow] the model carries no loads and none were "
+            "given with --load; the recovered field reflects enforced "
+            "displacements only (zero for a plain constrained model)")
+
+    try:
+        static = solve_static(model, _model_load_mapping(model), full_result=True)
+    except (ValueError, ArithmeticError, RuntimeError) as exc:
+        # ValueError covers bad load specs, RuntimeError the singular
+        # factorization of an under-constrained model
+        err_console.print(f"[red]error:[/red] static solve failed: {exc}")
+        raise typer.Exit(code=2) from exc
+
+    import inspect
+
+    kwargs: dict[str, Any] = {}
+    try:
+        if "assembly" in inspect.signature(recover_stress).parameters:
+            kwargs["assembly"] = static.assembly
+    except (TypeError, ValueError):
+        pass
+    try:
+        result = recover_stress(model, static.u, **kwargs)
+    except ValueError as exc:
+        err_console.print(f"[red]error:[/red] stress recovery failed: {exc}")
+        raise typer.Exit(code=2) from exc
+
+    ids, comps, vm = _stress_parts(result)
+    if ids is None or comps is None:
+        err_console.print("[red]error:[/red] the stress-recovery kernel returned "
+                          f"no element stresses ({type(result).__name__})")
+        raise typer.Exit(code=2)
+
+    n_comp = int(comps.shape[1]) if comps.ndim == 2 else 1
+    table = Table(title=f"element centroid stress ({model_file.name})")
+    table.add_column("element", justify="right")
+    comp_labels = (["sxx", "syy", "szz", "sxy", "syz", "szx"] if n_comp == 6
+                   else [f"s{k + 1}" for k in range(n_comp)])
+    for label in comp_labels:
+        table.add_column(label, justify="right")
+    if vm is not None:
+        table.add_column("von Mises", justify="right")
+    for row_i, eid in enumerate(ids[:max_rows]):
+        row = [str(eid)] + ["-" if np.isnan(c) else f"{float(c):.5g}"
+                            for c in np.atleast_1d(comps[row_i])]
+        if vm is not None and row_i < vm.size:
+            row.append(f"{float(vm[row_i]):.5g}")
+        table.add_row(*row)
+    console.print(table)
+    if len(ids) > max_rows:
+        console.print(f"... {len(ids) - max_rows} more elements "
+                      "(raise --max-rows or save with --output)")
+
+    if output is not None:
+        payload: dict[str, Any] = {
+            "element_ids": np.asarray(ids),
+            "stress": np.asarray(comps, dtype=float),
+        }
+        if vm is not None:
+            payload["von_mises"] = vm
+        np.savez(str(output), **payload)
+        console.print(f"saved stress result to [bold]{output}[/bold]")
 
 
 # ----------------------------------------------------------------------

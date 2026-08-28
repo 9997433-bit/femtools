@@ -55,8 +55,8 @@ femtools script -c "NEW PROJECT; ADD NODE 1 0 0 0; PRINT SUMMARY"
 
 ```ebnf
 script     = { statement , ( ";" | newline ) } ;
-statement  = new | add_node | add_mat | add_prop | add_elem
-           | spc | solve | mac | save | print ;
+statement  = new | add_node | add_mat | add_prop | add_elem | add_load
+           | spc | set | solve | mac | save | print ;
 
 new        = "NEW" , "PROJECT" , [ name ] ;
 add_node   = "ADD" , "NODE" , id , number , number , number ;
@@ -65,14 +65,19 @@ add_prop   = "ADD" , ("PROP" | "PROPERTY") , id , "TYPE=" ptype ,
              [ "MAT=" id ] , { option } ;
 add_elem   = "ADD" , ("ELEM" | "ELEMENT") , id , "TYPE=" etype ,
              "NODES=" idlist , [ "PROP=" id ] , { option } ;
+add_load   = "ADD" , "LOAD" , id , component , { component } ;
 spc        = "SPC" , id , ( mask | "ALL" | "FREE" | "DOF=" idlist ) ;
-solve      = "SOLVE" , "MODES" , [ "N=" int ] , [ "SHIFT=" number ] ,
-             [ "NAME=" name ] ;
+set        = "SET" , assignment , { assignment } ;
+solve      = "SOLVE" , ( "MODES" , [ "N=" int ] , [ "SHIFT=" number ] ,
+                         [ "NAME=" name ]
+                       | "STATIC" , [ "NAME=" name ] ) ;
 mac        = "MAC" , [ "A=" name ] , [ "B=" name ] , [ "NAME=" name ] ;
 save       = "SAVE" , path ;
 print      = "PRINT" , [ "SUMMARY" | "RESULTS" ] ;
 
 option     = key , "=" , value ;
+component  = ("FX"|"FY"|"FZ"|"MX"|"MY"|"MZ") , "=" , number ;
+assignment = name , "=" , value ;
 idlist     = id , { "," , id } ;
 mask       = six characters from {"0","1"} , e.g. "111000" ;
 ```
@@ -111,6 +116,12 @@ are `BAR2`, `BEAM2`, `TRUSS2D`, `QUAD4`, `TRIA3`, `HEX8`, `TET4`, `MASS`,
 `SPRING`, `DAMPER`. `NODES` is a comma list of node ids and `PROP` maps
 to `property_id`.
 
+### `ADD LOAD <node_id> [FX=..] [FY=..] [FZ=..] [MX=..] [MY=..] [MZ=..]`
+
+Applies a nodal force (`FX FY FZ`) and/or moment (`MX MY MZ`) in global
+components — the load case that `SOLVE STATIC` solves. At least one
+component is required; components you omit are zero.
+
 ### `SPC <node_id> <constraint>`
 
 Applies a single-point constraint on the six nodal DOFs
@@ -123,12 +134,35 @@ Applies a single-point constraint on the six nodal DOFs
 | `FREE`         | `SPC 1 FREE`     | constrain nothing (placeholder)  |
 | DOF list       | `SPC 1 DOF=1,2,6`| constrain 1-based DOF numbers    |
 
+### `SET <name>=<value> [<name>=<value> ...]`
+
+Assigns script variables. A later statement can reference a variable as
+`$name` anywhere a token (or part of one) is expected; `$$` writes a
+literal dollar sign. Names are case-insensitive identifiers; values are
+kept as the raw text after `=` and re-parsed where they are substituted,
+so lists work too (`SET CORNERS=1,2,3,4` … `NODES=$CORNERS`). Variables
+survive `NEW PROJECT` and live in `engine.variables`.
+
+```text
+SET E=210e9 A=1e-4 TIP=-1000
+ADD MAT 1 E=$E NU=0.3 RHO=7850
+ADD LOAD 2 FX=$TIP
+```
+
 ### `SOLVE MODES [N=<n>] [SHIFT=<hz2>] [NAME=<name>]`
 
 Runs the real eigen solver (`femtools.fea.eigen.solve_modes`) on the
 active model. `N` defaults to 10, `SHIFT` to 0.0. The `ModalResult` is
 stored in `engine.results[NAME]` (default name `"modes"`) and becomes the
 default operand for `MAC`.
+
+### `SOLVE STATIC [NAME=<name>]`
+
+Runs the linear static solver (`femtools.fea.static.solve_static`) with
+the loads accumulated by `ADD LOAD` (plus any loads stored in the model
+database). The `StaticResult` is stored in `engine.results[NAME]`
+(default `"static"`); read displacements from it with
+`result.node_displacement(node_id)` or `result.u`.
 
 ### `MAC [A=<result>] [B=<result>] [NAME=<name>]`
 
@@ -151,10 +185,12 @@ active model; `RESULTS` lists stored result names and types.
 
 All parse and execution failures raise `femtools.script.ScriptError`,
 which reports the offending statement and its 1-based index within the
-script. Commands that need sibling modules (`SOLVE MODES` -> `femtools.fea`,
-`MAC` -> `femtools.correlation`, `SAVE` -> `femtools.io`,
-`NEW PROJECT` -> `femtools.core`) raise a clear `ScriptError` if the
-module is not installed, rather than failing at import time.
+script. Commands that need sibling modules (`SOLVE MODES` /
+`SOLVE STATIC` -> `femtools.fea`, `MAC` -> `femtools.correlation`,
+`SAVE` -> `femtools.io`, `NEW PROJECT` -> `femtools.core`) raise a clear
+`ScriptError` if the module is not installed, rather than failing at
+import time. Referencing an unassigned `$variable` is a `ScriptError`
+too.
 
 ## Embedding
 

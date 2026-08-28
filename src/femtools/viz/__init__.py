@@ -11,6 +11,12 @@ accepts ``backend="plotly"`` (see :func:`set_default_backend` /
 :func:`plotly_available`); plotly is never imported unless a plotly
 plot is requested, so importing :mod:`femtools.viz` never needs it.
 
+:func:`plot_mesh3d` renders a shaded 3-D view of a model through the
+optional ``pyvista`` package when it is importable (see
+:func:`pyvista_available`) and falls back to the matplotlib 3-D
+wireframe otherwise; like plotly, pyvista is never imported by
+``import femtools.viz`` itself.
+
 :mod:`femtools.viz.report` additionally builds self-contained HTML or
 plain-text MAC correlation reports (matplotlib is optional there: the
 embedded heatmap is skipped when it is unavailable).
@@ -23,18 +29,22 @@ from femtools.viz.plots import (
     plot_frf,
     plot_mac,
     plot_mesh,
+    plot_mesh3d,
     plot_mode,
     plotly_available,
+    pyvista_available,
     set_default_backend,
 )
 from femtools.viz.report import mac_report_html, mac_report_text, save_mac_report
 
 __all__ = [
     "plot_mesh",
+    "plot_mesh3d",
     "plot_mac",
     "plot_frf",
     "plot_mode",
     "plotly_available",
+    "pyvista_available",
     "get_default_backend",
     "set_default_backend",
     "mac_report_html",

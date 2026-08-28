@@ -8,17 +8,26 @@ grammar.
 
 The engine binds lazily to the rest of femtools: ``femtools.core`` is
 only imported when ``NEW PROJECT`` runs, ``femtools.fea`` when
-``SOLVE MODES`` runs, and so on.  Missing siblings produce a clear
-:class:`ScriptError` instead of an import-time crash.
+``SOLVE MODES`` / ``SOLVE STATIC`` runs, and so on.  Missing siblings
+produce a clear :class:`ScriptError` instead of an import-time crash.
+
+``SET name=value`` assigns a script variable; later statements can
+reference it as ``$name`` anywhere a token is expected (``$$`` writes a
+literal dollar sign).
 """
 
 from __future__ import annotations
 
+import re
 import shlex
 from collections.abc import Callable
 from typing import Any
 
 __all__ = ["ScriptEngine", "ScriptError"]
+
+# `$name` variable references (set with SET); `$$` is a literal dollar sign
+_VAR_PATTERN = re.compile(r"\$(\$|[A-Za-z_]\w*)")
+_SET_NAME_PATTERN = re.compile(r"^[A-Za-z_]\w*$")
 
 
 class ScriptError(Exception):
@@ -103,6 +112,29 @@ def _split_args_options(tokens: list[str]) -> tuple[list[Any], dict[str, Any]]:
     return args, opts
 
 
+def _load_mapping(model: Any) -> dict[tuple[int, int], float] | None:
+    """Flatten ``model.loads`` records into ``{(node_id, dof): value}``.
+
+    ``solve_static`` reads that mapping directly, whereas the shape of a
+    stored :class:`~femtools.core.model.Load` record (``force``/``moment``
+    vectors) is not among the record layouts its load builder probes for.
+    Returns ``None`` when the model carries no loads (or non-``Load``
+    records the kernel should interpret itself).
+    """
+    records = getattr(model, "loads", None)
+    if not records:
+        return None
+    mapping: dict[tuple[int, int], float] = {}
+    try:
+        for record in records:
+            for dof, value in record.as_dof_values():
+                key = (record.node_id, dof)
+                mapping[key] = mapping.get(key, 0.0) + value
+    except (AttributeError, TypeError):
+        return None
+    return mapping or None
+
+
 def _parse_spc_mask(spec: Any) -> tuple[bool, ...]:
     """Parse an SPC constraint spec into a 6-tuple of booleans.
 
@@ -145,7 +177,12 @@ class ScriptEngine:
         The active :class:`femtools.core.model.FEModel`, or ``None``
         before ``NEW PROJECT`` has run.
     results:
-        Named analysis results (``SOLVE MODES``/``MAC`` outputs).
+        Named analysis results (``SOLVE MODES``/``SOLVE STATIC``/``MAC``
+        outputs).
+    variables:
+        Script variables assigned with ``SET name=value`` (values are
+        kept as the raw text after ``=`` and substituted wherever a
+        later statement writes ``$name``).
     log:
         Human-readable trace of executed statements.
     """
@@ -153,6 +190,7 @@ class ScriptEngine:
     def __init__(self, model_factory: Callable[..., Any] | None = None, echo: bool = False):
         self.model: Any = None
         self.results: dict[str, Any] = {}
+        self.variables: dict[str, str] = {}
         self.log: list[str] = []
         self.echo = echo
         self._model_factory = model_factory
@@ -185,6 +223,7 @@ class ScriptEngine:
             raise ScriptError(f"tokenization failed: {exc}", statement=statement) from exc
         if not tokens:
             return
+        tokens = [self._expand_variables(tok, statement) for tok in tokens]
         keyword = tokens[0].upper()
         handler = self._DISPATCH.get(keyword)
         if handler is None:
@@ -202,6 +241,25 @@ class ScriptEngine:
         self.log.append(message)
         if self.echo:
             print(f"fsl> {message}")
+
+    def _expand_variables(self, token: str, statement: str) -> str:
+        """Replace ``$name`` references with SET values (``$$`` -> ``$``)."""
+        if "$" not in token:
+            return token
+
+        def replace(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name == "$":
+                return "$"
+            value = self.variables.get(name.upper())
+            if value is None:
+                raise ScriptError(
+                    f"undefined variable ${name} (assign it first: SET {name.upper()}=value)",
+                    statement=statement,
+                )
+            return value
+
+        return _VAR_PATTERN.sub(replace, token)
 
     def _require_model(self, statement: str) -> Any:
         if self.model is None:
@@ -236,7 +294,7 @@ class ScriptEngine:
 
     def _cmd_add(self, rest: list[str], statement: str) -> None:
         if not rest:
-            raise ScriptError("expected ADD NODE|MAT|PROP|ELEM ...", statement=statement)
+            raise ScriptError("expected ADD NODE|MAT|PROP|ELEM|LOAD ...", statement=statement)
         kind = rest[0].upper()
         sub = {
             "NODE": self._add_node,
@@ -246,6 +304,7 @@ class ScriptEngine:
             "PROPERTY": self._add_prop,
             "ELEM": self._add_elem,
             "ELEMENT": self._add_elem,
+            "LOAD": self._add_load,
         }.get(kind)
         if sub is None:
             raise ScriptError(f"unknown ADD target {kind!r}", statement=statement)
@@ -328,6 +387,43 @@ class ScriptEngine:
         kwargs.update({k.lower(): v for k, v in opts.items()})
         model.add_element(id=args[0], type=str(etype).upper(), nodes=nodes, **kwargs)
 
+    _LOAD_COMPONENTS = {"FX": 0, "FY": 1, "FZ": 2, "MX": 0, "MY": 1, "MZ": 2}
+
+    def _add_load(self, args: list[Any], opts: dict[str, Any], statement: str) -> None:
+        model = self._require_model(statement)
+        if len(args) != 1 or not isinstance(args[0], int):
+            raise ScriptError(
+                "expected ADD LOAD <node_id> [FX=..] [FY=..] [FZ=..] [MX=..] [MY=..] [MZ=..]",
+                statement=statement,
+            )
+        force = [0.0, 0.0, 0.0]
+        moment = [0.0, 0.0, 0.0]
+        has_force = has_moment = False
+        for key, value in opts.items():
+            index = self._LOAD_COMPONENTS.get(key)
+            if index is None:
+                raise ScriptError(
+                    f"unknown load component {key!r} (use FX FY FZ MX MY MZ)",
+                    statement=statement,
+                )
+            try:
+                magnitude = float(value)
+            except (TypeError, ValueError) as exc:
+                raise ScriptError(f"bad load value {key}={value!r}",
+                                  statement=statement) from exc
+            if key.startswith("F"):
+                force[index] = magnitude
+                has_force = True
+            else:
+                moment[index] = magnitude
+                has_moment = True
+        if not (has_force or has_moment):
+            raise ScriptError("ADD LOAD needs at least one component (FX..MZ)",
+                              statement=statement)
+        model.add_load(node_id=args[0],
+                       force=force if has_force else None,
+                       moment=moment if has_moment else None)
+
     def _cmd_spc(self, rest: list[str], statement: str) -> None:
         model = self._require_model(statement)
         args, opts = _split_args_options(rest)
@@ -351,9 +447,19 @@ class ScriptEngine:
     def _cmd_solve(self, rest: list[str], statement: str) -> None:
         model = self._require_model(statement)
         args, opts = _split_args_options(rest)
-        if not args or str(args[0]).upper() != "MODES":
-            raise ScriptError("expected SOLVE MODES [N=..] [SHIFT=..] [NAME=..]",
-                              statement=statement)
+        kind = str(args[0]).upper() if args else ""
+        if kind == "MODES":
+            self._solve_modes(model, args, opts, statement)
+        elif kind == "STATIC":
+            self._solve_static(model, args, opts, statement)
+        else:
+            raise ScriptError(
+                "expected SOLVE MODES [N=..] [SHIFT=..] [NAME=..] or SOLVE STATIC [NAME=..]",
+                statement=statement,
+            )
+
+    def _solve_modes(self, model: Any, args: list[Any], opts: dict[str, Any],
+                     statement: str) -> None:
         n_modes = opts.pop("N", opts.pop("MODES", 10))
         shift = opts.pop("SHIFT", 0.0)
         name = str(opts.pop("NAME", "modes"))
@@ -368,6 +474,26 @@ class ScriptEngine:
         result = solve_modes(model, n_modes=int(n_modes), shift=float(shift))
         self.results[name] = result
         self._last_modes_name = name
+
+    def _solve_static(self, model: Any, args: list[Any], opts: dict[str, Any],
+                      statement: str) -> None:
+        if len(args) > 1:
+            raise ScriptError("expected SOLVE STATIC [NAME=..]", statement=statement)
+        name = str(opts.pop("NAME", "static"))
+        if opts:
+            raise ScriptError(f"unexpected options {sorted(opts)}", statement=statement)
+        try:
+            from femtools.fea.static import solve_static
+        except ImportError as exc:
+            raise ScriptError(
+                "femtools.fea is not available; SOLVE STATIC needs the FEA solver"
+            ) from exc
+        try:
+            result = solve_static(model, _load_mapping(model), full_result=True)
+        except (ValueError, ArithmeticError, RuntimeError) as exc:
+            # e.g. a singular stiffness from an under-constrained model
+            raise ScriptError(f"SOLVE STATIC failed: {exc}", statement=statement) from exc
+        self.results[name] = result
 
     def _cmd_mac(self, rest: list[str], statement: str) -> None:
         args, opts = _split_args_options(rest)
@@ -396,6 +522,20 @@ class ScriptEngine:
         phi_a = getattr(self.results[a_name], "modes", self.results[a_name])
         phi_b = getattr(self.results[b_name], "modes", self.results[b_name])
         self.results[name] = mac_matrix(phi_a, phi_b)
+
+    def _cmd_set(self, rest: list[str], statement: str) -> None:
+        if not rest:
+            raise ScriptError("expected SET NAME=value [NAME=value ...]",
+                              statement=statement)
+        for token in rest:
+            name, sep, value = token.partition("=")
+            if not sep or not _SET_NAME_PATTERN.match(name):
+                raise ScriptError(
+                    f"expected NAME=value assignments, got {token!r} "
+                    "(names start with a letter or underscore)",
+                    statement=statement,
+                )
+            self.variables[name.upper()] = value
 
     def _cmd_save(self, rest: list[str], statement: str) -> None:
         model = self._require_model(statement)
@@ -438,6 +578,7 @@ class ScriptEngine:
         "NEW": _cmd_new,
         "ADD": _cmd_add,
         "SPC": _cmd_spc,
+        "SET": _cmd_set,
         "SOLVE": _cmd_solve,
         "MAC": _cmd_mac,
         "SAVE": _cmd_save,

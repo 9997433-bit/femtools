@@ -27,10 +27,12 @@ import numpy as np
 
 __all__ = [
     "plot_mesh",
+    "plot_mesh3d",
     "plot_mac",
     "plot_frf",
     "plot_mode",
     "plotly_available",
+    "pyvista_available",
     "get_default_backend",
     "set_default_backend",
 ]
@@ -43,6 +45,15 @@ def plotly_available() -> bool:
     """True when the optional plotly package can be imported."""
     try:
         import plotly  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def pyvista_available() -> bool:
+    """True when the optional pyvista package can be imported."""
+    try:
+        import pyvista  # noqa: F401
     except ImportError:
         return False
     return True
@@ -282,6 +293,154 @@ def plot_mesh(
         ax.set_zlabel("z")
     else:
         ax.set_aspect("equal", adjustable="datalim")
+    ax.set_title(title or f"{getattr(model, 'name', 'model')}: "
+                          f"{len(coords)} nodes, {len(model.elements)} elements")
+    return _finish(fig, outfile)
+
+
+# ----------------------------------------------------------------------
+# 3-D mesh rendering (optional pyvista; matplotlib fallback)
+# ----------------------------------------------------------------------
+# VTK cell-type ids per femtools element type (stable VTK constants,
+# hard-coded so this table never needs pyvista/vtk at import time)
+_VTK_CELL_TYPES: dict[str, int] = {
+    "MASS": 1,      # VTK_VERTEX
+    "BAR2": 3,      # VTK_LINE
+    "BEAM2": 3,
+    "TRUSS2D": 3,
+    "SPRING": 3,
+    "DAMPER": 3,
+    "TRIA3": 5,     # VTK_TRIANGLE
+    "QUAD4": 9,     # VTK_QUAD
+    "TET4": 10,     # VTK_TETRA
+    "HEX8": 12,     # VTK_HEXAHEDRON
+}
+
+
+def _pyvista():
+    """Import pyvista with a clear error message when it is missing."""
+    try:
+        import pyvista as pv
+    except ImportError as exc:
+        raise ImportError(
+            "this plot was requested with backend='pyvista' but the optional "
+            "'pyvista' package is not installed (pip install pyvista); "
+            "matplotlib is the default backend and needs no extra install"
+        ) from exc
+    return pv
+
+
+def _pyvista_grid(model: Any):
+    """Build a ``pyvista.UnstructuredGrid`` from an FE model (duck-typed)."""
+    pv = _pyvista()
+    coords = _node_coords(model)
+    index = {nid: i for i, nid in enumerate(coords)}
+    points = np.asarray(list(coords.values()), dtype=float).reshape(-1, 3)
+
+    cells: list[int] = []
+    celltypes: list[int] = []
+    for etype, nodes, _eid in _element_edges(model):
+        idx = [index[n] for n in nodes if n in index]
+        if not idx:
+            continue
+        # unknown types degrade to a point or polyline, mirroring the
+        # unknown-type chaining of the matplotlib wireframe
+        vtk_type = _VTK_CELL_TYPES.get(etype, 1 if len(idx) == 1 else 4)
+        cells.append(len(idx))
+        cells.extend(idx)
+        celltypes.append(vtk_type)
+
+    if not celltypes:
+        return pv.PolyData(points)
+    return pv.UnstructuredGrid(
+        np.asarray(cells, dtype=np.int64),
+        np.asarray(celltypes, dtype=np.uint8),
+        points,
+    )
+
+
+def plot_mesh3d(
+    model: Any,
+    *,
+    color: str = "tab:blue",
+    show_edges: bool = True,
+    opacity: float = 1.0,
+    title: str | None = None,
+    window_size: tuple[int, int] = (1024, 768),
+    show: bool = False,
+    outfile: str | None = None,
+    backend: str | None = None,
+):
+    """Render an interactive-quality 3-D view of an FE model.
+
+    Uses the optional ``pyvista`` package when it is importable: solid
+    elements become real VTK cells (shaded surfaces with edges) instead
+    of a bare wireframe.  pyvista is never required — when it is not
+    installed the plot silently falls back to the matplotlib 3-D
+    wireframe, and matplotlib remains the default backend of
+    :mod:`femtools.viz`; pyvista is not imported unless it is actually
+    used.
+
+    ``backend`` selects the renderer explicitly: ``None`` (default)
+    prefers pyvista and falls back to matplotlib, ``"pyvista"``
+    requires pyvista (raises ImportError when missing) and
+    ``"matplotlib"`` always draws the matplotlib 3-D wireframe.
+
+    With pyvista the return value is the ``pyvista.Plotter``
+    (``outfile=`` saves an off-screen screenshot, ``show=True`` opens
+    the interactive window); with matplotlib it is the
+    :class:`matplotlib.figure.Figure` as for every other viz function
+    (``show=`` is ignored there).
+    """
+    choice = "auto" if backend is None else str(backend).strip().lower()
+    if choice not in ("auto", "pyvista", "matplotlib"):
+        raise ValueError(f"unknown plot_mesh3d backend {backend!r}; "
+                         "use 'pyvista', 'matplotlib' or None (auto)")
+    if choice == "matplotlib" or (choice == "auto" and not pyvista_available()):
+        return _mpl_mesh3d(model, color=color, title=title, outfile=outfile)
+
+    pv = _pyvista()
+    grid = _pyvista_grid(model)
+    n_nodes = len(getattr(model, "nodes", {}))
+    n_elems = len(getattr(model, "elements", {}))
+
+    plotter = pv.Plotter(off_screen=not show, window_size=list(window_size))
+    plotter.add_mesh(
+        grid,
+        color=_plotly_color(color),  # hex spelling: understood by every backend
+        show_edges=show_edges,
+        line_width=2.0,
+        point_size=8.0,
+        opacity=opacity,
+    )
+    plotter.add_axes()
+    plotter.add_text(
+        title or f"{getattr(model, 'name', 'model')}: {n_nodes} nodes, {n_elems} elements",
+        font_size=10,
+    )
+    if outfile:
+        plotter.screenshot(str(outfile))
+    if show:
+        plotter.show()
+    return plotter
+
+
+def _mpl_mesh3d(model: Any, *, color: str, title: str | None, outfile: str | None):
+    """matplotlib fallback for :func:`plot_mesh3d`: always a 3-D wireframe."""
+    plt = _plt()
+    coords = _node_coords(model)
+    xyz = np.asarray(list(coords.values())) if coords else np.zeros((0, 3))
+
+    fig = plt.figure(figsize=(7, 5))
+    ax = fig.add_subplot(111, projection="3d")
+    segments, points = _segments(model, coords)
+    _draw_wireframe(ax, segments, points, three_d=True, color=color, lw=1.5)
+    if coords:
+        ax.scatter(xyz[:, 0], xyz[:, 1], xyz[:, 2], color="black", s=12, zorder=3)
+
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    ax.set_zlabel("z")
     ax.set_title(title or f"{getattr(model, 'name', 'model')}: "
                           f"{len(coords)} nodes, {len(model.elements)} elements")
     return _finish(fig, outfile)
