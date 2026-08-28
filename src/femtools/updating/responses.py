@@ -565,6 +565,7 @@ def static_stress_response(
     frame: str = "element",
     layer: Any = "mid",
     loads: Any = None,
+    enforced: Mapping[Any, float] | None = None,
     solver: Callable[..., Any] | None = None,
     solver_kwargs: dict[str, Any] | None = None,
     scale: ArrayLike | None = None,
@@ -600,8 +601,17 @@ def static_stress_response(
         Through-thickness station for shells, as in :func:`recover_stress`.
     loads:
         Anything :func:`femtools.fea.loads.build_load_vector` accepts. ``None``
-        uses the model's own loads.  Pass ``solver_kwargs={"enforced": ...}`` to
-        drive the model by prescribed displacement instead.
+        uses the model's own loads.
+    enforced:
+        ``{(node_id, dof): value}`` prescribed displacements, handed to
+        :func:`femtools.fea.static.solve_static` — the same thing as
+        ``solver_kwargs={"enforced": ...}``, spelled out because it is what
+        makes a stress residual informative at all.  Under **dead load** a
+        statically determinate structure carries ``sigma = F / A`` whatever its
+        modulus, so a stress residual there is blind to ``E``; driving the same
+        model by prescribed displacement gives ``sigma = E * delta / L``, which
+        is exactly linear in it.  (Measured *strain* is the other way round:
+        informative under dead load, blind under enforced displacement.)
     solver:
         Optional ``solver(model, loads) -> StaticResult`` callback replacing
         :func:`femtools.fea.static.solve_static`.  It must return a result the
@@ -619,13 +629,26 @@ def static_stress_response(
     prescribed end displacements::
 
         f = static_stress_response(model, parameters, component="xx",
-                                   solver_kwargs={"enforced": {(tip, 0): 1.0e-4}})
+                                   enforced={(tip, 0): 1.0e-4})
         res = update_model(model, parameters, targets=measured, response=f)
     """
     model = unwrap_model(model)
     pset: ParameterSet = as_parameters(parameters)
     base = snapshot_baseline(model, pset)
     kwargs = dict(solver_kwargs or {})
+    if enforced is not None:
+        if "enforced" in kwargs:
+            raise ValueError(
+                "pass the prescribed displacements either as `enforced` or inside "
+                "`solver_kwargs`, not both"
+            )
+        if solver is not None:
+            raise ValueError(
+                "`enforced` is handed to femtools.fea.static.solve_static, which a "
+                "custom `solver` replaces; apply the prescribed displacements inside "
+                "the solver callback instead"
+            )
+        kwargs["enforced"] = dict(enforced)
     factor = None if scale is None else np.asarray(scale, dtype=float)
 
     key = str(component).strip().lower()
