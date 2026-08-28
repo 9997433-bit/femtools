@@ -13,8 +13,17 @@ Supported cards (Round 1 subset, extended in Round 7):
 * materials: ``MAT1``
 * constraints/loads: ``SPC1`` (with ``THRU``), ``SPC``, ``FORCE``, ``MOMENT``
 * rigid elements: ``RBE2`` (with ``THRU``) into :meth:`FEModel.add_rbe2`;
-  the trailing thermal ``ALPHA`` field is ignored with a warning.  ``RBE3``
-  stays unsupported (one aggregated ``UserWarning``, like any other card).
+  the trailing thermal ``ALPHA`` field is ignored with a warning.
+* interpolation elements (Round 8): ``RBE3`` (public card layout
+  ``EID blank REFGRID REFC WT1 C1 G1 ... [WT2 C2 ...]``, ``THRU`` accepted
+  in the grid lists) into :meth:`FEModel.add_rbe3`.  femtools' RBE3 is a
+  component-wise weighted average, so fields that table cannot represent
+  are degraded and reported in **one aggregated** ``UserWarning`` per
+  file: the ``UM`` m-set override and the thermal ``ALPHA`` tail are
+  ignored, mixed per-group component lists ``Ci`` fall back to the first
+  group's list, and ``REFC`` components not present in ``Ci`` (e.g. the
+  classic ``REFC=123456`` with translation-only independents, which real
+  Nastran resolves through its least-squares geometry fit) are dropped.
 
 ``INCLUDE`` statements are followed (Round 7): the referenced file is
 spliced in textually at the statement's position, so continuations across
@@ -501,6 +510,102 @@ def read_bdf(path: str | Path) -> FEModel:
             components=tuple(int(ch) for ch in cm),
         )
 
+    # RBE3: EID blank REFGRID REFC WT1 C1 G1,1 G1,2 ... [WT2 C2 G2,1 ...]
+    # ["UM" GM1 CM1 ...] ["ALPHA" ALPHA].  Grid lists may use THRU; a new
+    # weight group starts at the next real-typed field (Nastran reals always
+    # carry a decimal point).  Degradations are aggregated into one warning.
+    rbe3_issues: dict[int, list[str]] = {}
+    for c in by_name.pop("RBE3", []):
+        eid = _i(c, 1)
+        refgrid = _i(c, 3)
+        refc = _s(c, 4)
+        if refgrid is None:
+            raise BdfError(f"RBE3 {eid}: missing REFGRID")
+        if not refc or any(ch not in "123456" for ch in refc):
+            raise BdfError(f"RBE3 {eid}: REFC must be digits 1-6, got {refc!r}")
+        groups: list[tuple[float, tuple[int, ...], list[int]]] = []
+        j = 5
+        while j < len(c):
+            tok = _s(c, j)
+            if not tok:
+                j += 1
+                continue
+            if tok[0] == "+" and "." not in tok:
+                j += 1  # free-field trailing continuation marker ("+", "+C1", ...)
+                continue
+            up = tok.upper()
+            if up == "UM":
+                rbe3_issues.setdefault(eid, []).append("UM m-set override ignored")
+                j += 1
+                while j < len(c) and _s(c, j).upper() != "ALPHA":
+                    j += 1
+                continue
+            if up == "ALPHA":
+                rbe3_issues.setdefault(eid, []).append("thermal expansion ALPHA ignored")
+                break
+            if up == "THRU":
+                last = _i(c, j + 1)
+                if not groups or not groups[-1][2] or last is None:
+                    raise BdfError(f"RBE3 {eid}: malformed THRU")
+                grids = groups[-1][2]
+                grids.extend(range(grids[-1] + 1, last + 1))
+                j += 2
+                continue
+            if "." in tok:  # a real field starts the next (WTi, Ci, grids) group
+                wt = _f(c, j)
+                if wt is None or wt <= 0.0:
+                    raise BdfError(f"RBE3 {eid}: weight must be a positive real, got {tok!r}")
+                j += 1
+                while j < len(c) and not _s(c, j):
+                    j += 1
+                ci_tok = _s(c, j)
+                if not ci_tok or any(ch not in "123456" for ch in ci_tok):
+                    raise BdfError(f"RBE3 {eid}: components Ci must be digits 1-6, got {ci_tok!r}")
+                groups.append((wt, tuple(sorted(set(int(ch) for ch in ci_tok))), []))
+                j += 1
+                continue
+            if not groups:
+                raise BdfError(f"RBE3 {eid}: grid {tok} before the first WTi,Ci pair")
+            groups[-1][2].append(_i(c, j))
+            j += 1
+        groups = [g for g in groups if g[2]]
+        if not groups:
+            raise BdfError(f"RBE3 {eid}: no independent grids")
+        ci_use = groups[0][1]
+        if any(g[1] != ci_use for g in groups):
+            rbe3_issues.setdefault(eid, []).append(
+                "mixed per-group component lists Ci; the first group's list "
+                f"{''.join(map(str, ci_use))} is used for every independent grid"
+            )
+        ref_comps = tuple(sorted(set(int(ch) for ch in refc)))
+        dropped = [comp for comp in ref_comps if comp not in ci_use]
+        kept = tuple(comp for comp in ref_comps if comp in ci_use)
+        if dropped:
+            rbe3_issues.setdefault(eid, []).append(
+                f"REFC components {''.join(map(str, dropped))} are not in the independent "
+                f"components {''.join(map(str, ci_use))} and were dropped (femtools' RBE3 "
+                "is a component-wise weighted average, not Nastran's least-squares fit)"
+            )
+        if not kept:
+            rbe3_issues.setdefault(eid, []).append("no representable REFC component; card skipped")
+            continue
+        independents: list[int] = []
+        wts: list[float] = []
+        for wt, _ci, grids in groups:
+            independents.extend(grids)
+            wts.extend([wt] * len(grids))
+        model.add_rbe3(
+            id=eid,
+            dependent=refgrid,
+            independents=independents,
+            components=kept,
+            independent_components=ci_use,
+            weights=wts,
+        )
+    if rbe3_issues:
+        detail = "; ".join(f"{eid}: {', '.join(msgs)}" for eid, msgs in sorted(rbe3_issues.items()))
+        notes.append(f"RBE3 unsupported/degraded fields on {len(rbe3_issues)} card(s) -- {detail}")
+
     # -- constraints -------------------------------------------------------------------
     for nid, ps in pending_ps:
         model.add_spc(node_id=nid, mask=comps_to_mask(ps), sid=0)
@@ -644,7 +749,9 @@ def write_bdf(path: str | Path | FEModel, model: FEModel | str | Path | None = N
     Lumped MASS/SPRING/DAMPER elements are written as CONM2/CELAS2/CDAMP2
     with values taken from their lumped property; the auto property card
     itself is not emitted (Nastran keeps these values on the element).
-    :attr:`FEModel.rbe2` entries are written as RBE2 cards.
+    :attr:`FEModel.rbe2` entries are written as RBE2 cards and
+    :attr:`FEModel.rbe3` entries as RBE3 cards (one ``WTi, Ci`` group per
+    run of equal weights, ``Ci`` = the table's ``independent_components``).
     """
     from ._compat import coerce_path_model
 
@@ -751,6 +858,18 @@ def write_bdf(path: str | Path | FEModel, model: FEModel | str | Path | None = N
     for rbe in model.rbe2:
         cm = "".join(str(comp) for comp in sorted(set(rbe.components)))
         lines += _card8("RBE2", rbe.id, rbe.independent, int(cm), *rbe.dependents)
+
+    for rbe3 in model.rbe3:
+        refc = int("".join(str(comp) for comp in sorted(set(rbe3.components))))
+        ci = int("".join(str(comp) for comp in sorted(set(rbe3.independent_components))))
+        wts = rbe3.weights if rbe3.weights is not None else (1.0,) * len(rbe3.independents)
+        fields: list[float | int | str | None] = [rbe3.id, None, rbe3.dependent, refc]
+        start = 0
+        for k in range(1, len(wts) + 1):  # one WTi,Ci group per run of equal weights
+            if k == len(wts) or wts[k] != wts[start]:
+                fields += [float(wts[start]), ci, *rbe3.independents[start:k]]
+                start = k
+        lines += _card8("RBE3", *fields)
 
     for spc in model.spcs:
         comps = spc.comps
