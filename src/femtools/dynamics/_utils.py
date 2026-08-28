@@ -6,8 +6,11 @@ from :mod:`femtools.dynamics`.
 
 from __future__ import annotations
 
+import json
+import os
 import warnings
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -18,8 +21,14 @@ __all__ = [
     "SINGULAR_RCOND",
     "as_dense",
     "broadcast_scalar",
+    "dumps_meta",
     "factorized_solver",
+    "get_field",
     "is_sparse",
+    "json_default",
+    "json_meta",
+    "npz_path",
+    "npz_text",
     "resolve_dofs",
     "symmetrize",
 ]
@@ -97,6 +106,52 @@ def resolve_dofs(
     if idx.size and (idx.min() < -ndof or idx.max() >= ndof):
         raise IndexError(f"{name} out of range for {ndof} DOFs: {idx}")
     return np.where(idx < 0, idx + ndof, idx)
+
+
+def get_field(source: Any, name: str) -> Any:
+    """Read ``name`` off an object or a mapping, ``None`` when it carries no such field."""
+    if isinstance(source, Mapping):
+        return source.get(name)
+    return getattr(source, name, None)
+
+
+def json_default(value: Any) -> Any:
+    """Best-effort JSON encoding for the numpy scalars that end up in a ``meta`` dict."""
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    return str(value)
+
+
+def npz_path(path: Any) -> Path | None:
+    """Normalise ``path`` to a ``.npz`` :class:`~pathlib.Path`, or ``None`` for a stream."""
+    if isinstance(path, str | os.PathLike):
+        p = Path(os.fspath(path))
+        # np.savez silently appends .npz to a name that lacks it, which leaves the caller
+        # holding a path that does not exist. Decide the name here instead.
+        return p if p.suffix == ".npz" else p.with_suffix(p.suffix + ".npz")
+    return None
+
+
+def npz_text(data: Any, key: str, default: str = "") -> str:
+    """Read a 0-d string array out of an open ``npz`` archive."""
+    if key not in data.files:
+        return default
+    return str(np.asarray(data[key]).item())
+
+
+def json_meta(source: Any, extra: Any = None) -> dict[str, Any]:
+    """Merge a source object's ``meta`` mapping with ``extra`` (which wins)."""
+    merged = dict(get_field(source, "meta") or {})
+    if extra is not None:
+        merged.update(dict(extra))
+    return merged
+
+
+def dumps_meta(meta: Mapping[str, Any]) -> str:
+    """Serialise a ``meta`` mapping for storage in an archive."""
+    return json.dumps(dict(meta), default=json_default)
 
 
 #: A matrix whose reciprocal condition number falls to this level is singular to working

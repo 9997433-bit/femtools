@@ -15,10 +15,15 @@ the last *retained* mode — :func:`retained_fmax_hz` — so that the 0.2-0.8 fm
 single argument saying where the matrices come from — an assembly or a model, which is
 assembled and reduced to its free partition by :func:`~femtools.dynamics.system.as_system`.
 The mesh-backed forms additionally address DOFs as ``(node_id, component)``.
+
+:func:`dump_frf` and :func:`load_frf` put a computed block of FRFs on disk as a single
+``.npz`` archive, the way :func:`~femtools.dynamics.superelement.dump_cms` does for a
+reduced component. ``H`` and ``freq_hz`` come back **bit-identical**.
 """
 
 from __future__ import annotations
 
+import json
 import warnings
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -28,7 +33,16 @@ import numpy as np
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-from ._utils import TWO_PI, as_dense, resolve_dofs
+from ._utils import (
+    TWO_PI,
+    as_dense,
+    dumps_meta,
+    get_field,
+    json_meta,
+    npz_path,
+    npz_text,
+    resolve_dofs,
+)
 from .damping import DampingModel, as_damping
 from .modal import ModalModel, as_modal
 from .system import SystemMatrices, as_system, resolve_selection
@@ -36,6 +50,8 @@ from .system import SystemMatrices, as_system, resolve_selection
 __all__ = [
     "FRFResult",
     "direct_frf",
+    "dump_frf",
+    "load_frf",
     "modal_frf",
     "retained_band",
     "retained_band_lines",
@@ -705,3 +721,179 @@ def verify_modal_vs_direct(
         "modal": Hm,
         "direct": Hd,
     }
+
+
+# ---------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------
+
+#: Tag written into every archive; :func:`load_frf` refuses anything else.
+FRF_FORMAT = "femtools.dynamics.frf/1"
+
+#: Fields an archive cannot be missing — everything else has a defined default.
+_REQUIRED = ("H", "freq_hz")
+#: Written only when the source carries them; absent in the archive means ``None``.
+_OPTIONAL_DOFS = ("outputs", "inputs")
+
+
+def _as_frf(result: Any) -> FRFResult:
+    """Coerce a duck-typed FRF carrier to an :class:`FRFResult` for storage."""
+    if isinstance(result, FRFResult):
+        return result
+    H = get_field(result, "H")
+    freq_hz = get_field(result, "freq_hz")
+    if H is None or freq_hz is None:
+        absent = "H" if H is None else "freq_hz"
+        raise TypeError(
+            f"{type(result).__name__} has no {absent!r}; a block of frequency response "
+            "functions must carry the complex matrix H and the frequency axis freq_hz "
+            "to be worth storing"
+        )
+    response = get_field(result, "response")
+    return FRFResult(
+        H=H,
+        freq_hz=freq_hz,
+        outputs=get_field(result, "outputs"),
+        inputs=get_field(result, "inputs"),
+        response=str(response) if response else "receptance",
+        method=str(get_field(result, "method") or ""),
+        meta=dict(get_field(result, "meta") or {}),
+    )
+
+
+def dump_frf(result: Any, path: Any, *, compress: bool = False, meta: Any = None) -> Any:
+    """Write a block of frequency response functions to an ``.npz`` archive.
+
+    An FRF is expensive in a way that is easy to forget: a direct solve factorises the
+    dynamic stiffness once per frequency line, so a few hundred lines of a mesh-backed
+    model cost more than the eigen solve that a modal FRF is built on. Whatever comes
+    next — a curve fit, an FRF-based assembly, a plot in a report, a comparison against a
+    measurement taken a month later — should not have to re-solve it, and that is all this
+    function is for. It is the :func:`~femtools.dynamics.superelement.dump_cms` of the
+    forced-response side and writes the same kind of archive: one array per field, a
+    ``format`` tag, and ``meta`` as JSON.
+
+    ``H`` is stored as raw ``complex128`` and ``freq_hz`` as raw ``float64``, so both come
+    back **bit-identical**. That matters more here than the size of the file: an FRF that
+    moved in its last bits between the run that computed it and the run that consumes it
+    is an FRF whose resonances, damping estimates and mode shapes cannot be compared with
+    anyone else's.
+
+        dump_frf(modal_frf(modes, [7], [7], f, 0.02), "drive_point.npz")
+        H = load_frf("drive_point.npz")      # an FRFResult again
+        H.magnitude()[0, 0].argmax()
+
+    Parameters
+    ----------
+    result:
+        An :class:`FRFResult`, or any object or mapping exposing at least ``H`` and
+        ``freq_hz`` — ``outputs``, ``inputs``, ``response``, ``method`` and ``meta`` are
+        stored when present. A duck-typed source goes through :class:`FRFResult`'s own
+        validation first, so a 2-D ``H`` is read as the single-input block it is.
+    path:
+        Destination. A ``str`` or path-like without an ``.npz`` suffix gets one, and the
+        resolved :class:`~pathlib.Path` is returned; an open binary file object is written
+        to as-is and returned unchanged.
+    compress:
+        Use ``np.savez_compressed``. An FRF is dense complex data that rarely compresses
+        as well as a reduction basis does, so this is off by default; the bits that come
+        back are identical either way.
+    meta:
+        Extra entries merged into the stored ``meta`` mapping, overriding the source's own.
+        Anything JSON cannot represent is stored as its ``str``, and tuples come back as
+        lists — ``meta`` is provenance, not data.
+
+    Returns
+    -------
+    pathlib.Path or file object
+        Where the archive was written.
+
+    Raises
+    ------
+    TypeError
+        If ``result`` carries no ``H`` and ``freq_hz``.
+    """
+    frf = _as_frf(result)
+
+    payload: dict[str, Any] = {
+        "H": frf.H,
+        "freq_hz": frf.freq_hz,
+        "format": np.array(FRF_FORMAT),
+        "response": np.array(frf.response),
+        "method": np.array(frf.method),
+        "source_class": np.array(type(result).__name__),
+        "meta_json": np.array(dumps_meta(json_meta(frf, meta))),
+    }
+    for name in _OPTIONAL_DOFS:
+        value = getattr(frf, name)
+        # Absent from the archive is how "the block was never restricted to a DOF
+        # selection" is written down; an empty array would say the opposite.
+        if value is not None:
+            payload[name] = np.asarray(value, dtype=np.int64).reshape(-1)
+
+    target = npz_path(path)
+    save = np.savez_compressed if compress else np.savez
+    save(target if target is not None else path, **payload)
+    return target if target is not None else path
+
+
+def load_frf(path: Any) -> FRFResult:
+    """Read a block of FRFs back from an ``.npz`` archive written by :func:`dump_frf`.
+
+    ``H`` and ``freq_hz`` are bit-identical to what was written, and ``outputs`` /
+    ``inputs`` come back as the DOF selections they were, or as ``None`` when the block
+    was never restricted to one. ``response`` is restored, so a stored accelerance is
+    still an accelerance and :meth:`FRFResult.as_response` converts from the right place.
+    ``meta`` round-trips through JSON, so its tuples arrive as lists, and gains a
+    ``loaded_from`` entry.
+
+    Parameters
+    ----------
+    path:
+        Source archive: a path, a path without its ``.npz`` suffix, or an open binary
+        file object.
+
+    Returns
+    -------
+    FRFResult
+
+    Raises
+    ------
+    ValueError
+        If the archive was not written by :func:`dump_frf`, or has lost ``H`` or
+        ``freq_hz``.
+    """
+    target = npz_path(path)
+    with np.load(target if target is not None else path, allow_pickle=False) as data:
+        tag = npz_text(data, "format")
+        if tag != FRF_FORMAT:
+            raise ValueError(
+                f"{path!r} is not a femtools FRF archive (format tag "
+                f"{tag or 'absent'!r}, expected {FRF_FORMAT!r})"
+            )
+        missing = [name for name in _REQUIRED if name not in data.files]
+        if missing:
+            raise ValueError(
+                f"{path!r} claims to be an FRF archive but is missing {', '.join(missing)}"
+            )
+        H = np.array(data["H"])
+        freq_hz = np.array(data["freq_hz"])
+        dofs = {
+            name: (np.array(data[name]) if name in data.files else None)
+            for name in _OPTIONAL_DOFS
+        }
+        response = npz_text(data, "response", "receptance")
+        method = npz_text(data, "method")
+        meta_text = npz_text(data, "meta_json", "{}")
+
+    meta = dict(json.loads(meta_text or "{}"))
+    meta["loaded_from"] = str(target) if target is not None else repr(path)
+    return FRFResult(
+        H=H,
+        freq_hz=freq_hz,
+        outputs=dofs["outputs"],
+        inputs=dofs["inputs"],
+        response=response,
+        method=method,
+        meta=meta,
+    )

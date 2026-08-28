@@ -34,15 +34,12 @@ that can still be expanded and eigen-solved.
 from __future__ import annotations
 
 import json
-import os
-from collections.abc import Mapping
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from ._utils import TWO_PI, as_dense
+from ._utils import TWO_PI, as_dense, dumps_meta, get_field, json_meta, npz_path, npz_text
 from .cms_free import FreeCMSResult, _semidefinite_modes
 from .craig_bampton import CraigBamptonResult
 from .modal import ModalModel
@@ -125,37 +122,12 @@ class Superelement:
         )
 
 
-def _json_default(value: Any) -> Any:
-    """Best-effort JSON encoding for the numpy scalars that end up in ``meta``."""
-    if isinstance(value, np.generic):
-        return value.item()
-    if isinstance(value, np.ndarray):
-        return value.tolist()
-    return str(value)
-
-
-def _get(source: Any, name: str) -> Any:
-    if isinstance(source, Mapping):
-        return source.get(name)
-    return getattr(source, name, None)
-
-
 def _classify(result: Any) -> str:
     if isinstance(result, CraigBamptonResult):
         return "craig_bampton"
     if isinstance(result, FreeCMSResult):
         return "free_cms"
     return "superelement"
-
-
-def _as_path(path: Any) -> Path | None:
-    """Normalise ``path`` to a ``.npz`` :class:`~pathlib.Path`, or ``None`` for a stream."""
-    if isinstance(path, str | os.PathLike):
-        p = Path(os.fspath(path))
-        # np.savez silently appends .npz to a name that lacks it, which leaves the caller
-        # holding a path that does not exist. Decide the name here instead.
-        return p if p.suffix == ".npz" else p.with_suffix(p.suffix + ".npz")
-    return None
 
 
 def dump_cms(result: Any, path: Any, *, compress: bool = False, meta: Any = None) -> Any:
@@ -194,7 +166,7 @@ def dump_cms(result: Any, path: Any, *, compress: bool = False, meta: Any = None
     kind = _classify(result)
     fields: dict[str, np.ndarray] = {}
     for name in _MATRICES:
-        value = _get(result, name)
+        value = get_field(result, name)
         if value is None:
             raise TypeError(
                 f"{type(result).__name__} has no {name!r}; a reduced component must "
@@ -214,39 +186,31 @@ def dump_cms(result: Any, path: Any, *, compress: bool = False, meta: Any = None
         )
 
     for name in _DOF_SETS:
-        value = _get(result, name)
+        value = get_field(result, name)
         fields[name] = (
             np.zeros(0, dtype=np.int64)
             if value is None
             else np.asarray(value, dtype=np.int64).reshape(-1)
         )
     for name in _EXTRA[kind]:
-        value = _get(result, name)
+        value = get_field(result, name)
         if value is not None:
             fields[name] = as_dense(value)
 
-    stored_meta = dict(_get(result, "meta") or {})
-    if meta is not None:
-        stored_meta.update(dict(meta))
-    method = str(_get(result, "method") or "")
+    stored_meta = json_meta(result, meta)
+    method = str(get_field(result, "method") or "")
 
     payload: dict[str, Any] = dict(fields)
     payload["format"] = np.array(FORMAT)
     payload["kind"] = np.array(kind)
     payload["method"] = np.array(method)
     payload["source_class"] = np.array(type(result).__name__)
-    payload["meta_json"] = np.array(json.dumps(stored_meta, default=_json_default))
+    payload["meta_json"] = np.array(dumps_meta(stored_meta))
 
-    target = _as_path(path)
+    target = npz_path(path)
     save = np.savez_compressed if compress else np.savez
     save(target if target is not None else path, **payload)
     return target if target is not None else path
-
-
-def _text(data: Any, key: str, default: str = "") -> str:
-    if key not in data.files:
-        return default
-    return str(np.asarray(data[key]).item())
 
 
 def load_cms(path: Any) -> Any:
@@ -277,15 +241,15 @@ def load_cms(path: Any) -> Any:
         If the archive was not written by :func:`dump_cms`, or has lost a field the
         class it claims to be needs.
     """
-    target = _as_path(path)
+    target = npz_path(path)
     with np.load(target if target is not None else path, allow_pickle=False) as data:
-        tag = _text(data, "format")
+        tag = npz_text(data, "format")
         if tag != FORMAT:
             raise ValueError(
                 f"{path!r} is not a femtools superelement archive (format tag "
                 f"{tag or 'absent'!r}, expected {FORMAT!r})"
             )
-        kind = _text(data, "kind", "superelement")
+        kind = npz_text(data, "kind", "superelement")
         if kind not in _EXTRA:
             raise ValueError(f"unknown superelement kind {kind!r} in {path!r}")
         arrays = {name: np.array(data[name]) for name in (*_MATRICES, *_DOF_SETS)}
@@ -296,8 +260,8 @@ def load_cms(path: Any) -> Any:
                 f"{', '.join(missing)}"
             )
         arrays.update({name: np.array(data[name]) for name in _EXTRA[kind]})
-        method = _text(data, "method")
-        meta_text = _text(data, "meta_json", "{}")
+        method = npz_text(data, "method")
+        meta_text = npz_text(data, "meta_json", "{}")
 
     meta = dict(json.loads(meta_text or "{}"))
     meta["loaded_from"] = str(target) if target is not None else repr(path)

@@ -11,6 +11,7 @@ Public entry points (see ``docs/CONTRACT_API.md``)::
     from femtools.dynamics.residuals import residual_vectors
     from femtools.dynamics.random import psd_response
     from femtools.dynamics.superelement import dump_cms, load_cms
+    from femtools.dynamics.frf import dump_frf, load_frf
     from femtools.dynamics.frf import verify_modal_vs_direct, retained_band
     from femtools.dynamics.energy import modal_strain_energy, modal_kinetic_energy
 
@@ -60,6 +61,8 @@ from .fba import frf_based_assembly
 from .frf import (
     FRFResult,
     direct_frf,
+    dump_frf,
+    load_frf,
     modal_frf,
     retained_band,
     retained_band_lines,
@@ -117,11 +120,13 @@ __all__ = [
     "craig_bampton",
     "direct_frf",
     "dump_cms",
+    "dump_frf",
     "element_modal_energy",
     "free_interface_assembly",
     "frf_based_assembly",
     "harmonic_response",
     "load_cms",
+    "load_frf",
     "macneal",
     "miles_rms",
     "modal_based_assembly",
