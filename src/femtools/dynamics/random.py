@@ -52,19 +52,30 @@ The first is :func:`miles_rms` evaluated on the acceleration level; the second i
 number ``sqrt(pi/2 f_n Q S_a)`` times the ``sqrt(1 + 4 zeta^2)`` that the damper's own
 force contributes and that the usual quotation of the equation drops (0.08 % at 2 %
 damping, 2 % at 10 %).
+
+Storage
+-------
+:func:`dump_psd` and :func:`load_psd` put a :class:`PSDResult` on disk as a plain ``.npz``
+archive, the same way :func:`~femtools.dynamics.frf.dump_frf` stores an FRF and
+:func:`~femtools.dynamics.superelement.dump_cms` a reduced component. The spectra and the
+frequency axis are written as raw ``float64`` / ``complex128``, so they come back
+**bit-identical** — a random-vibration load case is assessed on the RMS and the 3-sigma
+level it produces, and those numbers are only comparable between runs if the spectrum
+behind them did not move in its last bits on the way through the file.
 """
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
 
-from ._utils import TWO_PI
+from ._utils import TWO_PI, dumps_meta, get_field, json_meta, npz_path, npz_text
 from .frf import FRFResult, modal_frf
 
-__all__ = ["PSDResult", "miles_rms", "psd_response"]
+__all__ = ["PSDResult", "dump_psd", "load_psd", "miles_rms", "psd_response"]
 
 
 def _integrate(y: np.ndarray, f: np.ndarray) -> np.ndarray:
@@ -598,3 +609,202 @@ def miles_rms(
     omega_n = TWO_PI * fn
     force_variance = (np.pi / 2.0) * fn * float(psd_level) / (2.0 * z)
     return float(np.sqrt(force_variance) / (omega_n**2 * float(modal_mass)))
+
+
+# ---------------------------------------------------------------------------
+# Storage
+# ---------------------------------------------------------------------------
+
+#: Tag written into every archive; :func:`load_psd` refuses anything else.
+PSD_FORMAT = "femtools.dynamics.random/1"
+
+#: Fields an archive cannot be missing — everything else has a defined default.
+_REQUIRED = ("psd", "freq_hz", "rms")
+#: Written only when the source carries them; absent in the archive means ``None``.
+_OPTIONAL_DOFS = ("outputs", "inputs")
+
+
+def _as_psd(result: Any) -> PSDResult:
+    """Coerce a duck-typed spectrum carrier to a :class:`PSDResult` for storage."""
+    if isinstance(result, PSDResult):
+        return result
+    psd = get_field(result, "psd")
+    freq_hz = get_field(result, "freq_hz")
+    if psd is None or freq_hz is None:
+        absent = "psd" if psd is None else "freq_hz"
+        raise TypeError(
+            f"{type(result).__name__} has no {absent!r}; a block of response spectra "
+            "must carry the auto-spectra psd and the frequency axis freq_hz to be worth "
+            "storing"
+        )
+    rms = get_field(result, "rms")
+    if rms is None:
+        # The RMS is the integral of the auto-spectra over the band, so a source that
+        # carries the spectra but not the statistic is not missing anything: derive it
+        # with the same trapezoidal rule psd_response uses rather than refuse the dump.
+        axis = np.atleast_1d(np.asarray(freq_hz, dtype=float)).reshape(-1)
+        auto = np.atleast_2d(np.asarray(psd, dtype=float))
+        rms = np.sqrt(np.clip(_integrate(auto, axis), 0.0, None))
+    response = get_field(result, "response")
+    return PSDResult(
+        psd=psd,
+        freq_hz=freq_hz,
+        rms=rms,
+        cross_psd=get_field(result, "cross_psd"),
+        outputs=get_field(result, "outputs"),
+        inputs=get_field(result, "inputs"),
+        response=str(response) if response else "receptance",
+        meta=dict(get_field(result, "meta") or {}),
+    )
+
+
+def dump_psd(result: Any, path: Any, *, compress: bool = False, meta: Any = None) -> Any:
+    """Write a block of response spectra to an ``.npz`` archive.
+
+    A random-vibration run is cheap to *state* and expensive to *reproduce*: the spectra
+    depend on the modal basis, the damping model, the excitation shapes and — most easily
+    lost of all — the frequency grid, because the RMS is a trapezoidal integral over
+    exactly the lines that were synthesised and a regenerated grid gives a slightly
+    different number. Storing the result is how the 3-sigma level in a report stays tied
+    to the spectrum it was read off. This is the :func:`~femtools.dynamics.frf.dump_frf`
+    of the random side and writes the same kind of archive: one array per field, a
+    ``format`` tag, and ``meta`` as JSON.
+
+    :attr:`PSDResult.psd`, :attr:`PSDResult.freq_hz` and :attr:`PSDResult.rms` are stored
+    as raw ``float64`` and the cross-spectral matrix as raw ``complex128``, so all four
+    come back **bit-identical**.
+
+        dump_psd(psd_response(modes, 1.0, f, 0.02), "liftoff.npz")
+        S = load_psd("liftoff.npz")          # a PSDResult again
+        S.three_sigma, S.peak(duration_s=60.0)
+
+    Parameters
+    ----------
+    result:
+        A :class:`PSDResult`, or any object or mapping exposing at least ``psd`` and
+        ``freq_hz`` — ``rms``, ``cross_psd``, ``outputs``, ``inputs``, ``response`` and
+        ``meta`` are stored when present. A source that carries no ``rms`` gets it
+        integrated from its own spectra. A duck-typed source goes through
+        :class:`PSDResult`'s own validation first, so a 1-D ``psd`` is read as the
+        single-output block it is.
+    path:
+        Destination. A ``str`` or path-like without an ``.npz`` suffix gets one, and the
+        resolved :class:`~pathlib.Path` is returned; an open binary file object is written
+        to as-is and returned unchanged.
+    compress:
+        Use ``np.savez_compressed``. Response spectra are dense and span orders of
+        magnitude across a resonance, so they rarely compress well; this is off by
+        default and the bits that come back are identical either way.
+    meta:
+        Extra entries merged into the stored ``meta`` mapping, overriding the source's own.
+        Anything JSON cannot represent is stored as its ``str``, and tuples come back as
+        lists — ``meta`` is provenance, not data.
+
+    Returns
+    -------
+    pathlib.Path or file object
+        Where the archive was written.
+
+    Raises
+    ------
+    TypeError
+        If ``result`` carries no ``psd`` and ``freq_hz``.
+    ValueError
+        If ``cross_psd`` is present but is not ``(n_out, n_out, n_freq)``.
+    """
+    spectra = _as_psd(result)
+
+    payload: dict[str, Any] = {
+        "psd": spectra.psd,
+        "freq_hz": spectra.freq_hz,
+        "rms": spectra.rms,
+        "format": np.array(PSD_FORMAT),
+        "response": np.array(spectra.response),
+        "source_class": np.array(type(result).__name__),
+        "meta_json": np.array(dumps_meta(json_meta(spectra, meta))),
+    }
+    if spectra.cross_psd is not None:
+        cross = np.ascontiguousarray(spectra.cross_psd, dtype=complex)
+        expected = (spectra.n_out, spectra.n_out, spectra.n_freq)
+        if cross.shape != expected:
+            raise ValueError(
+                f"cross_psd must be {expected} to match the auto-spectra, got "
+                f"{cross.shape}"
+            )
+        payload["cross_psd"] = cross
+    for name in _OPTIONAL_DOFS:
+        value = getattr(spectra, name)
+        # Absent from the archive is how "the block was never restricted to a DOF
+        # selection" is written down; an empty array would say the opposite.
+        if value is not None:
+            payload[name] = np.asarray(value, dtype=np.int64).reshape(-1)
+
+    target = npz_path(path)
+    save = np.savez_compressed if compress else np.savez
+    save(target if target is not None else path, **payload)
+    return target if target is not None else path
+
+
+def load_psd(path: Any) -> PSDResult:
+    """Read response spectra back from an ``.npz`` archive written by :func:`dump_psd`.
+
+    ``psd``, ``freq_hz``, ``rms`` and ``cross_psd`` are bit-identical to what was written,
+    so every statistic derived from them — :attr:`~PSDResult.three_sigma`,
+    :meth:`~PSDResult.moment`, :meth:`~PSDResult.zero_crossing_rate_hz`,
+    :meth:`~PSDResult.peak` — reproduces exactly. ``outputs`` / ``inputs`` come back as
+    the DOF selections they were, or as ``None`` when the block was never restricted to
+    one, and ``cross_psd`` is ``None`` when the run did not request it. ``response`` is
+    restored, so a stored acceleration spectrum still reads in ``accel^2/Hz``. ``meta``
+    round-trips through JSON, so its tuples arrive as lists, and gains a ``loaded_from``
+    entry.
+
+    Parameters
+    ----------
+    path:
+        Source archive: a path, a path without its ``.npz`` suffix, or an open binary
+        file object.
+
+    Returns
+    -------
+    PSDResult
+
+    Raises
+    ------
+    ValueError
+        If the archive was not written by :func:`dump_psd`, or has lost ``psd``,
+        ``freq_hz`` or ``rms``.
+    """
+    target = npz_path(path)
+    with np.load(target if target is not None else path, allow_pickle=False) as data:
+        tag = npz_text(data, "format")
+        if tag != PSD_FORMAT:
+            raise ValueError(
+                f"{path!r} is not a femtools PSD archive (format tag "
+                f"{tag or 'absent'!r}, expected {PSD_FORMAT!r})"
+            )
+        missing = [name for name in _REQUIRED if name not in data.files]
+        if missing:
+            raise ValueError(
+                f"{path!r} claims to be a PSD archive but is missing {', '.join(missing)}"
+            )
+        arrays = {name: np.array(data[name]) for name in _REQUIRED}
+        cross_psd = np.array(data["cross_psd"]) if "cross_psd" in data.files else None
+        dofs = {
+            name: (np.array(data[name]) if name in data.files else None)
+            for name in _OPTIONAL_DOFS
+        }
+        response = npz_text(data, "response", "receptance")
+        meta_text = npz_text(data, "meta_json", "{}")
+
+    meta = dict(json.loads(meta_text or "{}"))
+    meta["loaded_from"] = str(target) if target is not None else repr(path)
+    return PSDResult(
+        psd=arrays["psd"],
+        freq_hz=arrays["freq_hz"],
+        rms=arrays["rms"],
+        cross_psd=cross_psd,
+        outputs=dofs["outputs"],
+        inputs=dofs["inputs"],
+        response=response,
+        meta=meta,
+    )

@@ -9,7 +9,7 @@ Public entry points (see ``docs/CONTRACT_API.md``)::
     from femtools.dynamics.cms_free import rubin, macneal, free_interface_assembly
     from femtools.dynamics.time_domain import time_history
     from femtools.dynamics.residuals import residual_vectors
-    from femtools.dynamics.random import psd_response
+    from femtools.dynamics.random import psd_response, dump_psd, load_psd
     from femtools.dynamics.superelement import dump_cms, load_cms
     from femtools.dynamics.frf import dump_frf, load_frf
     from femtools.dynamics.frf import verify_modal_vs_direct, retained_band
@@ -80,7 +80,7 @@ from .mba import (
     structural_dynamic_modification,
 )
 from .modal import ModalModel, as_modal
-from .random import PSDResult, miles_rms, psd_response
+from .random import PSDResult, dump_psd, load_psd, miles_rms, psd_response
 from .residuals import ResidualVectorResult, residual_vectors
 from .superelement import Superelement, dump_cms, load_cms
 from .synthetic import SyntheticTest, synthetic_frf, synthetic_time_response
@@ -121,12 +121,14 @@ __all__ = [
     "direct_frf",
     "dump_cms",
     "dump_frf",
+    "dump_psd",
     "element_modal_energy",
     "free_interface_assembly",
     "frf_based_assembly",
     "harmonic_response",
     "load_cms",
     "load_frf",
+    "load_psd",
     "macneal",
     "miles_rms",
     "modal_based_assembly",
