@@ -258,7 +258,8 @@ Known distances between the merged code and the state of the art it targets. Sta
 `docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4/R6/R7/R8/R9 is merged and tested but may still carry
 one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+
 and N/A rows of the product map, not repeated here. Round 9 close-out promotions are
-covered in §13.
+covered in §13; the Round-10 (Cycle D, in flight) work — R10-wip rows of the product
+map, absent until merged rather than merged-with-caveats — is covered in §14.
 
 ### Closed in Round 2
 
@@ -293,7 +294,11 @@ covered in §13.
   design; external UFF readers skip it, so materials/properties still do not transfer to
   other tools via UNV (BDF and `.ftproj` remain the lossless routes).
 * **BDF midside nodes.** TET10/HEX20 import still collapses to TET4/HEX8 (midside nodes
-  dropped, one aggregated warning per card type).
+  dropped, one aggregated warning per card type). The TET10 half is **closing in
+  Round 10** (R10-wip, §14): once the Round-10 TET10 element and CTETRA10 I/O merge, a
+  10-node CTETRA keeps all 10 nodes as a first-class TET10 — until that merge is
+  confirmed this caveat stands as written, and the **HEX20 → HEX8 drop remains** either
+  way (no 20-node hexahedron is planned for Round 10).
 * **DAQ: hardware acquisition is N/A by design** (hardware and vendor-licensing scope, not an
   algorithmic gap). The supported substitute is synthetic test data with controlled noise and
   fixed seeds — `femtools.dynamics.synthetic` and `femtools.mpe.synthetic` — which is what the
@@ -456,6 +461,84 @@ in §1–§12, so no new citations are required.
   `update-static` commands, the `UPDATE STATIC` script verb, and the GUI stress table
   over the existing `/api/stress` endpoint are surfaces over already-cited machinery;
   no algorithmic content, and `import femtools.viz` still never requires pyvista.
+
+## 14. Round 10 — Cycle D opening (in flight): TET10, ZZ-SPR, ERA, residual flexibility, expanded MAC, CTETRA10 / punch stresses
+
+Round 10 opens Cycle D. Its API is frozen in `.agent_workspace/REMAINING.md` (Round 10
+section) / `ROUND10_BRIEF.md`, and every Round-10 row in `docs/PRODUCT_MAP.md` is tagged
+**R10-wip** — frozen and in flight, *not merged*; nothing in this section claims merged
+status. References are public journal papers and textbooks only, as everywhere else in
+this document.
+
+* **TET10 — 10-node quadratic tetrahedron (`fea.elements.tet10`, etype `"TET10"`).**
+  Standard isoparametric quadratic tet (4 corner + 6 midside nodes) from the public
+  textbook literature: Zienkiewicz, O.C., Taylor, R.L., Zhu, J.Z., *The Finite Element
+  Method: Its Basis and Fundamentals*, 6th ed., Elsevier Butterworth-Heinemann, 2005
+  (quadratic tetrahedra, shape functions and numerical integration); Bathe, K.-J.,
+  *Finite Element Procedures*, Prentice Hall, 1996 (isoparametric solid formulation);
+  Cook, R.D., Malkus, D.S., Plesha, M.E., Witt, R.J., *Concepts and Applications of
+  Finite Element Analysis*, 4th ed., Wiley, 2002 (solid elements and quadrature rules) —
+  all three already cited in §11–§12. Stiffness by the typical 4-point tetrahedral Gauss
+  rule; consistent (or documented lumped) mass. Acceptance keeps the §9/§11 patch-test
+  discipline (MacNeal–Harder): the quadratic basis contains every linear displacement
+  field, so the constant-strain patch stays exact to roundoff, and a free-free single
+  TET10 carries exactly 6 rigid-body modes (solid nodes carry 3 translational DOFs).
+  Deliberately unchanged: the HEX8 Wilson–Taylor incompatible-modes default and its
+  98.6% bending golden, and the §10 distortion caveat — the Simo–Rifai assumed-strain
+  (EAS) upgrade stays **not implemented** in Round 10.
+* **ZZ-SPR — superconvergent patch recovery (`fea.recover.recover_spr`).**
+  Zienkiewicz, O.C., Zhu, J.Z., *The Superconvergent Patch Recovery and A Posteriori
+  Error Estimates. Part 1: The Recovery Technique*, IJNME, 33(7), 1992, pp. 1331–1364 —
+  cited in §12 as the known not-implemented upgrade to plain nodal averaging; Round 10
+  implements it. A linear polynomial is fitted per nodal patch (the elements incident on
+  a node) to stresses sampled at the superconvergent points — Barlow, J., *Optimal
+  Stress Locations in Finite Element Models*, IJNME, 10(2), 1976, pp. 243–251 (§11):
+  the centroids for the linear elements — then evaluated at the node. A constant-stress
+  patch stays exact at every node (§9.1 discipline). For TET10 the brief allows the same
+  centroid samples or skipping TET10 in SPR, documented either way by the implementing
+  agent. `average_nodal` (§12) deliberately stays plain 1/n_adj averaging and is *not*
+  SPR; the two coexist as distinct functions.
+* **ERA — Eigensystem Realization Algorithm (`mpe.era.era`).** Juang, J.N., Pappa, R.S.,
+  *An Eigensystem Realization Algorithm for Modal Parameter Identification and Model
+  Reduction*, Journal of Guidance, Control, and Dynamics, 8(5), 1985, pp. 620–627.
+  Minimal state-space realization from Markov parameters / impulse responses (or IRFs
+  obtained from FRFs), in the Ho–Kalman lineage — Ho, B.L., Kalman, R.E., *Effective
+  Construction of Linear State-Variable Models from Input/Output Functions*,
+  Regelungstechnik, 14(12), 1966, pp. 545–548: block-Hankel matrix, SVD into
+  observability/controllability factors, shift-invariance for `A`, then poles from
+  `eig(A)` and mode shapes through the output matrix `C`. Returns the same
+  `mpe.common.ModalParameterResult` container as LSCE (§6, Brown et al. 1979) and SSI
+  (§6, Van Overschee–De Moor 1996); stabilization over a model-order range reuses
+  `mpe.common.stabilization_diagram`. Acceptance per §9.5: synthetic 2-DOF data with
+  known truth — frequencies within one spectral line, shape MAC > 0.99 — with the
+  existing p-LSCF/SSI/LSCE goldens unchanged.
+* **Residual flexibility as a public FRF correction
+  (`dynamics.residuals.residual_flexibility`).** No new algorithm: the static
+  residual-flexibility / upper-residual machinery is already cited in §5 — MacNeal
+  (1971), Rubin (1975), and the residual-term treatment of Ewins, *Modal Testing*,
+  2nd ed., 2000. Round 10 freezes a public function returning the residual-flexibility
+  block (retained-mode content stripped) shaped for `modal_frf(..., upper_residual=...)`,
+  over the `residual_vectors` machinery merged in Round 1; the
+  `ResidualVectorResult.residual_flexibility` attribute is not renamed. This is the
+  compensation route the §10 truncated-FRF caveat already points to; the contractual
+  20-mode 5% statement of `docs/CONTRACT_API.md` itself is unchanged, as are the
+  Rubin 0.028% and 20-mode FRF goldens.
+* **SEREP-expanded MAC (`correlation.expansion.expanded_mac`).** A composition,
+  explicitly *not* a new correlation metric: `expand_serep` (§4, O'Callahan–Avitabile–
+  Riemer 1989) followed by `mac_matrix` (§1, Allemang–Brown 1982), with the numerics of
+  both wrapped functions byte-for-byte unchanged. The gate exploits the SEREP property
+  that expansion is exact at retained modes: expanding an FE mode set onto *itself*
+  through a master subset must return an identity MAC (diagonal 1, off-diagonal ~0) for
+  the retained modes.
+* **CTETRA10 kept + punch `$STRESSES` — text I/O only, no new algorithm.**
+  `io.bdf.read_bdf` maps a 10-node `CTETRA` to the new TET10 with all 10 node ids and
+  `write_bdf` emits it back; a 4-node CTETRA stays TET4, and **HEX20 still warns and
+  drops to HEX8** (§10). `io.pch.read_pch_stress` parses public punch `$STRESSES` /
+  `$ELEMENT STRESSES` text blocks (80-column punch, the same conventions as `read_pch`
+  and the §13 `$DISPLACEMENTS` static reader), skipping other block types the same
+  tolerant way; tests stub executables and never require a Nastran install. Everything
+  is publicly documented card/punch *text*, like every other femtools translator —
+  **still no OP2, no RST, no ODB** (§10 and the product map N/A rows stand).
 
 ## Non-infringement note
 

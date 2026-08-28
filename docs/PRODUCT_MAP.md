@@ -17,7 +17,11 @@ round) merged the APIs of `.agent_workspace/REMAINING.md` (Round 8 section) /
 retired, following the R4-wip → R4 / R7-wip → R7 precedent. Round 9 (Cycle C's third
 and closing round) merged the APIs of `.agent_workspace/REMAINING.md` (Round 9 section)
 / `ROUND9_BRIEF.md`; those rows are tagged **R9**. The transitional **R9-wip** tag is
-retired.
+retired. Round 10 (Cycle D's first round) is **in flight on this tree**: its API is
+frozen in `.agent_workspace/REMAINING.md` (Round 10 section) / `ROUND10_BRIEF.md`, and
+its rows below are tagged **R10-wip** until the parent glue confirms the merge, promotes
+exports, and retags R10-wip → R10 (the same transition every earlier `-wip` tag
+followed).
 
 | Status | Meaning |
 |---|---|
@@ -28,6 +32,7 @@ retired.
 | **R7** | Merged in Round 7 (Cycle C's first round; API frozen in the Cycle-C `.agent_workspace/REMAINING.md`); importable from the integration branch, covered by tests, and a stable lazy export at the `femtools` top level |
 | **R8** | Merged in Round 8 (Cycle C's second round; API frozen in the Cycle-C `.agent_workspace/REMAINING.md`); importable from the integration branch, covered by tests, and a stable lazy export at the `femtools` top level |
 | **R9** | Merged in Round 9 (Cycle C's close-out; API frozen in the Cycle-C `.agent_workspace/REMAINING.md`); importable from the integration branch, covered by tests, and a stable lazy export at the `femtools` top level |
+| **R10-wip** | Round-10 API frozen (`.agent_workspace/REMAINING.md` Round 10 section / `ROUND10_BRIEF.md`) and in flight on this tree; **not merged, no top-level export yet, no merged-tag claim** — parent glue retags to **R10** after merge |
 | **R5+** | Direction fixed, API not frozen in this cycle |
 | **N/A** | Out of scope (hardware, licensing, closed binary dumps) with substitute noted |
 
@@ -35,7 +40,8 @@ Known numerical/functional distances between merged (R1/R2/R4/R6/R7/R8/R9)
 code and the state of the art are tracked in `docs/SOTA.md` §10 "Merged-code gap" — a row
 tagged R1/R2/R4/R6/R7/R8/R9 means *merged and tested*, not *defect-free*. Round 2 closed the two
 largest §10 items (HEX8 shear locking, UNV material/property cards); the residual caveats
-remain listed there.
+remain listed there. The Round-10 (R10-wip) rows are referenced in `docs/SOTA.md` §14 —
+they are *absent until merged*, not merged-with-caveats.
 
 ## 1. FEMtools Framework
 
@@ -86,6 +92,9 @@ remain listed there.
 | FRF result persistence | `dynamics.frf.dump_frf` / `load_frf` — npz dump/load of `FRFResult`, analogous to the R7 `dump_cms`; `H` and `freq_hz` bit-identical after a load round trip; `modal_frf` numerics unchanged | R8 |
 | MPC composition (public contract) | `fea.mpc.apply_mpc` — the public composer of `model.rbe2` + `model.rbe3` into one `ConstraintTransform` (the function `assemble_km` already routes through); `apply_rbe2` / `apply_rbe3` stay thin wrappers, RBE2 kinematics and RBE3 weighted-average content unchanged, `mpc=False` still disables all MPCs. The symbol already imports on this tree — Round 9 freezes the contract and pins the composition gates (empty tables → identity/no-op, single-table calls bit-identical to `apply_rbe2` / `apply_rbe3`, an RBE2 hanging off an RBE3 reference keeps exactly 6 free–free rigid-body modes, overlapping dependent DOFs raise) | R9 |
 | PSD result persistence | `dynamics.random.dump_psd` / `load_psd` — npz dump/load of `PSDResult`, analogous to the R8 `dump_frf` and the R7 `dump_cms`; stored spectra and `freq_hz` bit-identical after a load round trip; `psd_response` / Miles / base-acceleration numerics unchanged | R9 |
+| Quadratic solid element (TET10) | `fea.elements.tet10` — 10-node quadratic tetrahedron (4 corners + 6 midsides), registered as etype `"TET10"` (aliases `CTETRA10`/`C3D10` where cheap); standard isoparametric formulation from the public textbooks (`docs/SOTA.md` §14) with 4-point tet quadrature for stiffness and consistent (or documented lumped) mass; the constant-strain patch stays exact (the quadratic basis contains the linear field) and a free-free TET10 keeps exactly 6 rigid-body modes; `recover_stress` / `recover_strain` cover it at the centroid (or averaged Gauss); HEX8 keeps its Wilson–Taylor incompatible-modes default (98.6% golden, no EAS-30) and `average_nodal` stays 1/n_adj | R10-wip |
+| Superconvergent patch recovery (ZZ-SPR) | `fea.recover.recover_spr` — Zienkiewicz–Zhu SPR (IJNME 1992, `docs/SOTA.md` §14): fit a linear polynomial over the patch of elements incident on each node, sampled at the superconvergent (Barlow — centroid for linear elements) points, and evaluate at the node; a constant-stress patch stays exact at every node; deliberately distinct from `average_nodal` (R8), which remains plain 1/n_adj averaging | R10-wip |
+| Residual-flexibility FRF correction (public function) | `dynamics.residuals.residual_flexibility` — returns the static residual-flexibility block (retained-mode content stripped; MacNeal / Ewins upper residual, `docs/SOTA.md` §5/§14) shaped for `modal_frf(..., upper_residual=...)`; the existing `ResidualVectorResult.residual_flexibility` attribute is not renamed. Gate: with few retained modes, adding the residual lowers relative L2 vs `direct_frf` compared with the same truncated `modal_frf` without it; the contractual 20-mode 5% FRF golden and Rubin 0.028% are unchanged | R10-wip |
 
 ## 3. FEMtools Pretest & Correlation
 
@@ -111,6 +120,7 @@ remain listed there.
 | Per-DOF MAC contribution diagnostics | `correlation.mac.mac_contribution` — DOF-wise contribution to a single MAC pair (same inputs as `mac_value`); the real-mode `mac_matrix` numerics are unchanged | R7 |
 | Mapped-shape mode matrix (FE rows at test grid) | `correlation.dofmap.mapped_mode_matrix` — pull FE mode-shape rows at the node ids returned by `map_nearest_nodes`, so FE↔test MAC runs on geometry-mapped DOFs instead of positional assumptions; gate: two translated copies of the same cube give a mapped-MAC diagonal of 1; `mac_matrix` real-mode numerics and `map_nearest_nodes` distances unchanged | R8 |
 | Mapped-MAC convenience | `correlation.dofmap.mapped_mac` — one-call wrap of `map_nearest_nodes` (R7) + `mapped_mode_matrix` (R8) + `mac_matrix` (R1); a convenience composition, **not** a new MAC formula. Gate: two translated copies of the same block give a mapped-MAC diagonal of 1; `mac_matrix` real-mode numerics and `map_nearest_nodes` distances unchanged | R9 |
+| SEREP-expanded MAC | `correlation.expansion.expanded_mac` — compose `expand_serep` (R4) + `mac_matrix` (R1); a composition, **not** a new MAC formula, and `expand_serep` / `expand_guyan` numerics are unchanged. Gate: expanding an FE mode set onto **itself** through a master subset yields an identity MAC (diagonal 1, off-diagonal ~0) for the retained modes | R10-wip |
 
 ## 4. FEMtools Model Updating
 
@@ -153,6 +163,7 @@ remain listed there.
 | MIMO FRF estimation from time data (H1/H2, coherence) | `mpe.frf_estimation.estimate_h1`, `estimate_h2`, `coherence` | R4 |
 | SSI (covariance-driven) | `mpe.ssi.ssi_cov` | R4 |
 | SSI (data-driven, N4SID-class) | `mpe.ssi.ssi_data` — past/future output Hankel projection, then the `ssi_cov` SVD + shift-invariance path; same result type as `ssi_cov` (Van Overschee–De Moor 1996) | R6 |
+| ERA (Eigensystem Realization Algorithm) | `mpe.era.era` — Juang–Pappa (1985, `docs/SOTA.md` §14) realization from Markov parameters / impulse responses (or IRFs from FRFs): block-Hankel SVD → observability/controllability factors → `(A, B, C)`, poles from `eig(A)`, shapes from the output matrix; returns the same `mpe.common.ModalParameterResult` container as LSCE/SSI (stabilization over a model-order range welcome, single-order path sufficient). Gate: synthetic 2-DOF frequencies within one spectral line `df` of truth, recovered-shape MAC > 0.99; the `poly_lscf` / `ssi_data` / `lsce` goldens are unchanged | R10-wip |
 
 ## 7. FEMtools RBPE (Rigid Body Property Extraction)
 
@@ -173,9 +184,11 @@ remain listed there.
 | Capability | femtools API | Status |
 |---|---|---|
 | Universal file (UNV) datasets 15/2411 (nodes), 2412 (elements), 82 (trace lines), 55 (shapes), 58 (FRFs/functions), 151/164 (header/units) | `io.unv.read_unv`, `write_unv` — materials/properties carried since R2 via private dataset 30000 (JSON; third-party readers skip it, SOTA.md §10) | R1 |
-| Nastran BDF subset (GRID, C\*, MAT1, PSHELL/PBAR/P\*, SPC, FORCE) | `io.bdf.read_bdf`, `write_bdf` — TET10/HEX20 midside nodes dropped with aggregated warnings (SOTA.md §10) | R1 |
+| Nastran BDF subset (GRID, C\*, MAT1, PSHELL/PBAR/P\*, SPC, FORCE) | `io.bdf.read_bdf`, `write_bdf` — TET10/HEX20 midside nodes dropped with aggregated warnings (SOTA.md §10; the TET10 half of that drop is closing in Round 10 — see the R10-wip CTETRA10 row below) | R1 |
 | BDF `INCLUDE` statements + `RBE2` cards | `io.bdf.read_bdf` — follows `INCLUDE` (relative paths, depth ≤ 8, cycle-safe) and parses `RBE2` into `FEModel.add_rbe2` (the `RBE3` card is the Round-8 row below); public card layouts only | R7 |
 | BDF `RBE3` card read/write | `io.bdf.read_bdf` parses `RBE3` into `FEModel.add_rbe3` (public card layout: refgrid / refc / wt, c, g lists); `write_bdf` emits it; unknown/unsupported fields collapse into one aggregated `UserWarning`; no copyrighted decks | R8 |
+| BDF 10-node CTETRA kept as TET10 (no midside drop) | `io.bdf.read_bdf` maps a 10-node `CTETRA` to `type="TET10"` with all 10 node ids (`core.model.ELEMENT_NODE_COUNTS["TET10"]` is already seeded on this tree); `write_bdf` emits the 10-node CTETRA back; a 4-node CTETRA stays TET4 and **HEX20 still warns + drops to HEX8** (one aggregated warning). Public card layouts only; the `docs/SOTA.md` §10 midside caveat closes for CTETRA10 when this merges (R10-wip until then) | R10-wip |
+| Nastran punch element stresses (text) | `io.pch.read_pch_stress` — parse public punch `$STRESSES` / `$ELEMENT STRESSES` text blocks (80-column punch, same conventions as `read_pch` and the R9 `$DISPLACEMENTS` static reader) into element ids + stress tensors; eigenvector / `$DISPLACEMENTS` blocks are skipped the same tolerant way; tests stub the executable and never require a Nastran install. **Text punch only — OP2 stays N/A** | R10-wip |
 | Native project file | `io.project` (`.ftproj`) | R1 |
 | Solver driver protocol (third-party results import) | `drivers.base.SolverDriver` (runtime-checkable PEP 544 Protocol — structural typing, no registration; `docs/ARCHITECTURE.md` §10) | R4 |
 | Nastran punch results (`.pch` text: eigenvalues, mode shapes) | `io.pch.read_pch`, `write_pch` | R4 |
@@ -205,7 +218,11 @@ remain listed there.
   `load_frf`, `mapped_mode_matrix`, `plot_stress`, and `update_from_static` (the
   `RBE3` data container was already a stable export). Round 9 added `apply_mpc`,
   `static_stress_response`, `mapped_mac`, and `dump_psd` / `load_psd` (SOL 101 is a
-  driver method, not a new top-level name). CI resolves every `__all__` entry.
+  driver method, not a new top-level name). CI resolves every `__all__` entry — which is
+  why the Round-10 frozen names (`tet10`, `recover_spr`, `read_pch_stress`, `era`,
+  `expanded_mac`, `residual_flexibility`) are **not** in `_EXPORTS`/`__all__` yet: the
+  dict stays at 143 stable names until the parent glue confirms the Round-10 merge and
+  promotes them, exactly as every earlier round was promoted.
 * Golden analytical acceptance tests with the tolerance table of `docs/CONTRACT_API.md`.
 * ruff + strict pytest (an empty collection fails CI since Round 2) on Python 3.11,
   plus a non-blocking mypy step (`.github/workflows/ci.yml`).

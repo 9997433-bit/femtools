@@ -39,7 +39,7 @@ femtools script analysis.fsl
 |--------|------------|
 | `core` | FE/test relational database (nodes, elements, materials, properties, SPCs, loads), node/element sets, units, coordinate systems, RBE2/RBE3 constraint containers |
 | `io` | Text translators only: UNV, Nastran BDF (incl. `INCLUDE`, RBE2/RBE3 cards), Nastran punch `.pch`, ANSYS CDB, Abaqus INP, LS-DYNA K subsets, `.ftproj` project files |
-| `fea` | Element library (bars, beams, flat shells, solids), sparse assembly, statics (incl. enforced displacement), Lanczos/ARPACK real and complex eigen, Guyan/IRS/SEREP reduction, stress/strain recovery + nodal averaging, RBE2/RBE3 multipoint-constraint transforms |
+| `fea` | Element library (bars, beams, flat shells, solids — a 10-node quadratic TET10 is Round-10 WIP, see `docs/PRODUCT_MAP.md`), sparse assembly, statics (incl. enforced displacement), Lanczos/ARPACK real and complex eigen, Guyan/IRS/SEREP reduction, stress/strain recovery + nodal averaging (ZZ-SPR recovery is Round-10 WIP), RBE2/RBE3 multipoint-constraint transforms |
 | `dynamics` | Modal/direct FRF (+ npz dump/load), harmonic ODS, transient, random/PSD response (force and base-acceleration input), Craig–Bampton and free-interface CMS (+ superelement dump/load), modal-/FRF-based assembly, SDM, modal energy diagnostics, synthetic test data |
 | `drivers` | `SolverDriver` protocol plus optional Nastran / ANSYS / Abaqus **text** drivers (BDF/CDB/INP in, punch/UNV text results out); closed binary results (OP2/RST/ODB) are out of scope by design |
 | `pretest` | Target modes, modal effective mass, EFI, MAC/kinetic-energy sensor ranking, exciter placement, candidate DOFs, sensor mass-loading checks |

@@ -39,6 +39,11 @@ Round-8 names (``apply_rbe3``, ``average_nodal``, ``AnsysCdbDriver``,
 ``update_from_static``, …) follow the same way.
 Round-9 names (``apply_mpc``, ``static_stress_response``, ``mapped_mac``,
 ``dump_psd``, ``load_psd``) close Cycle C the same way.
+Round 10 (Cycle D's first round) is **in progress**: its frozen names — ``tet10``,
+``recover_spr``, ``read_pch_stress``, ``era``, ``expanded_mac``,
+``residual_flexibility`` — are tagged *R10-wip* in ``docs/PRODUCT_MAP.md`` and are
+deliberately **not** exported here yet; parent glue promotes them into ``_EXPORTS``
+after the Round-10 merge.
 """
 
 from __future__ import annotations
