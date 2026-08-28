@@ -205,6 +205,8 @@ TET4: constant-strain tetrahedron; volume
 $V = \tfrac16 \lvert \det [x_2{-}x_1;\ x_3{-}x_1;\ x_4{-}x_1] \rvert$, constant $B$ (6×12),
 $K_e = V B^\top D B$, consistent mass $\frac{\rho V}{20}(1 + \delta_{ij})$ pattern per direction.
 Same locking caveats as CST, worse in 3D — meshing tool territory, not accuracy territory.
+The quadratic answer to those caveats, TET10, is the Round-10 element of §14; this section
+is the Round-1 linear library.
 
 MASS: concentrated $m$ (scalar → 3 translations) or full symmetric 6×6 including inertia and
 static-moment offsets — this is what `pretest` mass-loading studies attach. SPRING/DAMPER:
@@ -449,6 +451,9 @@ from femtools.fea.recover import recover_stress, recover_strain, StressResult
 # from a static displacement vector (solve_static) or one mode column.
 # Linear elastic only — no nonlinearity, no plasticity, no failure criteria.
 ```
+
+That element list is Round 7's. TET10 joined the dispatch table in Round 10 — see §14
+for the element, §15 for `recover_spr`, and `docs/SOTA.md` §14 for the SPR caveat.
 
 Recovery is *differentiate, then constitute*, evaluated per element at the centroid
 (or as the average over the element's Gauss points — same value for the constant-strain

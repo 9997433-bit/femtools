@@ -319,7 +319,8 @@ References are textbooks and journal/conference papers only.
   sampling at the reduced Gauss points: Barlow, J., *Optimal Stress Locations in Finite
   Element Models*, International Journal for Numerical Methods in Engineering, 10(2), 1976,
   pp. 243–251. femtools reports one stress/strain state per element at the centroid (or the
-  average of the Gauss-point values) for BAR2, BEAM2, QUAD4, TRIA3, HEX8, TET4 — linear
+  average of the Gauss-point values) for BAR2, BEAM2, QUAD4, TRIA3, HEX8, TET4 — the
+  Round-7 element list; TET10 joined it in Round 10, see §14 — linear
   elasticity only, no plasticity. Acceptance is a constant-strain patch test at 1e-12, in
   the spirit of MacNeal, R.H., Harder, R.L., *A Proposed Standard Set of Problems to Test
   Finite Element Accuracy*, Finite Elements in Analysis and Design, 1(1), 1985, pp. 3–20:

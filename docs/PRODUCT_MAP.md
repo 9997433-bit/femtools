@@ -19,7 +19,7 @@ and closing round) merged the APIs of `.agent_workspace/REMAINING.md` (Round 9 s
 / `ROUND9_BRIEF.md`; those rows are tagged **R9**. The transitional **R9-wip** tag is
 retired. Round 10 (Cycle D's first round) merged the APIs of
 `.agent_workspace/REMAINING.md` (Round 10 section) / `ROUND10_BRIEF.md`; those rows are
-tagged **R10**. The transitional **R10** tag is retired, following the R4-wip → R4 /
+tagged **R10**. The transitional **R10-wip** tag is retired, following the R4-wip → R4 /
 R7-wip → R7 / R9-wip → R9 precedent.
 
 | Status | Meaning |
@@ -32,7 +32,7 @@ R7-wip → R7 / R9-wip → R9 precedent.
 | **R8** | Merged in Round 8 (Cycle C's second round; API frozen in the Cycle-C `.agent_workspace/REMAINING.md`); importable from the integration branch, covered by tests, and a stable lazy export at the `femtools` top level |
 | **R9** | Merged in Round 9 (Cycle C's close-out; API frozen in the Cycle-C `.agent_workspace/REMAINING.md`); importable from the integration branch, covered by tests, and a stable lazy export at the `femtools` top level |
 | **R10** | Merged in Round 10 (Cycle D's first round; API frozen in the Cycle-D `.agent_workspace/REMAINING.md`); importable from the integration branch, covered by tests, and a stable lazy export at the `femtools` top level |
-| **R5+** | Direction fixed, API not frozen in this cycle |
+| **R5+** | *Retired after Round 6* — direction fixed, API not frozen in that cycle. Round 6 landed every R5+ row, so no row in this file carries the tag any more; it is kept here only to read the prose above and `docs/SOTA.md` §10 |
 | **N/A** | Out of scope (hardware, licensing, closed binary dumps) with substitute noted |
 
 Known numerical/functional distances between merged (R1/R2/R4/R6/R7/R8/R9/R10)
@@ -52,7 +52,7 @@ remain listed there. Round 10 closed the TET10 half of the BDF midside-drop cave
 | Unit system handling | `core.units.UnitSystem` (SI internal, convert at I/O) | R1 |
 | Project persistence | `io.project.save_project` / `load_project` (`.ftproj` JSON+npz) | R1 |
 | Scripting language (FEMtools Script analog) | `script.engine.ScriptEngine` — command interpreter over the Python API | R1 |
-| Command-line surface | `cli` typer app: `solve-modes`, `mac`, `frf`, `update`, `pretest`, `script`, `report-mac`, `reduce`, `estimate-frf`, `read-mesh`, `recover-stress`, `write-mesh`, `plot-stress`, `dump-frf`, `load-frf`, `update-static` | R1 |
+| Command-line surface | `cli` typer app: `solve-modes`, `mac`, `frf`, `update`, `pretest`, `script`, `report-mac`, `reduce`, `estimate-frf`, `read-mesh`, `recover-stress`, `write-mesh`, `plot-stress`, `dump-frf`, `load-frf`, `update-static`, `gui` (launches the GUI-shell row below) — 17 of the **22** typer commands; the other 5 are the Round-10 row below | R1 |
 | Python API | every package below; frozen contract re-exported from `femtools` top level | R1 |
 | GUI shell | `gui` web shell (`gui.server` on stdlib http, FastAPI optional); model upload / preloaded examples via `/api/load` landed R2 | R1 |
 | Mesh/geometry visualization | `viz.plots` (matplotlib default; optional `backend="plotly"` if plotly is installed); optional pyvista `plot_mesh3d` is the Round-7 row below | R1 |
@@ -60,7 +60,7 @@ remain listed there. Round 10 closed the TET10 half of the BDF midside-drop cave
 | Stress-field visualization (plot + CLI/script/GUI surface) | `viz.plots.plot_stress` — color the mesh by `StressResult` von Mises (or a named component); matplotlib default, pyvista only via the existing `plot_mesh3d` path (`import femtools.viz` still never requires pyvista). Lands together with the CLI `plot-stress` command (lazy-fails like `recover-stress` when kernels are missing), the script `RECOVER STRESS` / `ADD RBE2` / `ADD RBE3` verbs, and a GUI stress-table endpoint over `recover_stress` | R8 |
 | CLI FRF persistence + static-updating commands | `cli` `dump-frf` / `load-frf` (over the R8 `dump_frf`/`load_frf`, lazy-failing like `recover-stress` when the kernel is missing) and `update-static` (wrapping the R8 `update_from_static`); the script `UPDATE STATIC` verb alongside — existing `SOLVE STATIC` / `SET` / `RECOVER STRESS` / `ADD RBE2` / `ADD RBE3` unchanged | R9 |
 | GUI stress table | the GUI HTML page (`gui.page`) **displays** the existing `GET /api/stress` endpoint (von Mises / component table over `recover_stress`) after a static solve; 400 handling for missing prerequisites kept; `import femtools.viz` still never requires pyvista | R9 |
-| CLI PSD / ERA / SPR / expanded-MAC | `cli` `dump-psd` / `load-psd` / `era` / `recover-spr` / `expanded-mac` (lazy-fail exit 3 when the kernel is missing), matching script verbs, and a GUI SPR table over `GET /api/spr` | R10 |
+| CLI PSD / ERA / SPR / expanded-MAC | `cli` `dump-psd` / `load-psd` / `era` / `recover-spr` / `expanded-mac` (lazy-fail exit 3 when the kernel is missing), matching script verbs, and a GUI SPR table over `GET /api/spr`; these 5 complete the 22-command typer app | R10 |
 | Mesh generation / import CAD | not planned — import meshes via UNV/BDF | N/A |
 
 ## 2. FEMtools Dynamics
@@ -69,7 +69,7 @@ remain listed there. Round 10 closed the TET10 half of the BDF midside-drop cave
 |---|---|---|
 | Real normal modes (FEA) | `fea.eigen.solve_modes` → `ModalResult` (mass-normalized) | R1 |
 | Static solution | `fea.static.solve_static` | R1 |
-| Element library (BAR2, BEAM2, TRUSS2D, QUAD4, TRIA3, HEX8, TET4, MASS, SPRING, DAMPER) | `fea.elements` registry, `fea.assemble.assemble_km` — HEX8 uses Wilson–Taylor incompatible modes since R2 (98.6% reference tip deflection single-layer; residual caveats SOTA.md §10). Flat shells use per-node rotational frames so drilling can be auto-constrained at any orientation (Round 6) | R1 |
+| Element library (BAR2, BEAM2, TRUSS2D, QUAD4, TRIA3, HEX8, TET4, MASS, SPRING, DAMPER) | `fea.elements` registry, `fea.assemble.assemble_km` — HEX8 uses Wilson–Taylor incompatible modes since R2 (98.6% reference tip deflection single-layer; residual caveats SOTA.md §10). Flat shells use per-node rotational frames so drilling can be auto-constrained at any orientation (Round 6). The quadratic solid TET10 is the Round-10 row below (`docs/SOTA.md` §14); this row is the Round-1 linear library | R1 |
 | Modal FRF synthesis (with damping models) | `dynamics.frf.modal_frf` (modal ζ, Rayleigh, structural η); truncation-aware `retained_band` helper and `dynamics.damping` specs landed R2 | R1 |
 | Residual flexibility / residual vectors | `dynamics.residuals.residual_vectors`; upper/lower residual terms in `modal_frf` | R1 |
 | Direct (full-order) FRF | `dynamics.frf.direct_frf` (dynamic stiffness inversion) | R1 |
@@ -83,7 +83,7 @@ remain listed there. Round 10 closed the TET10 half of the BDF midside-drop cave
 | Complex modes (general viscous damping) | `fea.eigen.solve_complex_modes` → `ComplexModalResult` (state-space / quadratic eigenvalue) | R4 |
 | Random/PSD response | `dynamics.random.psd_response` → `PSDResult` (modal PSD; rms and 1σ) | R4 |
 | Modal strain / kinetic energy diagnostics | `dynamics.energy.modal_strain_energy` / `modal_kinetic_energy` — per-mode (optional per-element) MSE/MKE from assembled K, M and mass-normalized Φ | R6 |
-| Stress/strain recovery | `fea.recover.recover_stress` / `recover_strain` → `StressResult` — element-centroid (averaged-Gauss) stress/strain for BAR2, BEAM2, QUAD4, TRIA3, HEX8, TET4 from a displacement solution; linear elastic only, constant-strain patch test to 1e-12 (`docs/SOTA.md` §11); nodal averaging is the Round-8 row below | R7 |
+| Stress/strain recovery | `fea.recover.recover_stress` / `recover_strain` → `StressResult` — element-centroid (averaged-Gauss) stress/strain for BAR2, BEAM2, QUAD4, TRIA3, HEX8, TET4 from a displacement solution; linear elastic only, constant-strain patch test to 1e-12 (`docs/SOTA.md` §11); nodal averaging is the Round-8 row below, and TET10 recovery is the Round-10 row below (`docs/SOTA.md` §14) | R7 |
 | Rigid constraints (RBE2 / MPC reduction) | data container is merged: `core.model.RBE2` / `FEModel.add_rbe2` (stable top-level `RBE2` export, shared with the BDF `RBE2` card); the Round-7 work is the constraint transform `fea.mpc.apply_rbe2` / `ConstraintTransform` and `assemble_km` honoring `model.rbe2` (or an explicit `mpc=`) by null-space reduction `u = T q` (`docs/ARCHITECTURE.md` §5, `docs/SOTA.md` §11); interpolation (RBE3) constraints are the Round-8 row below | R7 |
 | Base-acceleration random response | `dynamics.random.psd_response(..., base_accel=)` — enforced base-acceleration PSD input, SDOF RMS checked against the closed form / Miles equation (the force-PSD path of the R4 row above is unchanged) | R7 |
 | CMS superelement persistence | `dynamics.superelement.dump_cms` / `load_cms` — npz dump/load of Craig–Bampton (and Rubin, where the result carries K, M, T) reduced matrices and boundary ids; K/M bit-identical after a load round trip | R7 |
@@ -207,7 +207,7 @@ remain listed there. Round 10 closed the TET10 half of the BDF midside-drop cave
 * Typed public API (`py.typed` marker ships in the wheel since R2), pydantic-validated core.
 * Frozen contract (`docs/CONTRACT_API.md`), the frozen Round-4 API
   (`.agent_workspace/REMAINING.md`), and the `femtools.core.errors` exception hierarchy
-  re-exported lazily from `femtools` (`src/femtools/__init__.py`, 143 stable names +
+  re-exported lazily from `femtools` (`src/femtools/__init__.py`, 149 stable names +
   15 subpackages), so `import femtools` is cheap and cycle-free — no numpy/scipy/pydantic
   at import time. Round-4 names were promoted to stable exports in Round 5; Round 6 added
   the remaining R5+ names (`read_inp`, `shape_optimize`, `ssi_data`, `nmd`, …) the same way.
@@ -218,11 +218,10 @@ remain listed there. Round 10 closed the TET10 half of the BDF midside-drop cave
   `load_frf`, `mapped_mode_matrix`, `plot_stress`, and `update_from_static` (the
   `RBE3` data container was already a stable export). Round 9 added `apply_mpc`,
   `static_stress_response`, `mapped_mac`, and `dump_psd` / `load_psd` (SOL 101 is a
-  driver method, not a new top-level name). CI resolves every `__all__` entry — which is
-  why the Round-10 frozen names (`tet10`, `recover_spr`, `read_pch_stress`, `era`,
-  `expanded_mac`, `residual_flexibility`) are **not** in `_EXPORTS`/`__all__` yet: the
-  dict stays at 143 stable names until the parent glue confirms the Round-10 merge and
-  promotes them, exactly as every earlier round was promoted.
+  driver method, not a new top-level name). Round 10 added `tet10`, `recover_spr`,
+  `read_pch_stress`, `era`, `expanded_mac`, and `residual_flexibility` once those modules
+  merged, taking the dict from 143 to its current 149 stable names. CI resolves every
+  `__all__` entry, so the count is checked, not asserted.
 * Golden analytical acceptance tests with the tolerance table of `docs/CONTRACT_API.md`.
 * ruff + strict pytest (an empty collection fails CI since Round 2) on Python 3.11,
   plus a non-blocking mypy step (`.github/workflows/ci.yml`).
