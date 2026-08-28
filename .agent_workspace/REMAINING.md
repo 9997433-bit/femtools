@@ -4,6 +4,9 @@ Continue the original 1:1 functional equivalent of FEMtools. **Do not** implemen
 
 Round 10 freezes the APIs below. Existing `docs/CONTRACT_API.md` still holds; do not break it. Goldens (HEX8 98.6%, Rubin 0.028%, H1/H2=γ², 6 RBM on tilted shells, displacement-driven 10% E ~1e-9) must stay.
 
+**Round 10 landed** on `cursor/femtools-cycle-d-d551` (PR #4). The names below import and are
+stable top-level exports. HEX20 still drops; DAQ / OP2 / RST / ODB remain N/A.
+
 ## Round 10 frozen APIs
 
 Round 10 opens Cycle D: quadratic tetrahedron, Zienkiewicz–Zhu SPR, CTETRA10 text I/O, punch `$STRESSES`, Juang–Pappa ERA, residual flexibility as a public FRF correction, and SEREP-expanded MAC. Do not reopen N/A rows. Do not implement EAS-30.

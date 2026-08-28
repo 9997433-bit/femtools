@@ -1,5 +1,18 @@
 # Round 10 任务简报（Cycle D 第一轮）
 
+## Close-out
+
+All ten Round-10 agents delivered. Kernels and tests are merged on
+`cursor/femtools-cycle-d-d551`. Parent glue: top-level `_EXPORTS` (149 names:
+143 + `tet10`, `recover_spr`, `read_pch_stress`, `era`, `expanded_mac`,
+`residual_flexibility`), PRODUCT_MAP R10-wip → R10, ACCEPTANCE Round-10 rows
+measured. Goldens unchanged (HEX8 98.6%, Rubin 0.028%, H1/H2=γ², tilted-shell
+6 RBM, 10% E recovery). DAQ / OP2 / RST / ODB remain N/A. HEX20 still drops.
+
+The per-agent briefs below are historical.
+
+---
+
 Base: `cursor/femtools-cycle-d-d551` from `origin/main` @ Round 9 close
 (`f30108d`, `_EXPORTS` 143, pytest 481/3, 13/13 examples).
 Do not regress goldens (HEX8 98.6%, Rubin 0.028%, H1/H2=γ², tilted-shell 6 RBM,

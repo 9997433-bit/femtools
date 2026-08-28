@@ -255,11 +255,10 @@ implementations; `docs/ACCEPTANCE.md` (owned by R1-F3) elaborates the golden cas
 ## 10. Merged-code gap (Round-2 closure and residual distances)
 
 Known distances between the merged code and the state of the art it targets. Status tags in
-`docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4/R6/R7/R8/R9 is merged and tested but may still carry
+`docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4/R6/R7/R8/R9/R10 is merged and tested but may still carry
 one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+
 and N/A rows of the product map, not repeated here. Round 9 close-out promotions are
-covered in §13; the Round-10 (Cycle D, in flight) work — R10-wip rows of the product
-map, absent until merged rather than merged-with-caveats — is covered in §14.
+covered in §13; Round 10 (Cycle D opening) is covered in §14.
 
 ### Closed in Round 2
 
@@ -293,12 +292,9 @@ map, absent until merged rather than merged-with-caveats — is covered in §14.
 * **UNV materials are invisible to third parties.** Dataset 30000 is femtools-private by
   design; external UFF readers skip it, so materials/properties still do not transfer to
   other tools via UNV (BDF and `.ftproj` remain the lossless routes).
-* **BDF midside nodes.** TET10/HEX20 import still collapses to TET4/HEX8 (midside nodes
-  dropped, one aggregated warning per card type). The TET10 half is **closing in
-  Round 10** (R10-wip, §14): once the Round-10 TET10 element and CTETRA10 I/O merge, a
-  10-node CTETRA keeps all 10 nodes as a first-class TET10 — until that merge is
-  confirmed this caveat stands as written, and the **HEX20 → HEX8 drop remains** either
-  way (no 20-node hexahedron is planned for Round 10).
+* **BDF midside nodes.** HEX20 import still collapses to HEX8 (midside nodes
+  dropped, one aggregated warning per card type). **TET10 is first-class since
+  Round 10** (§14): a 10-node CTETRA keeps all 10 nodes as etype `TET10`.
 * **DAQ: hardware acquisition is N/A by design** (hardware and vendor-licensing scope, not an
   algorithmic gap). The supported substitute is synthetic test data with controlled noise and
   fixed seeds — `femtools.dynamics.synthetic` and `femtools.mpe.synthetic` — which is what the
@@ -462,13 +458,12 @@ in §1–§12, so no new citations are required.
   over the existing `/api/stress` endpoint are surfaces over already-cited machinery;
   no algorithmic content, and `import femtools.viz` still never requires pyvista.
 
-## 14. Round 10 — Cycle D opening (in flight): TET10, ZZ-SPR, ERA, residual flexibility, expanded MAC, CTETRA10 / punch stresses
+## 14. Round 10 — Cycle D opening: TET10, ZZ-SPR, ERA, residual flexibility, expanded MAC, CTETRA10 / punch stresses
 
 Round 10 opens Cycle D. Its API is frozen in `.agent_workspace/REMAINING.md` (Round 10
 section) / `ROUND10_BRIEF.md`, and every Round-10 row in `docs/PRODUCT_MAP.md` is tagged
-**R10-wip** — frozen and in flight, *not merged*; nothing in this section claims merged
-status. References are public journal papers and textbooks only, as everywhere else in
-this document.
+**R10** — merged, tested, and a stable top-level export. References are public journal
+papers and textbooks only, as everywhere else in this document.
 
 * **TET10 — 10-node quadratic tetrahedron (`fea.elements.tet10`, etype `"TET10"`).**
   Standard isoparametric quadratic tet (4 corner + 6 midside nodes) from the public

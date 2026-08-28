@@ -39,11 +39,8 @@ Round-8 names (``apply_rbe3``, ``average_nodal``, ``AnsysCdbDriver``,
 ``update_from_static``, …) follow the same way.
 Round-9 names (``apply_mpc``, ``static_stress_response``, ``mapped_mac``,
 ``dump_psd``, ``load_psd``) close Cycle C the same way.
-Round 10 (Cycle D's first round) is **in progress**: its frozen names — ``tet10``,
-``recover_spr``, ``read_pch_stress``, ``era``, ``expanded_mac``,
-``residual_flexibility`` — are tagged *R10-wip* in ``docs/PRODUCT_MAP.md`` and are
-deliberately **not** exported here yet; parent glue promotes them into ``_EXPORTS``
-after the Round-10 merge.
+Round-10 names (``tet10``, ``recover_spr``, ``read_pch_stress``, ``era``,
+``expanded_mac``, ``residual_flexibility``) open Cycle D the same way.
 """
 
 from __future__ import annotations
@@ -54,8 +51,8 @@ from typing import TYPE_CHECKING
 __version__ = "0.1.0"
 
 # Top-level name -> defining module (contract API of docs/CONTRACT_API.md, the frozen
-# Round-4 / Round-6 / Round-7 / Round-8 / Round-9 APIs of .agent_workspace/REMAINING.md —
-# docs/PRODUCT_MAP.md tags R4 / R6 / R7 / R8 / R9 — plus the exception hierarchy promised
+# Round-4 / Round-6 / Round-7 / Round-8 / Round-9 / Round-10 APIs of .agent_workspace/REMAINING.md —
+# docs/PRODUCT_MAP.md tags R4 / R6 / R7 / R8 / R9 / R10 — plus the exception hierarchy promised
 # at package root by docs/ARCHITECTURE.md §9).
 _EXPORTS: dict[str, str] = {
     # error hierarchy
@@ -89,6 +86,7 @@ _EXPORTS: dict[str, str] = {
     "read_bdf": "femtools.io.bdf",
     "write_bdf": "femtools.io.bdf",
     "read_pch": "femtools.io.pch",
+    "read_pch_stress": "femtools.io.pch",
     "write_pch": "femtools.io.pch",
     "read_cdb": "femtools.io.cdb",
     "write_cdb": "femtools.io.cdb",
@@ -125,6 +123,8 @@ _EXPORTS: dict[str, str] = {
     "apply_mpc": "femtools.fea.mpc",
     "ConstraintTransform": "femtools.fea.mpc",
     "average_nodal": "femtools.fea.recover",
+    "recover_spr": "femtools.fea.recover",
+    "tet10": "femtools.fea.elements",
     # dynamics
     "modal_frf": "femtools.dynamics.frf",
     "direct_frf": "femtools.dynamics.frf",
@@ -147,6 +147,7 @@ _EXPORTS: dict[str, str] = {
     "modal_kinetic_energy": "femtools.dynamics.energy",
     "time_history": "femtools.dynamics.time_domain",
     "residual_vectors": "femtools.dynamics.residuals",
+    "residual_flexibility": "femtools.dynamics.residuals",
     # correlation
     "mac_matrix": "femtools.correlation.mac",
     "comac": "femtools.correlation.mac",
@@ -165,6 +166,7 @@ _EXPORTS: dict[str, str] = {
     "cross_orthogonality": "femtools.correlation.orthogonality",
     "expand_guyan": "femtools.correlation.expansion",
     "expand_serep": "femtools.correlation.expansion",
+    "expanded_mac": "femtools.correlation.expansion",
     "align_geometry": "femtools.correlation.alignment",
     # pretest
     "effective_mass": "femtools.pretest.target_modes",
@@ -204,6 +206,7 @@ _EXPORTS: dict[str, str] = {
     "fdd": "femtools.mpe.fdd",
     "efdd": "femtools.mpe.fdd",
     "lsce": "femtools.mpe.lsce",
+    "era": "femtools.mpe.era",
     "estimate_h1": "femtools.mpe.frf_estimation",
     "estimate_h2": "femtools.mpe.frf_estimation",
     "coherence": "femtools.mpe.frf_estimation",
@@ -329,6 +332,9 @@ if TYPE_CHECKING:
     from femtools.correlation.expansion import (
         expand_serep as expand_serep,
     )
+    from femtools.correlation.expansion import (
+        expanded_mac as expanded_mac,
+    )
     from femtools.correlation.frf_corr import csac as csac
     from femtools.correlation.frf_corr import csf as csf
     from femtools.correlation.frf_corr import frac as frac
@@ -390,6 +396,7 @@ if TYPE_CHECKING:
     from femtools.dynamics.random import (
         psd_response as psd_response,
     )
+    from femtools.dynamics.residuals import residual_flexibility as residual_flexibility
     from femtools.dynamics.residuals import residual_vectors as residual_vectors
     from femtools.dynamics.superelement import dump_cms as dump_cms
     from femtools.dynamics.superelement import load_cms as load_cms
@@ -409,12 +416,14 @@ if TYPE_CHECKING:
         solve_modes as solve_modes,
     )
     from femtools.fea.elements import available_elements as available_elements
+    from femtools.fea.elements import tet10 as tet10
     from femtools.fea.mpc import ConstraintTransform as ConstraintTransform
     from femtools.fea.mpc import apply_mpc as apply_mpc
     from femtools.fea.mpc import apply_rbe2 as apply_rbe2
     from femtools.fea.mpc import apply_rbe3 as apply_rbe3
     from femtools.fea.recover import StressResult as StressResult
     from femtools.fea.recover import average_nodal as average_nodal
+    from femtools.fea.recover import recover_spr as recover_spr
     from femtools.fea.recover import recover_strain as recover_strain
     from femtools.fea.recover import recover_stress as recover_stress
     from femtools.fea.reduction import (
@@ -440,6 +449,7 @@ if TYPE_CHECKING:
     from femtools.io.kfile import read_k as read_k
     from femtools.io.kfile import write_k as write_k
     from femtools.io.pch import read_pch as read_pch
+    from femtools.io.pch import read_pch_stress as read_pch_stress
     from femtools.io.pch import write_pch as write_pch
     from femtools.io.project import load_project as load_project
     from femtools.io.project import save_project as save_project
@@ -456,6 +466,7 @@ if TYPE_CHECKING:
     from femtools.mpe.frf_estimation import (
         estimate_h2 as estimate_h2,
     )
+    from femtools.mpe.era import era as era
     from femtools.mpe.lsce import lsce as lsce
     from femtools.mpe.p_lscf import poly_lscf as poly_lscf
     from femtools.mpe.ssi import ssi_cov as ssi_cov

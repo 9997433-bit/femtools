@@ -642,7 +642,7 @@ solids
     _assert_assembles(m)
 
 
-def test_k_tet10_two_line_drops_midsides(tmp_path: Path) -> None:
+def test_k_tet10_two_line_keeps_midsides(tmp_path: Path) -> None:
     deck = """\
 *KEYWORD
 *NODE
@@ -673,8 +673,9 @@ tets
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         m = read_k(p)
-    assert m.elements[1].type == "TET4" and m.elements[1].nodes == (1, 2, 3, 4)
-    assert any("TET10 -> TET4" in str(w.message) for w in caught)
+    assert m.elements[1].type == "TET10"
+    assert m.elements[1].nodes == (1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+    assert not any("TET10 -> TET4" in str(w.message) for w in caught)
 
 
 def test_k_unknown_keywords_warn_once(tmp_path: Path) -> None:

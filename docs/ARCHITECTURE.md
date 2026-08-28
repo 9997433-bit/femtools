@@ -38,7 +38,7 @@ Layer 2  fea          element library, DOF management, sparse K/M/C assembly, st
                       eigensolver (ARPACK), complex modes, reduction (Guyan/IRS/SEREP),
                       stress recovery + RBE2 constraint transform (Round 7); RBE3
                       interpolation transform + nodal stress averaging (Round 8);
-                      TET10 quadratic tet + ZZ-SPR nodal recovery (Round 10, in flight)
+                      TET10 quadratic tet + ZZ-SPR nodal recovery (Round 10)
 Layer 3  dynamics     modal & direct FRF, harmonic response, time integration,
                       Craig–Bampton CMS, modal-based assembly, residual vectors
 Layer 4  correlation  MAC/CoMAC/POC, cross-orthogonality, FRF correlation, mode pairing
@@ -169,7 +169,7 @@ code never branches on data origin.
    DOFs it connects). Kernels are closed-form where available (BAR2, BEAM2 Euler–Bernoulli,
    TRUSS2D, MASS, SPRING, DAMPER) and Gauss-quadrature isoparametric otherwise
    (TRIA3, QUAD4, TET4, HEX8). Consistent mass is the default; lumped mass is an option.
-   Round 10 (in flight — `docs/PRODUCT_MAP.md` R10-wip) adds the 10-node quadratic
+   Round 10 (`docs/PRODUCT_MAP.md` R10) adds the 10-node quadratic
    tetrahedron TET10 through the same registry and isoparametric machinery (4-point tet
    quadrature; constant-strain patch exact; `docs/SOTA.md` §14), with the HEX8
    Wilson–Taylor default untouched.
@@ -215,7 +215,7 @@ ever formed by the framework (dense paths are allowed inside tests and for n < ~
   (PRODUCT_MAP R8) adds `fea.recover.average_nodal`: the centroid
   `StressResult` averaged onto incident nodes with `1/n_adj` weights — plain nodal
   averaging, deliberately not Zienkiewicz–Zhu SPR — exact at every node on a
-  constant-stress patch. Round 10 (in flight — PRODUCT_MAP R10-wip) adds
+  constant-stress patch. Round 10 (PRODUCT_MAP R10) adds
   `fea.recover.recover_spr`, the actual Zienkiewicz–Zhu superconvergent patch recovery:
   a linear polynomial fitted per nodal patch to the Barlow-point (centroid) samples and
   evaluated at the node, exact on a constant-stress patch at every node; `average_nodal`

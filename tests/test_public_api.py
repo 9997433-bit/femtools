@@ -65,6 +65,12 @@ PUBLIC_API = {
     "validate_model",
     "write_bdf",
     "write_unv",
+    "tet10",
+    "recover_spr",
+    "read_pch_stress",
+    "era",
+    "expanded_mac",
+    "residual_flexibility",
 }
 
 
