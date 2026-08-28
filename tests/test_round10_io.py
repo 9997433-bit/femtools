@@ -187,9 +187,7 @@ def test_bdf_hex20_warning_is_aggregated(tmp_path: Path) -> None:
 
 
 def test_k_ten_node_solid_is_tet10(tmp_path: Path) -> None:
-    node_rows = "\n".join(
-        f"{i + 1}, {x}, {y}, {z}" for i, (x, y, z) in enumerate(TET10_XYZ)
-    )
+    node_rows = "\n".join(f"{i + 1}, {x}, {y}, {z}" for i, (x, y, z) in enumerate(TET10_XYZ))
     deck = f"""\
 *KEYWORD
 *NODE
@@ -408,7 +406,9 @@ def test_pch_stress_more_than_six_values_warns_and_truncates(tmp_path: Path) -> 
     bodies = [
         "$STRESSES",
         f"$SUBCASE ID = {1:11d}",
-        f"{7:>10d}{'':8s}" + "".join(f"{float(k):9.1E}" for k in range(1, 8)),  # 7 values
+        # 8 values over two lines: a type-specific layout femtools does not decode
+        f"{7:>10d}{'':8s}" + "".join(f"{float(k):12.1E}" for k in range(1, 5)),
+        f"{'-CONT-':<18s}" + "".join(f"{float(k):12.1E}" for k in range(5, 9)),
     ]
     path = tmp_path / "wide.pch"
     path.write_text(_seq(bodies), encoding="utf-8")
