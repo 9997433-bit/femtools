@@ -13,9 +13,12 @@ keyword                 cards (standard fixed-width or comma free format)
                         tc/rc constraint codes 1-7 become SPCs
 ``*ELEMENT_SOLID``      ``eid pid n1..n8`` (10I8); the documented
                         two-line form (``eid pid`` / ``n1..n10``) is
-                        also read.  ANSYS-style degeneracy collapse:
-                        8 unique corners -> HEX8, 4 -> TET4; tet10
-                        midside nodes are dropped with a warning;
+                        also read.  A complete ten-node record (10
+                        distinct nodes: 4 corners + 6 midsides) is a
+                        first-class TET10 since Round 10.  ANSYS-style
+                        degeneracy collapse otherwise: 8 unique corners
+                        -> HEX8, 4 -> TET4 (degenerate ten-node records
+                        drop their midsides with a warning);
                         wedges/pyramids are skipped with a warning
 ``*ELEMENT_SHELL``      ``eid pid n1..n4 [n5..n8]`` (10I8); ``n4`` blank
                         or duplicated -> TRIA3; midside nodes n5..n8 of
@@ -40,7 +43,7 @@ keyword                 cards (standard fixed-width or comma free format)
 ======================  =====================================================
 
 Element type mapping (LS-DYNA -> femtools): ``*ELEMENT_SOLID`` ->
-HEX8/TET4, ``*ELEMENT_SHELL`` -> QUAD4/TRIA3, ``*ELEMENT_BEAM`` ->
+HEX8/TET4/TET10, ``*ELEMENT_SHELL`` -> QUAD4/TRIA3, ``*ELEMENT_BEAM`` ->
 BEAM2 (BAR2 when its section has ELFORM 3).  Beam section inertias map
 as ``Iss -> Iy``, ``Itt -> Iz`` with the orientation node providing the
 femtools ``orientation`` vector (local x-y plane).
@@ -61,7 +64,8 @@ is the caller's responsibility.
 :func:`write_k` (Round 7) emits the same subset in comma free format
 (full double precision; the reader accepts it on every card):
 ``*TITLE`` = model name, ``*NODE``, ``*ELEMENT_SOLID`` (TET4 with the
-last corner repeated to 8), ``*ELEMENT_SHELL`` (TRIA3 with n3 repeated),
+last corner repeated to 8; TET10 in the documented two-line ten-node
+form), ``*ELEMENT_SHELL`` (TRIA3 with n3 repeated),
 ``*ELEMENT_BEAM`` (orientation vectors become extra third nodes appended
 after the real nodes), ``*MAT_ELASTIC``/``_TITLE``, one ``*SECTION_*`` +
 ``*PART`` pair per femtools property (secid = part id = property id;
@@ -553,7 +557,11 @@ def read_k(path: str | Path) -> FEModel:
         _check_part(eid, pid, ("solid",), "*ELEMENT_SOLID", lineno)
         nonzero = [n for n in conn if n]
         if ten_node and len(nonzero) == 10:
-            midside_drops.setdefault("*ELEMENT_SOLID (TET10 -> TET4)", []).append(eid)
+            unique = list(dict.fromkeys(nonzero))
+            if len(unique) == 10:  # complete ten-node tet: first-class TET10
+                model.add_element(id=eid, type="TET10", nodes=unique, property_id=pid)
+                continue
+            midside_drops.setdefault("*ELEMENT_SOLID (degenerate TET10 -> TET4)", []).append(eid)
             unique = list(dict.fromkeys(nonzero[:4]))
         else:
             unique = list(dict.fromkeys(nonzero))
@@ -687,7 +695,11 @@ def write_k(path: str | Path | FEModel, model: FEModel | str | Path | None = Non
         if el.type in ("MASS", "SPRING", "DAMPER"):
             dropped_lumped_elems[el.type] = dropped_lumped_elems.get(el.type, 0) + 1
             continue
-        if el.type in ("HEX8", "TET4"):
+        if el.type == "TET10":
+            # documented two-line form: "eid, pid" then the 10 nodes
+            solid_rows.append(f"{eid}, {pid}")
+            solid_rows.append(", ".join(str(n) for n in el.nodes))
+        elif el.type in ("HEX8", "TET4"):
             conn = list(el.nodes)
             conn += [conn[-1]] * (8 - len(conn))  # TET4: repeat the last corner
             solid_rows.append(f"{eid}, {pid}, " + ", ".join(str(n) for n in conn))

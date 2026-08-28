@@ -40,6 +40,7 @@ Abaqus TYPE        femtools  notes
 =================  ========  =============================================
 C3D8, C3D8R/I      HEX8
 C3D4               TET4
+C3D10, C3D10M      TET10     all 10 nodes kept (Round 10)
 S4, S4R            QUAD4
 S3, S3R            TRIA3
 B31                BEAM2     orientation = section local 1-axis (n1)
@@ -203,6 +204,8 @@ _ELEMENT_TYPES: dict[str, tuple[str, int]] = {
     "C3D8R": ("HEX8", 8),
     "C3D8I": ("HEX8", 8),
     "C3D4": ("TET4", 4),
+    "C3D10": ("TET10", 10),
+    "C3D10M": ("TET10", 10),
     "S4": ("QUAD4", 4),
     "S4R": ("QUAD4", 4),
     "S3": ("TRIA3", 3),
@@ -559,7 +562,7 @@ def read_inp(path: str | Path) -> FEModel:
                 # For trusses the *SOLID SECTION data line holds the area.
                 area = _f(rows[0][0], block.line, "*SOLID SECTION area") if rows else 1.0
                 model.add_property(id=pid, type="bar", material_id=_material_id(sec), A=area)
-            elif member_types <= {"HEX8", "TET4"}:
+            elif member_types <= {"HEX8", "TET4", "TET10"}:
                 model.add_property(id=pid, type="solid", material_id=_material_id(sec))
             else:
                 raise InpError(
@@ -766,6 +769,7 @@ def read_inp(path: str | Path) -> FEModel:
 _WRITE_TYPES: dict[str, str] = {
     "HEX8": "C3D8",
     "TET4": "C3D4",
+    "TET10": "C3D10",
     "QUAD4": "S4",
     "TRIA3": "S3",
     "BEAM2": "B31",

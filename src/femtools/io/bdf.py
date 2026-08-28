@@ -4,10 +4,14 @@ Supported cards (Round 1 subset, extended in Round 7):
 
 * geometry: ``GRID`` (CP/CD/PS honoured), ``CORD2R``, ``CORD2C``, ``CORD2S``
 * elements: ``CROD``, ``CBAR``, ``CBEAM``, ``CTRIA3``, ``CQUAD4``,
-  ``CTETRA`` (4-node), ``CHEXA`` (8-node), ``CONM2``, ``CELAS2``, ``CDAMP2``.
-  10-node ``CTETRA`` / 20-node ``CHEXA`` are accepted with a ``UserWarning``
-  (one aggregated warning per card type, never an error): midside nodes are
-  dropped and the element degrades to its linear corner form.
+  ``CTETRA`` (4- and, since Round 10, 10-node), ``CHEXA`` (8-node),
+  ``CONM2``, ``CELAS2``, ``CDAMP2``.  A 10-node ``CTETRA`` becomes a
+  first-class ``TET10`` keeping all 10 grids in card order (4 corners,
+  then the 6 midsides G5..G10 per the public card layout); a partial
+  midside set (5-9 nodes) and the 20-node ``CHEXA`` are still accepted
+  with a ``UserWarning`` (one aggregated warning per card type, never an
+  error): their midside nodes are dropped and the element degrades to
+  its linear corner form.
 * properties: ``PROD``, ``PBAR``, ``PBEAM`` (first station), ``PSHELL``,
   ``PSOLID``
 * materials: ``MAT1``
@@ -44,7 +48,8 @@ TRUSS2D    --                  CROD (+ PROD); planar nature is metadata
 BEAM2      CBAR, CBEAM         CBAR (+ PBAR)
 TRIA3      CTRIA3              CTRIA3 (+ PSHELL)
 QUAD4      CQUAD4              CQUAD4 (+ PSHELL)
-TET4       CTETRA              CTETRA (+ PSOLID)
+TET4       CTETRA (4-node)     CTETRA (+ PSOLID)
+TET10      CTETRA (10-node)    CTETRA, all 10 grids (+ PSOLID)
 HEX8       CHEXA               CHEXA (+ PSOLID)
 MASS       CONM2               CONM2 (mass value from lumped property)
 SPRING     CELAS2              CELAS2 (k from lumped property)
@@ -413,14 +418,21 @@ def read_bdf(path: str | Path) -> FEModel:
             nodes=(_i(c, 3), _i(c, 4), _i(c, 5), _i(c, 6)),
             property_id=_i(c, 2),
         )
-    # Quadratic solids are accepted but degraded to their linear corner
-    # elements: this is a warning, never an error.  One aggregated note per
-    # card type (a real TET10/HEX20 mesh has thousands of such elements).
+    # A complete 10-node CTETRA is kept as a first-class TET10 (Round 10).
+    # Other quadratic solids (HEX20, partial tet midside sets) are still
+    # degraded to their linear corner elements: a warning, never an error.
+    # One aggregated note per card type (a real HEX20 mesh has thousands
+    # of such elements).
     midside_drops: dict[str, list[int]] = {}
     for c in by_name.pop("CTETRA", []):
         nodes = [_i(c, j) for j in range(3, 13) if _s(c, j)]
+        if len(nodes) == 10:
+            model.add_element(
+                id=_i(c, 1), type="TET10", nodes=tuple(nodes), property_id=_i(c, 2)
+            )
+            continue
         if len(nodes) > 4:
-            midside_drops.setdefault("CTETRA (TET10 -> TET4)", []).append(_i(c, 1))
+            midside_drops.setdefault("CTETRA (partial midside set -> TET4)", []).append(_i(c, 1))
         model.add_element(id=_i(c, 1), type="TET4", nodes=tuple(nodes[:4]), property_id=_i(c, 2))
     for c in by_name.pop("CHEXA", []):
         nodes = [_i(c, j) for j in range(3, 23) if _s(c, j)]
@@ -832,7 +844,7 @@ def write_bdf(path: str | Path | FEModel, model: FEModel | str | Path | None = N
             lines += _card8("CTRIA3", eid, el.property_id, *el.nodes)
         elif t == "QUAD4":
             lines += _card8("CQUAD4", eid, el.property_id, *el.nodes)
-        elif t == "TET4":
+        elif t in ("TET4", "TET10"):  # TET10: 10 grids, +continuation from _card8
             lines += _card8("CTETRA", eid, el.property_id, *el.nodes)
         elif t == "HEX8":
             lines += _card8("CHEXA", eid, el.property_id, *el.nodes)

@@ -51,6 +51,43 @@ way :func:`read_pch` skips ``$DISPLACEMENTS``:
              1       G      0.000000E+00      0.000000E+00  ...            7
     -CONT-                  0.000000E+00      0.000000E+00  ...            8
 
+:func:`read_pch_stress` (Round 10) reads the element-stress sibling a
+``STRESS(PUNCH) = ALL`` request punches -- the public ``$STRESSES`` /
+``$ELEMENT STRESSES`` text blocks -- into a :class:`PchStressResult`
+(element ids + Voigt stress tensors, one slab per ``$SUBCASE``).  Two
+data-line shapes are read, both 80-column punch text with the usual
+``-CONT-`` continuations:
+
+* the labeled solid layout (CTETRA/CHEXA/CPENTA): component labels
+  ``X Y Z XY YZ ZX`` each followed by their value; the first occurrence
+  of each label (the ``CENTER`` group) is kept and the per-corner
+  repeats, direction cosines and principal values (``A``/``B``/``C``)
+  are ignored::
+
+      $ELEMENT STRESSES                                                  4
+      $REAL OUTPUT                                                       5
+      $SUBCASE ID =           1                                          6
+      $ELEMENT TYPE =          39  CTETRA                                7
+             1           0GRID CS  4 GP                                  8
+      -CONT-  CENTER  X   1.829032E+02  XY  -9.212549E+00   A  ...       9
+      -CONT-          Y   1.093623E+02  YZ  -4.290556E+00   B  ...      10
+      -CONT-          Z   1.093812E+02  ZX   1.107610E+00   C  ...      11
+
+* plain rows of up to 6 values, read in Voigt order
+  ``xx yy zz xy yz zx`` (missing trailing components are zero; entries
+  with more than 6 values -- type-specific 2-D layouts femtools does not
+  decode -- keep the first 6 with one aggregated warning)::
+
+      $STRESSES                                                          4
+      $SUBCASE ID =           1                                          5
+             1                  1.000000E+02      2.000000E+01  ...      6
+      -CONT-                    5.000000E+00      0.000000E+00  ...      7
+
+``$EIGENVECTOR`` / ``$DISPLACEMENTS`` / complex-output blocks are
+skipped with one warning per kind, never an error -- the same tolerant
+policy as the other two readers.  **No OP2**: femtools ships no binary
+result parsers, by design.
+
 What the format cannot carry (documented losses):
 
 * generalized (modal) mass -- Nastran punch has no such record;
@@ -70,6 +107,7 @@ from __future__ import annotations
 
 import re
 import warnings
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -77,7 +115,14 @@ import numpy as np
 from ..core.errors import FileFormatError
 from ..core.results import DofPair, ModalResult, StaticResult
 
-__all__ = ["read_pch", "read_pch_static", "write_pch", "PchError"]
+__all__ = [
+    "read_pch",
+    "read_pch_static",
+    "read_pch_stress",
+    "write_pch",
+    "PchStressResult",
+    "PchError",
+]
 
 
 class PchError(FileFormatError):
@@ -90,6 +135,14 @@ _EIGENVALUE_RE = re.compile(
 )
 
 _SUBCASE_RE = re.compile(r"\$\s*SUBCASE\s+(?:ID\s*)?=\s*(\d+)")
+
+_ELEMENT_TYPE_RE = re.compile(r"\$\s*ELEMENT\s+TYPE\s*=?\s*(\d+)?\s*(\S+)?")
+
+#: labeled stress-component tokens of the public solid punch layout -> Voigt slot
+_VOIGT_SLOT = {
+    "X": 0, "Y": 1, "Z": 2,
+    "XY": 3, "YX": 3, "YZ": 4, "ZY": 4, "ZX": 5, "XZ": 5,
+}  # fmt: skip
 
 #: point-type codes: components carried per point
 _POINT_NDOF = {"G": 6, "S": 1, "E": 1, "M": 1}
@@ -290,11 +343,12 @@ def read_pch(path: str | Path) -> ModalResult:
             stacklevel=2,
         )
     for name, count in sorted(skipped_blocks.items()):
-        hint = (
-            " -- read_pch_static reads static displacement blocks"
-            if name.startswith("DISPLACEMENT")
-            else ""
-        )
+        if name.startswith("DISPLACEMENT"):
+            hint = " -- read_pch_static reads static displacement blocks"
+        elif "STRESS" in name:
+            hint = " -- read_pch_stress reads element stress blocks"
+        else:
+            hint = ""
         warnings.warn(
             f"read_pch({path.name}): skipped non-eigenvector block {name} (x{count}){hint}",
             UserWarning,
@@ -447,8 +501,10 @@ def read_pch_static(path: str | Path) -> StaticResult:
             stacklevel=2,
         )
     for name, count in sorted(skipped_blocks.items()):
+        hint = " -- read_pch_stress reads element stress blocks" if "STRESS" in name else ""
         warnings.warn(
-            f"read_pch_static({path.name}): skipped non-displacement block {name} (x{count})",
+            f"read_pch_static({path.name}): skipped non-displacement block {name} "
+            f"(x{count}){hint}",
             UserWarning,
             stacklevel=2,
         )
@@ -472,6 +528,327 @@ def read_pch_static(path: str | Path) -> StaticResult:
     if len(cases) == 1:
         return StaticResult(u=u[:, 0], dof_index=dof_index, load_case=load_case[0])
     return StaticResult(u=u, dof_index=dof_index, load_case=tuple(load_case))
+
+
+# ---------------------------------------------------------------------------
+# element stresses ($STRESSES / $ELEMENT STRESSES)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PchStressResult:
+    """Element stresses read from punch ``$STRESSES`` blocks.
+
+    Attributes
+    ----------
+    element_ids:
+        Element identifiers, ascending; row ``i`` of ``stress`` belongs to
+        ``element_ids[i]``.
+    stress:
+        Voigt tensors ordered ``xx yy zz xy yz zx``: ``(n_elements, 6)``
+        for a single subcase, ``(n_elements, 6, n_cases)`` when the file
+        carries several ``$SUBCASE`` blocks (missing entries zero-filled
+        with a warning, like :func:`read_pch_static`).
+    load_case:
+        The ``$SUBCASE`` id (or ids, one per slab); 1-based block position
+        when a block has no ``$SUBCASE`` header.
+    etypes:
+        ``element id -> punch element-type name`` for elements preceded by
+        a ``$ELEMENT TYPE`` header (empty when the file has none).
+    """
+
+    element_ids: tuple[int, ...] = ()
+    stress: np.ndarray = field(default_factory=lambda: np.zeros((0, 6)))
+    load_case: int | tuple[int, ...] = 1
+    etypes: dict[int, str] = field(default_factory=dict)
+
+    def __len__(self) -> int:
+        return len(self.element_ids)
+
+    @property
+    def n_elements(self) -> int:
+        return len(self.element_ids)
+
+    @property
+    def n_cases(self) -> int:
+        return 1 if self.stress.ndim == 2 else int(self.stress.shape[2])
+
+    def index_of(self, element_id: int) -> int:
+        """Row of one element id (:class:`KeyError` when absent)."""
+        try:
+            return self.element_ids.index(int(element_id))
+        except ValueError:
+            raise KeyError(f"element {element_id} not in the punch stress data") from None
+
+    @property
+    def von_mises(self) -> np.ndarray:
+        """Von Mises equivalent stress: ``(n_elements,)`` per subcase slab."""
+        s = self.stress
+        dev = (s[:, 0] - s[:, 1]) ** 2 + (s[:, 1] - s[:, 2]) ** 2 + (s[:, 2] - s[:, 0]) ** 2
+        shear = s[:, 3] ** 2 + s[:, 4] ** 2 + s[:, 5] ** 2
+        return np.sqrt(0.5 * dev + 3.0 * shear)
+
+
+def _try_float(tok: str) -> float | None:
+    try:
+        return _to_float(tok)
+    except ValueError:
+        return None
+
+
+class _StressBlock:
+    """One $STRESSES block (a subcase) while being parsed."""
+
+    __slots__ = ("subcase", "elements", "etypes", "is_complex")
+
+    def __init__(self, subcase: int | None) -> None:
+        self.subcase = subcase
+        self.elements: dict[int, list[str]] = {}  # eid -> data tokens
+        self.etypes: dict[int, str] = {}
+        self.is_complex = False
+
+
+def _stress_voigt(eid: int, toks: list[str], path: Path) -> tuple[np.ndarray, bool]:
+    """Token list of one element entry -> ``(6 Voigt components, truncated)``.
+
+    Labeled entries (any ``X``/``XY``/... token followed by a value, the
+    public solid layout) keep the first occurrence of each component --
+    the ``CENTER`` group -- and ignore everything else (grid repeats,
+    direction cosines, principal values).  Plain entries must be numbers:
+    up to 6 are read in Voigt order, more than 6 flags ``truncated``.
+    """
+    vals = np.zeros(6)
+    labeled = any(
+        t.upper() in _VOIGT_SLOT and i + 1 < len(toks) and _try_float(toks[i + 1]) is not None
+        for i, t in enumerate(toks)
+    )
+    if labeled:
+        filled = [False] * 6
+        i = 0
+        while i < len(toks):
+            slot = _VOIGT_SLOT.get(toks[i].upper())
+            if slot is not None and i + 1 < len(toks):
+                v = _try_float(toks[i + 1])
+                if v is not None:
+                    if not filled[slot]:  # first occurrence = the CENTER group
+                        vals[slot] = v
+                        filled[slot] = True
+                    i += 2
+                    continue
+            i += 1
+        return vals, False
+    floats: list[float] = []
+    for t in toks:
+        v = _try_float(t)
+        if v is None:
+            raise PchError(
+                f"cannot parse stress value {t!r} for element {eid}", file=path.name
+            )
+        floats.append(v)
+    n = min(len(floats), 6)
+    vals[:n] = floats[:6]
+    return vals, len(floats) > 6
+
+
+def read_pch_stress(path: str | Path) -> PchStressResult:
+    """Read real element stresses from a Nastran punch file.
+
+    Parses the public ``$STRESSES`` / ``$ELEMENT STRESSES`` blocks a
+    ``STRESS(PUNCH) = ALL`` request punches into a
+    :class:`PchStressResult`: element ids ascending, one ``(n, 6)`` Voigt
+    slab per ``$SUBCASE`` (see the module docstring for the two data-line
+    shapes read).  Eigenvector blocks, ``$DISPLACEMENTS``, complex-output
+    blocks and other result kinds are skipped with one warning per kind,
+    never an error; a file with no readable stress data raises
+    :class:`PchError`.  Text punch only -- **no OP2**, by design.
+    """
+    path = Path(path)
+    text = path.read_text(encoding="utf-8", errors="replace")
+
+    blocks: list[_StressBlock] = []
+    current: _StressBlock | None = None
+    complex_section = False  # sticky until a "$REAL OUTPUT" header
+    pending_subcase: int | None = None
+    current_etype = ""
+    skipped_blocks: dict[str, int] = {}
+    n_complex = 0
+    n_eigen = 0
+    last_tokens: list[str] | None = None
+
+    def flush() -> None:
+        nonlocal current, last_tokens, n_complex
+        if current is not None:
+            if current.is_complex:
+                n_complex += 1
+            elif current.elements:
+                blocks.append(current)
+        current = None
+        last_tokens = None
+
+    for lineno, raw in enumerate(text.splitlines(), start=1):
+        line = _strip_seq(raw)
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith("$"):
+            upper = stripped.upper()
+            m = _SUBCASE_RE.match(upper)
+            if m:
+                sid = int(m.group(1))
+                if current is not None and not current.elements:
+                    current.subcase = sid  # $SUBCASE follows $STRESSES
+                elif current is not None:
+                    # next subcase without a repeated $STRESSES header
+                    flush()
+                    current = _StressBlock(sid)
+                    current.is_complex = complex_section
+                else:
+                    pending_subcase = sid  # $SUBCASE precedes $STRESSES
+                continue
+            em = _ELEMENT_TYPE_RE.match(upper)
+            if em:  # annotates the following entries; not a block boundary
+                current_etype = (em.group(2) or em.group(1) or "").strip()
+                continue
+            if upper.startswith(("$STRESS", "$ELEMENT STRESS")):
+                flush()
+                current = _StressBlock(pending_subcase)
+                current.is_complex = complex_section
+                pending_subcase = None
+                current_etype = ""
+                continue
+            # output-type markers appear between $STRESSES and the data
+            if upper.startswith(_COMPLEX_MARKERS):
+                complex_section = True
+                if current is not None and not current.elements:
+                    current.is_complex = True
+                else:
+                    flush()
+                continue
+            if upper.startswith("$REAL OUTPUT"):
+                complex_section = False
+                if current is not None and not current.elements:
+                    current.is_complex = False
+                continue
+            if upper.startswith("$EIGENVALUE"):
+                flush()
+                n_eigen += 1
+                continue
+            if upper.startswith("$EIGENVECTOR"):
+                flush()
+                continue
+            if upper.startswith(("$TITLE", "$SUBTITLE", "$LABEL", "$POINT")):
+                continue
+            # any other result block ($DISPLACEMENTS, $SPCF, forces, ...)
+            name = upper[1:].split("=")[0].strip() or "?"
+            skipped_blocks[name] = skipped_blocks.get(name, 0) + 1
+            flush()
+            continue
+
+        if current is None or current.is_complex:
+            continue  # data of a skipped/eigenvector/complex block
+
+        toks = stripped.split()
+        if toks[0] == "-CONT-":
+            if last_tokens is None:
+                raise PchError(
+                    "-CONT- line without an element line", file=path.name, line=lineno
+                )
+            last_tokens.extend(toks[1:])
+            continue
+        try:
+            eid = int(toks[0])
+        except ValueError as exc:
+            raise PchError(
+                f"cannot parse punch stress line {lineno}: {stripped!r}",
+                file=path.name,
+                line=lineno,
+            ) from exc
+        last_tokens = list(toks[1:])
+        current.elements[eid] = last_tokens
+        if current_etype:
+            current.etypes.setdefault(eid, current_etype)
+
+    flush()
+
+    if n_eigen:
+        warnings.warn(
+            f"read_pch_stress({path.name}): skipped {n_eigen} eigenvector block(s) "
+            "-- read_pch reads modal punch content",
+            UserWarning,
+            stacklevel=2,
+        )
+    if n_complex:
+        warnings.warn(
+            f"read_pch_stress({path.name}): skipped {n_complex} complex stress "
+            "block(s); only real element stresses are read",
+            UserWarning,
+            stacklevel=2,
+        )
+    for name, count in sorted(skipped_blocks.items()):
+        hint = (
+            " -- read_pch_static reads static displacement blocks"
+            if name.startswith("DISPLACEMENT")
+            else ""
+        )
+        warnings.warn(
+            f"read_pch_stress({path.name}): skipped non-stress block {name} (x{count}){hint}",
+            UserWarning,
+            stacklevel=2,
+        )
+    if not blocks:
+        raise PchError(
+            "no real $STRESSES element stress data found in punch file", file=path.name
+        )
+
+    all_ids = sorted({eid for blk in blocks for eid in blk.elements})
+    row_of = {eid: i for i, eid in enumerate(all_ids)}
+    stress = np.zeros((len(all_ids), 6, len(blocks)))
+    truncated: dict[int, None] = {}
+    uneven = False
+    etypes: dict[int, str] = {}
+    for j, blk in enumerate(blocks):
+        if len(blk.elements) != len(all_ids):
+            uneven = True
+        for eid, toks in blk.elements.items():
+            stress[row_of[eid], :, j], over = _stress_voigt(eid, toks, path)
+            if over:
+                truncated[eid] = None
+        for eid, name in blk.etypes.items():
+            etypes.setdefault(eid, name)
+    if truncated:
+        eids = list(truncated)
+        shown = ", ".join(map(str, eids[:5])) + (", ..." if len(eids) > 5 else "")
+        warnings.warn(
+            f"read_pch_stress({path.name}): {len(eids)} element entrie(s) [{shown}] "
+            "carried more than 6 values (a type-specific layout femtools does not "
+            "decode); the first 6 were read as Voigt components",
+            UserWarning,
+            stacklevel=2,
+        )
+    if uneven:
+        warnings.warn(
+            f"read_pch_stress({path.name}): subcases list different element sets; "
+            "missing entries were zero-filled",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    load_case = [
+        blk.subcase if blk.subcase is not None else j + 1 for j, blk in enumerate(blocks)
+    ]
+    if len(blocks) == 1:
+        return PchStressResult(
+            element_ids=tuple(all_ids),
+            stress=stress[:, :, 0],
+            load_case=load_case[0],
+            etypes=etypes,
+        )
+    return PchStressResult(
+        element_ids=tuple(all_ids),
+        stress=stress,
+        load_case=tuple(load_case),
+        etypes=etypes,
+    )
 
 
 # ---------------------------------------------------------------------------

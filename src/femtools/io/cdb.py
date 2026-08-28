@@ -43,7 +43,8 @@ SHELL41/63/181      QUAD4     TRIA3 when degenerate (duplicate node)
 SHELL93/281         QUAD4     corner nodes; midside nodes dropped
 SOLID45/185         HEX8      TET4 when degenerate; wedge/pyramid skipped
 SOLID95/186         HEX8      corner nodes; midside nodes dropped
-SOLID92/187         TET4      corner nodes; midside nodes dropped
+SOLID92/187         TET10     all 10 nodes kept (Round 10); degenerate
+                              records drop their midsides to TET4
 SOLID285            TET4
 MASS21              MASS      mass = real constant 1 (MASSX)
 COMBIN14            SPRING    k = real constant 1; axial (no DOF pins)
@@ -64,7 +65,8 @@ element number, ``MP`` material records, ``R``/``RMORE`` real constants,
 ``SECTYPE``/``SECDATA`` shell sections, one blocked ``NBLOCK``/``EBLOCK``
 (SOLID key) pair and ``D``/``F`` records -- so a written archive reads
 back through :func:`read_cdb`.  Element type mapping on write: HEX8 ->
-SOLID185, TET4 -> SOLID285, QUAD4/TRIA3 -> SHELL181 (TRIA3 as the
+SOLID185, TET4 -> SOLID285, TET10 -> SOLID187 (nodes 9-10 on the EBLOCK
+continuation line), QUAD4/TRIA3 -> SHELL181 (TRIA3 as the
 degenerate quad), BEAM2 -> BEAM4 (orientation vectors become extra K
 nodes appended after the real nodes), BAR2 -> LINK180, TRUSS2D -> LINK1,
 MASS -> MASS21, SPRING -> COMBIN14.  Documented losses (aggregated
@@ -665,6 +667,17 @@ def read_cdb(path: str | Path) -> FEModel:
                 degenerate_skips.setdefault("degenerate shell", []).append(rec.eid)
                 continue
         elif kind in ("hex", "hex_quad", "tet", "tet_quad"):
+            if kind == "tet_quad" and len(_dedupe(nodes)) == 10:
+                # complete quadratic tet: first-class TET10 since Round 10
+                # (SOLID92/187 order I..L corners then the 6 midsides, the
+                # same convention as the 10-node CTETRA)
+                model.add_element(
+                    id=rec.eid,
+                    type="TET10",
+                    nodes=tuple(nodes[:10]),
+                    property_id=_property_for(kind, rec, ansys_num),
+                )
+                continue
             if kind in ("hex_quad", "tet_quad") and len(nodes) > (
                 8 if kind == "hex_quad" else 4
             ):
@@ -763,6 +776,7 @@ def read_cdb(path: str | Path) -> FEModel:
 _WRITE_NUM: dict[str, int] = {
     "HEX8": 185,  # SOLID185
     "TET4": 285,  # SOLID285
+    "TET10": 187,  # SOLID187 (10 nodes; EBLOCK spills onto a second line)
     "QUAD4": 181,  # SHELL181
     "TRIA3": 181,  # SHELL181, degenerate quad (n3 repeated)
     "BEAM2": 4,  # BEAM4 (section from real constants, K orientation node)
@@ -932,8 +946,15 @@ def write_cdb(path: str | Path | FEModel, model: FEModel | str | Path | None = N
         lines.append(f"EBLOCK,19,SOLID,,{len(planned)}")
         lines.append("(19i9)")
         for eid, mat, num, real, sec, nodes in planned:
-            fields = [mat, type_of[num], real, sec, 0, 0, 0, 0, len(nodes), 0, eid, *nodes]
+            # SOLID-key record: 11 attribute fields + the first 8 nodes fill
+            # the 19-field line; further nodes (TET10) spill onto full-width
+            # continuation lines, exactly as the reader consumes them.
+            fields = [mat, type_of[num], real, sec, 0, 0, 0, 0, len(nodes), 0, eid, *nodes[:8]]
             lines.append("".join(_i9(v, "EBLOCK field") for v in fields))
+            for start in range(8, len(nodes), 19):
+                lines.append(
+                    "".join(_i9(v, "EBLOCK field") for v in nodes[start : start + 19])
+                )
         lines.append(_i9(-1, "terminator"))
 
     # -- constraints and loads ------------------------------------------------------

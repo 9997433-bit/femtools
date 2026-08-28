@@ -21,9 +21,11 @@ design; the punch file covers both exchange loops):
   non-zero, times out or produces no ``.pch`` file.
 * :meth:`~NastranPunchDriver.read_modal` reads a SOL 103 punch back with
   :func:`femtools.io.read_pch`; :meth:`~NastranPunchDriver.read_static`
-  reads a SOL 101 punch with :func:`femtools.io.read_pch_static`.  A
-  ``.op2`` path raises :class:`~femtools.core.errors.SolverError` naming
-  OP2 as N/A.
+  reads a SOL 101 punch with :func:`femtools.io.read_pch_static`;
+  :meth:`~NastranPunchDriver.read_stress` (Round 10) reads the
+  ``$STRESSES`` blocks a ``write_input(..., stress=True)`` deck requests
+  with :func:`femtools.io.read_pch_stress`.  A ``.op2`` path raises
+  :class:`~femtools.core.errors.SolverError` naming OP2 as N/A.
 
 Nothing here requires Nastran to be installed:
 :meth:`~NastranPunchDriver.is_available` probes the PATH and the test
@@ -40,11 +42,12 @@ from typing import TYPE_CHECKING
 
 from ..core.errors import SolverError
 from ..io.bdf import write_bdf
-from ..io.pch import read_pch, read_pch_static
+from ..io.pch import read_pch, read_pch_static, read_pch_stress
 
 if TYPE_CHECKING:
     from ..core.model import FEModel
     from ..core.results import ModalResult, StaticResult
+    from ..io.pch import PchStressResult
 
 __all__ = ["NastranPunchDriver"]
 
@@ -83,7 +86,9 @@ class NastranPunchDriver:
         """Whether the executable resolves on the PATH.  Never raises."""
         return shutil.which(self.executable) is not None
 
-    def write_input(self, model: FEModel, workdir: str | Path, *, sol: int = 103) -> Path:
+    def write_input(
+        self, model: FEModel, workdir: str | Path, *, sol: int = 103, stress: bool = False
+    ) -> Path:
         """Write ``<model.name>.bdf`` into ``workdir`` as a complete deck.
 
         The bulk data section comes from :func:`femtools.io.write_bdf`
@@ -95,8 +100,10 @@ class NastranPunchDriver:
         select the model's constraint and load sets (the lowest set id
         each, matching the femtools default of 1; multiple set ids warn)
         and ``DISPLACEMENT(PUNCH) = ALL`` punches the displacements
-        :meth:`read_static` reads back.  Any other ``sol`` raises
-        :class:`ValueError`.
+        :meth:`read_static` reads back.  ``stress=True`` (Round 10)
+        additionally requests ``STRESS(PUNCH) = ALL``, the element
+        stresses :meth:`read_stress` reads back; the default deck is
+        unchanged.  Any other ``sol`` raises :class:`ValueError`.
         """
         if sol not in (101, 103):
             raise ValueError(f"sol must be 101 (statics) or 103 (normal modes), got {sol}")
@@ -128,6 +135,8 @@ class NastranPunchDriver:
                 f"LOAD = {self._case_set(model, 'load')}",
                 "DISPLACEMENT(PUNCH) = ALL",
             ]
+        if stress:
+            out.append("STRESS(PUNCH) = ALL")
         for line in bulk:
             out.append(line)
             if (
@@ -226,3 +235,22 @@ class NastranPunchDriver:
                 "read the .pch instead"
             )
         return read_pch_static(result_file)
+
+    def read_stress(self, result_file: str | Path) -> PchStressResult:
+        """Read element stresses from a punch file (Round 10).
+
+        Returns the :class:`~femtools.io.pch.PchStressResult` of
+        :func:`femtools.io.read_pch_stress` (one Voigt slab per subcase;
+        request the block with ``write_input(..., stress=True)``).  A
+        ``.op2`` path raises :class:`~femtools.core.errors.SolverError`:
+        OP2 binary results are N/A in femtools by design -- request
+        ``STRESS(PUNCH)`` text output instead.
+        """
+        result_file = Path(result_file)
+        if result_file.suffix.lower() == ".op2":
+            raise SolverError(
+                f"OP2 binary results ({result_file.name}) are N/A: femtools ships no "
+                "OP2 parser by design -- request STRESS(PUNCH) text output and "
+                "read the .pch instead"
+            )
+        return read_pch_stress(result_file)
