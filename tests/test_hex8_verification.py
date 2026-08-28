@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from femtools.fea.verification import (
     hex8_bending_ratio,
@@ -15,6 +16,7 @@ def test_hex8_default_avoids_shear_locking() -> None:
     default_ratio = hex8_bending_ratio()
     full_ratio = hex8_bending_ratio("full")
 
+    assert default_ratio == pytest.approx(0.9854730473, rel=1.0e-6)
     assert default_ratio > 0.95
     assert 0.60 < full_ratio < 0.70
     assert default_ratio > full_ratio + 0.25
