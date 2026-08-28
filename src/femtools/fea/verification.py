@@ -77,6 +77,13 @@ body element has to satisfy (:mod:`femtools.fea.mpc`): welding two nodes leaves
 a free-free structure with exactly six rigid body modes and the analytic rigid
 body mass matrix, and a load on a rigid offset arrives at the independent node
 as a force *and* the moment of the offset.
+
+``rbe3_spider`` and ``rbe3_load_path`` are the corresponding pair for the
+*interpolation* constraint, which is a different statement and not a rigid weld:
+a mass hung on the reference grid of a free-free spider leaves exactly six
+rigid body modes and arrives in full at the weighted centroid of the
+independents, and a force on that grid is shared out in proportion to the
+weights -- equally, for equal weights, whatever the geometry.
 """
 
 from __future__ import annotations
@@ -112,6 +119,8 @@ __all__ = [
     "hex_cantilever",
     "rbe2_offset_moment",
     "rbe2_rigid_pair",
+    "rbe3_load_path",
+    "rbe3_spider",
     "reduction_frequency_errors",
     "serep_slave_recovery",
     "shell_plate",
@@ -1017,9 +1026,12 @@ def stress_patch_error(etype: str = "HEX8", **case: Any) -> dict[str, float]:
     Comparison is made in the basic frame, so it also checks the element frames
     the recovery reports.  Returns the worst relative error over all elements
     of ``stress`` and ``strain`` plus ``displacement``, the classical patch
-    test measure on the free node.
+    test measure on the free node, and ``nodal``, the same stress error after
+    :func:`femtools.fea.recover.average_nodal` has smoothed it onto the nodes
+    -- a constant state is the one field an average cannot damage, so it has to
+    survive to the same precision.
     """
-    from .recover import recover_stress  # local: verification is imported on demand
+    from .recover import average_nodal, recover_stress  # verification loads on demand
 
     name = str(etype).strip().upper()
     if name not in PATCH_TYPES:
@@ -1135,6 +1147,12 @@ def stress_patch_error(etype: str = "HEX8", **case: Any) -> dict[str, float]:
     stress_error = float(np.max(np.abs(result.stress_basic - want_stress))) / scale_stress
     strain_error = float(np.max(np.abs(result.strain_basic - want_strain))) / scale_strain
 
+    nodal = average_nodal(result, model)
+    nodal_error = max(
+        float(np.max(np.abs(nodal.stress - want_stress))) / scale_stress,
+        float(np.max(np.abs(nodal.strain - want_strain))) / scale_strain,
+    )
+
     displacement_error = 0.0
     for nid, exact in free_check.items():
         got = u[asm.dof_map.node_dofs(nid)][:3]
@@ -1145,8 +1163,10 @@ def stress_patch_error(etype: str = "HEX8", **case: Any) -> dict[str, float]:
     return {
         "stress": stress_error,
         "strain": strain_error,
+        "nodal": nodal_error,
         "displacement": displacement_error,
         "elements": float(len(result)),
+        "nodes": float(len(nodal)),
     }
 
 
@@ -1264,4 +1284,220 @@ def rbe2_offset_moment(
         "direct_gap": gap / scale,
         "rigid_kinematics": kinematics / max(float(np.max(np.abs(arm_u))), 1.0e-300),
         "moment": moment,
+    }
+
+
+# ---------------------------------------------------------------------------
+# RBE3 interpolation constraints
+# ---------------------------------------------------------------------------
+
+
+def _triangle(radius: float) -> dict[int, tuple[float, float, float]]:
+    """Three points on a circle about the origin, so the centroid is the origin."""
+    angles = np.deg2rad([90.0, 210.0, 330.0])
+    return {
+        i + 1: (float(radius * np.cos(a)), float(radius * np.sin(a)), 0.0)
+        for i, a in enumerate(angles)
+    }
+
+
+def _rigid_body_vectors(dof_map: Any, coords: dict[int, Any]) -> np.ndarray:
+    """``(n_dof, 6)`` unit rigid body motions about the origin."""
+    R = np.zeros((dof_map.n_dof, 6))
+    for nid, xyz in coords.items():
+        dofs = dof_map.node_dofs(nid)
+        x = np.asarray(xyz, dtype=float)
+        for k in range(3):
+            R[dofs[k], k] = 1.0
+            axis = np.zeros(3)
+            axis[k] = 1.0
+            R[dofs[:3], 3 + k] = np.cross(axis, x)
+            R[dofs[3 + k], 3 + k] = 1.0
+    return R
+
+
+def _point_mass_rigid_body(mass: float, position: np.ndarray) -> np.ndarray:
+    """``6x6`` rigid body mass matrix of a point mass, about the origin."""
+    c = np.asarray(position, dtype=float).reshape(3)
+    skew = np.array([[0.0, -c[2], c[1]], [c[2], 0.0, -c[0]], [-c[1], c[0], 0.0]])
+    out = np.zeros((6, 6))
+    out[:3, :3] = mass * np.eye(3)
+    out[:3, 3:] = -mass * skew
+    out[3:, :3] = -mass * skew.T
+    out[3:, 3:] = -mass * (skew @ skew)
+    return out
+
+
+def rbe3_spider(
+    weights: Any = None,
+    *,
+    mass: float = 2.5,
+    radius: float = 0.6,
+    dependent_xyz: Any = None,
+    area: float = 4.0e-4,
+) -> dict[str, float]:
+    """A concentrated mass hung on the reference grid of an ``RBE3`` spider, free-free.
+
+    Three pin-jointed ``BAR2`` rods form a triangle -- an exactly determinate
+    rigid body in space, six rigid body modes and no mechanism -- and a
+    ``MASS`` sits on a fourth node tied to the three vertices by one ``RBE3``
+    (:mod:`femtools.fea.mpc`).  The statements checked are the two an
+    interpolation constraint has to satisfy:
+
+    * the structure is still free-free, with **exactly six** zero frequencies
+      and no stiffness anywhere on the constraint -- unlike a penalty spring,
+      and unlike an ``RBE2``, the spider does not weld the triangle solid;
+    * the mass arrives in full.  Because the dependent motion is the weighted
+      average ``u_d = sum_i w_i u_i / sum_j w_j``, a rigid body motion of the
+      triangle moves the dependent node to the *weighted centroid* of the
+      vertices, so the reduced rigid body mass matrix must be that of the bare
+      triangle plus a point mass sitting at that centroid -- exactly, for any
+      weights and wherever the reference grid itself is placed.
+
+    ``dependent_xyz`` moves the reference grid off the centroid, which is the
+    case where the second statement is worth reading twice: the mass is still
+    delivered in full and the six modes are still there, but it is delivered to
+    the weighted centroid rather than to where the node was drawn.
+    """
+    coords = _triangle(radius)
+    centre = (
+        np.zeros(3) if dependent_xyz is None else np.asarray(dependent_xyz, dtype=float)
+    )
+    w = (
+        np.full(3, 1.0 / 3.0)
+        if weights is None
+        else np.asarray(weights, dtype=float) / float(np.sum(weights))
+    )
+    centroid = sum(w[i] * np.asarray(coords[i + 1]) for i in range(3))
+
+    nodes = {nid: {"xyz": xyz} for nid, xyz in coords.items()}
+    nodes[4] = {"xyz": tuple(float(v) for v in centre)}
+    bars = {
+        1: {"type": "BAR2", "property_id": 1, "nodes": (1, 2)},
+        2: {"type": "BAR2", "property_id": 1, "nodes": (2, 3)},
+        3: {"type": "BAR2", "property_id": 1, "nodes": (3, 1)},
+    }
+    common = {
+        "nodes": nodes,
+        "materials": {1: {"E": 2.1e11, "nu": 0.3, "rho": 7800.0}},
+        "properties": {1: {"type": "bar", "material_id": 1, "A": area}},
+        "spcs": [],
+    }
+    bare = {**common, "elements": dict(bars)}
+    spider = {
+        **common,
+        "elements": {**bars, 4: {"type": "MASS", "nodes": (4,), "m": mass}},
+        "rbe3": [
+            {
+                "id": 1,
+                "dependent": 4,
+                "independents": (1, 2, 3),
+                "components": (1, 2, 3),
+                **({} if weights is None else {"weights": tuple(weights)}),
+            }
+        ],
+    }
+
+    asm = assemble_km(spider)
+    frequencies = solve_modes(spider, n_modes=8, assembly=asm).freq_hz
+
+    R = _rigid_body_vectors(asm.dof_map, {**coords, 4: nodes[4]["xyz"]})
+    got = R.T @ (asm.M @ R)
+    reference = assemble_km(bare)
+    expected = R.T @ (reference.M @ R) + _point_mass_rigid_body(mass, centroid)
+
+    return {
+        "zero_modes": float(np.count_nonzero(np.asarray(frequencies) < 1.0e-6)),
+        "first_elastic_hz": float(frequencies[6]),
+        "free_dof": float(asm.n_free),
+        "dependent_dof": float(asm.mpc_dof.size),
+        "constraint_stiffness": float(
+            abs(asm.K - reference.K).max() if (asm.K - reference.K).nnz else 0.0
+        ),
+        "rigid_mass_error": float(
+            np.max(np.abs(got - expected)) / np.max(np.abs(expected))
+        ),
+    }
+
+
+def rbe3_load_path(
+    weights: Any = None,
+    *,
+    force: float = 900.0,
+    length: float = 1.2,
+    area: float = 5.0e-4,
+    E: float = 2.1e11,
+    radius: float = 0.4,
+) -> dict[str, float]:
+    """A force on the reference grid of an ``RBE3`` is shared out by weight.
+
+    Three parallel ``BAR2`` legs stand on a fixed base; their top nodes are the
+    independents of one ``RBE3`` whose reference grid carries the load.  The
+    legs are the whole load path, so what each one ends up carrying *is* the
+    share the constraint handed it, and the answer is analytic: by virtual work
+    the transpose of ``u_d = sum_i w_i u_i / sum_j w_j`` sends
+    ``f_i = w_i / sum_j w_j`` of the force down leg ``i``, which stretches by
+    ``f_i L / (E A)``.  Equal weights therefore give three equal shares whatever
+    the geometry -- the property that separates an interpolation constraint
+    from a rigid one, whose shares would follow the stiffnesses instead.
+
+    The dependent displacement is then the *weighted average of unequal leg
+    extensions*, ``sum_i w_i^2 F L / (E A)``, which is the cheapest way to see
+    that the spider is not a rigid plate: a rigid cap would have made the three
+    legs move together.
+    """
+    coords = _triangle(radius)
+    w = (
+        np.full(3, 1.0 / 3.0)
+        if weights is None
+        else np.asarray(weights, dtype=float) / float(np.sum(weights))
+    )
+    nodes: dict[int, Any] = {}
+    elements: dict[int, Any] = {}
+    spcs: list[dict[str, Any]] = []
+    for nid, (x, y, _z) in coords.items():
+        nodes[nid] = {"xyz": (x, y, length)}
+        nodes[nid + 10] = {"xyz": (x, y, 0.0)}
+        elements[nid] = {"type": "BAR2", "property_id": 1, "nodes": (nid + 10, nid)}
+        spcs.append({"node_id": nid + 10, "dofs": (0, 1, 2)})
+        # The legs are pin-jointed, so their transverse motion is a mechanism;
+        # holding it leaves the axial load path the case is about.
+        spcs.append({"node_id": nid, "dofs": (0, 1)})
+    nodes[4] = {"xyz": (0.0, 0.0, length)}
+
+    model = {
+        "nodes": nodes,
+        "elements": elements,
+        "materials": {1: {"E": E, "nu": 0.3, "rho": 7800.0}},
+        "properties": {1: {"type": "bar", "material_id": 1, "A": area}},
+        "spcs": spcs,
+        "rbe3": [
+            {
+                "id": 1,
+                "dependent": 4,
+                "independents": (1, 2, 3),
+                "components": (1, 2, 3),
+                **({} if weights is None else {"weights": tuple(weights)}),
+            }
+        ],
+    }
+
+    from .recover import recover_stress  # local: verification is imported on demand
+
+    asm = assemble_km(model)
+    u = np.asarray(solve_static(model, {(4, 2): force}, assembly=asm))
+    stress = recover_stress(model, u, assembly=asm)
+
+    axial = np.array([stress.extras[nid]["axial_force"] for nid in (1, 2, 3)])
+    extension = np.array([u[asm.dof_map.index(nid, 2)] for nid in (1, 2, 3)])
+    exact = w * force * length / (E * area)
+    dependent = float(u[asm.dof_map.index(4, 2)])
+    return {
+        "share_error": float(np.max(np.abs(axial / force - w))),
+        "min_share": float(np.min(axial / force)),
+        "max_share": float(np.max(axial / force)),
+        "extension_error": float(np.max(np.abs(extension - exact)) / np.max(np.abs(exact))),
+        "dependent": dependent,
+        "analytic_dependent": float(np.sum(w * exact)),
+        "average_gap": abs(dependent - float(w @ extension)) / abs(dependent),
     }
