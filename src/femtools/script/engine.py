@@ -8,10 +8,13 @@ grammar.
 
 The engine binds lazily to the rest of femtools: ``femtools.core`` is
 only imported when ``NEW PROJECT`` runs, ``femtools.fea`` when
-``SOLVE MODES`` / ``SOLVE STATIC`` / ``RECOVER STRESS`` runs,
-``femtools.updating`` when ``UPDATE STATIC`` runs, ``femtools.dynamics``
-when ``DUMP FRF`` runs, and so on.  Missing siblings produce a clear
-:class:`ScriptError` instead of an import-time crash.
+``SOLVE MODES`` / ``SOLVE STATIC`` / ``RECOVER STRESS`` /
+``RECOVER SPR`` runs, ``femtools.updating`` when ``UPDATE STATIC``
+runs, ``femtools.dynamics`` when ``DUMP FRF`` / ``DUMP PSD`` /
+``LOAD PSD`` runs, ``femtools.mpe`` when ``ERA`` runs,
+``femtools.correlation`` when ``MAC`` / ``EXPAND MAC`` runs, and so
+on.  Missing siblings produce a clear :class:`ScriptError` instead of
+an import-time crash.
 
 ``SET name=value`` assigns a script variable; later statements can
 reference it as ``$name`` anywhere a token is expected (``$$`` writes a
@@ -241,6 +244,48 @@ def _parse_measure_spec(spec: Any) -> dict[tuple[int, int], float]:
             raise ScriptError(f"MEASURE DOF numbers must be 1..6, got {dof}")
         measured[(node, dof - 1)] = value
     return measured
+
+
+def _parse_master_rows(spec: Any, modal: Any, statement: str) -> list[int]:
+    """Parse ``MASTER=`` into mode-matrix row indices.
+
+    ``<node>:<dof>[,...]`` items (DOF 1-based, like ``MEASURE=``) are
+    resolved through the modal result's DOF map; a plain comma list of
+    integers is taken as 0-based rows of the mode matrix directly.
+    """
+    items = spec if isinstance(spec, tuple) else (spec,)
+    if all(isinstance(item, int) for item in items):
+        return [int(item) for item in items]
+
+    dof_map = getattr(modal, "dof_map", None)
+    if dof_map is None:
+        raise ScriptError(
+            "MASTER=<node>:<dof> selections need a modal result with a DOF map; "
+            "this one has none, so pass 0-based row indices instead",
+            statement=statement,
+        )
+    rows: list[int] = []
+    for item in items:
+        parts = str(item).split(":")
+        try:
+            if len(parts) != 2:
+                raise ValueError
+            node, dof = int(parts[0]), int(parts[1])
+        except ValueError:
+            raise ScriptError(
+                f"cannot parse MASTER item {item!r}: expected <node>:<dof> with "
+                "DOF 1..6 (e.g. MASTER=2:1,2:3), or a comma list of row indices",
+                statement=statement,
+            ) from None
+        if not 1 <= dof <= 6:
+            raise ScriptError(f"MASTER DOF numbers must be 1..6, got {dof}",
+                              statement=statement)
+        try:
+            rows.append(int(dof_map.index(node, dof - 1)))
+        except KeyError as exc:
+            raise ScriptError(f"bad MASTER DOF {node}:{dof}: {exc}",
+                              statement=statement) from exc
+    return rows
 
 
 class ScriptEngine:
@@ -631,16 +676,9 @@ class ScriptEngine:
         self.results[name] = result
         self._last_static_name = name
 
-    def _cmd_recover(self, rest: list[str], statement: str) -> None:
-        args, opts = _split_args_options(rest)
-        if len(args) != 1 or str(args[0]).upper() != "STRESS":
-            raise ScriptError("expected RECOVER STRESS [NAME=..] [RESULT=..]",
-                              statement=statement)
-        model = self._require_model(statement)
-        name = str(opts.pop("NAME", "stress"))
+    def _static_result(self, opts: dict[str, Any], statement: str) -> Any:
+        """Resolve the ``RESULT=`` option (default: the last static solve)."""
         result_name = opts.pop("RESULT", self._last_static_name)
-        if opts:
-            raise ScriptError(f"unexpected options {sorted(opts)}", statement=statement)
         if result_name is None:
             raise ScriptError(
                 "no static result: run SOLVE STATIC first (or pass RESULT=name)",
@@ -657,19 +695,49 @@ class ScriptEngine:
                 "(it carries no displacement field)",
                 statement=statement,
             )
+        return static
+
+    def _cmd_recover(self, rest: list[str], statement: str) -> None:
+        args, opts = _split_args_options(rest)
+        kind = str(args[0]).upper() if args else ""
+        if len(args) != 1 or kind not in ("STRESS", "SPR"):
+            raise ScriptError("expected RECOVER STRESS|SPR [NAME=..] [RESULT=..]",
+                              statement=statement)
+        model = self._require_model(statement)
+        name = str(opts.pop("NAME", kind.lower()))
+        static = self._static_result(opts, statement)
+        if opts:
+            raise ScriptError(f"unexpected options {sorted(opts)}", statement=statement)
+
+        if kind == "STRESS":
+            try:
+                from femtools.fea.recover import recover_stress
+            except ImportError as exc:
+                raise ScriptError(
+                    "femtools.fea is not available; RECOVER STRESS needs the "
+                    "stress-recovery kernel"
+                ) from exc
+            try:
+                self.results[name] = recover_stress(model, static)
+            except (ValueError, KeyError) as exc:
+                # e.g. a displacement field of the wrong length, or an element
+                # type without a registered recovery rule
+                raise ScriptError(f"RECOVER STRESS failed: {exc}",
+                                  statement=statement) from exc
+            return
+
+        # RECOVER SPR: centroid recovery + Zienkiewicz-Zhu patch smoothing
+        from femtools.script.kernels import recover_spr_nodal
+
         try:
-            from femtools.fea.recover import recover_stress
+            self.results[name] = recover_spr_nodal(model, static)
         except ImportError as exc:
             raise ScriptError(
-                "femtools.fea is not available; RECOVER STRESS needs the "
-                "stress-recovery kernel"
+                "recover_spr is not available in this installation; RECOVER SPR "
+                "needs the ZZ-SPR kernel (femtools.fea.recover.recover_spr)"
             ) from exc
-        try:
-            self.results[name] = recover_stress(model, static)
-        except (ValueError, KeyError) as exc:
-            # e.g. a displacement field of the wrong length, or an element
-            # type without a registered recovery rule
-            raise ScriptError(f"RECOVER STRESS failed: {exc}", statement=statement) from exc
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ScriptError(f"RECOVER SPR failed: {exc}", statement=statement) from exc
 
     def _cmd_mac(self, rest: list[str], statement: str) -> None:
         args, opts = _split_args_options(rest)
@@ -739,18 +807,12 @@ class ScriptEngine:
         if apply_model and updated is not None:
             self.model = updated
 
-    def _cmd_dump(self, rest: list[str], statement: str) -> None:
-        args, opts = _split_args_options(rest)
-        if len(args) != 2 or str(args[0]).upper() != "FRF":
-            raise ScriptError(
-                "expected DUMP FRF <path> [RESULT=<name>] [COMPRESS=YES|NO]",
-                statement=statement,
-            )
-        path = str(args[1])
-        result_name = opts.pop("RESULT", None)
-        compress = _parse_bool_option(opts.pop("COMPRESS", "NO"), "COMPRESS")
-        if opts:
-            raise ScriptError(f"unexpected options {sorted(opts)}", statement=statement)
+    #: DUMP kinds: the duck-typed fields a candidate result must carry.
+    _DUMP_FIELDS = {"FRF": ("H", "freq_hz"), "PSD": ("psd", "freq_hz")}
+
+    def _find_result(self, result_name: Any, fields: tuple[str, ...],
+                     kind: str, statement: str) -> Any:
+        """A named result, or the last stored one carrying all of ``fields``."""
         if result_name is not None:
             result_name = str(result_name)
             result = self.results.get(result_name)
@@ -758,29 +820,160 @@ class ScriptEngine:
                 raise ScriptError(f"no result named {result_name!r} "
                                   f"(available: {sorted(self.results)})",
                                   statement=statement)
-        else:
-            result = None
-            for candidate in self.results.values():
-                if (getattr(candidate, "H", None) is not None
-                        and getattr(candidate, "freq_hz", None) is not None):
-                    result = candidate
-            if result is None:
+            return result
+        result = None
+        for candidate in self.results.values():
+            if all(getattr(candidate, field, None) is not None for field in fields):
+                result = candidate
+        if result is None:
+            raise ScriptError(
+                f"no {kind} result found: store one carrying "
+                f"{' and '.join(fields)} in the engine, or pass RESULT=<name>",
+                statement=statement,
+            )
+        return result
+
+    def _cmd_dump(self, rest: list[str], statement: str) -> None:
+        args, opts = _split_args_options(rest)
+        kind = str(args[0]).upper() if args else ""
+        if len(args) != 2 or kind not in self._DUMP_FIELDS:
+            raise ScriptError(
+                "expected DUMP FRF|PSD <path> [RESULT=<name>] [COMPRESS=YES|NO]",
+                statement=statement,
+            )
+        path = str(args[1])
+        result_name = opts.pop("RESULT", None)
+        compress = _parse_bool_option(opts.pop("COMPRESS", "NO"), "COMPRESS")
+        if opts:
+            raise ScriptError(f"unexpected options {sorted(opts)}", statement=statement)
+        result = self._find_result(result_name, self._DUMP_FIELDS[kind],
+                                   kind, statement)
+        if kind == "FRF":
+            try:
+                from femtools.dynamics.frf import dump_frf as dump
+            except ImportError as exc:
                 raise ScriptError(
-                    "no FRF result to dump: store one carrying H and freq_hz "
-                    "in the engine, or pass RESULT=<name>",
-                    statement=statement,
-                )
+                    "femtools.dynamics is not available; DUMP FRF needs the FRF kernel"
+                ) from exc
+        else:
+            try:
+                from femtools.dynamics.random import dump_psd as dump
+            except ImportError as exc:
+                raise ScriptError(
+                    "femtools.dynamics is not available; DUMP PSD needs the "
+                    "random-response kernel"
+                ) from exc
         try:
-            from femtools.dynamics.frf import dump_frf
+            dump(result, path, compress=compress)
+        except (TypeError, ValueError, OSError) as exc:
+            # TypeError: the named result carries no H/freq_hz (psd/freq_hz) block
+            raise ScriptError(f"DUMP {kind} failed: {exc}", statement=statement) from exc
+
+    def _cmd_load(self, rest: list[str], statement: str) -> None:
+        args, opts = _split_args_options(rest)
+        if len(args) != 2 or str(args[0]).upper() != "PSD":
+            raise ScriptError("expected LOAD PSD <path> [NAME=<name>]",
+                              statement=statement)
+        path = str(args[1])
+        name = str(opts.pop("NAME", "psd"))
+        if opts:
+            raise ScriptError(f"unexpected options {sorted(opts)}", statement=statement)
+        try:
+            from femtools.dynamics.random import load_psd
         except ImportError as exc:
             raise ScriptError(
-                "femtools.dynamics is not available; DUMP FRF needs the FRF kernel"
+                "femtools.dynamics is not available; LOAD PSD needs the "
+                "random-response kernel"
             ) from exc
         try:
-            dump_frf(result, path, compress=compress)
-        except (TypeError, ValueError, OSError) as exc:
-            # TypeError: the named result carries no H/freq_hz block
-            raise ScriptError(f"DUMP FRF failed: {exc}", statement=statement) from exc
+            self.results[name] = load_psd(path)
+        except (ValueError, OSError) as exc:
+            raise ScriptError(f"LOAD PSD failed: {exc}", statement=statement) from exc
+
+    def _cmd_era(self, rest: list[str], statement: str) -> None:
+        args, opts = _split_args_options(rest)
+        if args:
+            raise ScriptError(
+                "ERA takes only options: [RESULT=<frf name>] [ORDER=<n>] "
+                "[MODES=<n>] [NAME=<name>]",
+                statement=statement,
+            )
+        result_name = opts.pop("RESULT", None)
+        order = opts.pop("ORDER", 10)
+        n_modes = opts.pop("MODES", opts.pop("N", None))
+        name = str(opts.pop("NAME", "era"))
+        if opts:
+            raise ScriptError(f"unexpected options {sorted(opts)}", statement=statement)
+        if not isinstance(order, int) or order < 1:
+            raise ScriptError(f"ORDER must be a positive integer, got {order!r}",
+                              statement=statement)
+        frf = self._find_result(result_name, self._DUMP_FIELDS["FRF"],
+                                "FRF", statement)
+
+        from femtools.script.kernels import era_from_data
+
+        try:
+            self.results[name] = era_from_data(
+                frf=frf.H, freq_hz=frf.freq_hz, order=order,
+                n_modes=None if n_modes is None else int(n_modes),
+            )
+        except ImportError as exc:
+            raise ScriptError(
+                "era is not available in this installation; ERA needs the "
+                "Eigensystem Realization kernel (femtools.mpe.era)"
+            ) from exc
+        except (TypeError, ValueError, ArithmeticError, RuntimeError) as exc:
+            # RuntimeError: the realization found no physical poles
+            raise ScriptError(f"ERA failed: {exc}", statement=statement) from exc
+
+    def _cmd_expand(self, rest: list[str], statement: str) -> None:
+        args, opts = _split_args_options(rest)
+        if len(args) != 1 or str(args[0]).upper() != "MAC":
+            raise ScriptError(
+                "expected EXPAND MAC MASTER=<node>:<dof>[,...] "
+                "[RESULT=<modes name>] [NAME=<name>]",
+                statement=statement,
+            )
+        master_spec = opts.pop("MASTER", opts.pop("MASTERS", None))
+        result_name = opts.pop("RESULT", self._last_modes_name)
+        name = str(opts.pop("NAME", "emac"))
+        if opts:
+            raise ScriptError(f"unexpected options {sorted(opts)}", statement=statement)
+        if master_spec is None:
+            raise ScriptError(
+                "EXPAND MAC requires MASTER=<node>:<dof>[,...] (DOF 1..6) or "
+                "MASTER=<row>[,...] (0-based mode-matrix rows)",
+                statement=statement,
+            )
+        if result_name is None:
+            raise ScriptError(
+                "EXPAND MAC needs a modal result: run SOLVE MODES first or "
+                "pass RESULT=<name>",
+                statement=statement,
+            )
+        modal = self.results.get(str(result_name))
+        if modal is None:
+            raise ScriptError(f"no result named {result_name!r} "
+                              f"(available: {sorted(self.results)})",
+                              statement=statement)
+        phi = getattr(modal, "modes", modal)
+        if phi is None:
+            raise ScriptError(f"result {result_name!r} carries no mode shapes",
+                              statement=statement)
+        rows = _parse_master_rows(master_spec, modal, statement)
+
+        from femtools.script.kernels import expanded_mac_matrix
+
+        try:
+            mac, _expansion = expanded_mac_matrix(phi, rows)
+        except ImportError as exc:
+            raise ScriptError(
+                "expanded_mac is not available in this installation; EXPAND MAC "
+                "needs the expansion kernel (femtools.correlation.expansion)"
+            ) from exc
+        except (ValueError, ArithmeticError) as exc:
+            raise ScriptError(f"EXPAND MAC failed: {exc}", statement=statement) from exc
+        self.results[name] = mac
 
     def _cmd_set(self, rest: list[str], statement: str) -> None:
         if not rest:
@@ -841,8 +1034,11 @@ class ScriptEngine:
         "SOLVE": _cmd_solve,
         "RECOVER": _cmd_recover,
         "MAC": _cmd_mac,
+        "EXPAND": _cmd_expand,
+        "ERA": _cmd_era,
         "UPDATE": _cmd_update,
         "DUMP": _cmd_dump,
+        "LOAD": _cmd_load,
         "SAVE": _cmd_save,
         "PRINT": _cmd_print,
     }

@@ -130,6 +130,11 @@ MAC</textarea>
         SOLVE STATIC to recover element stresses</em></div>
     </section>
     <section style="margin-top:18px">
+      <h2>SPR nodal stress</h2>
+      <div id="spr" style="overflow:auto"><em style="color:var(--muted)">run
+        SOLVE STATIC to recover ZZ-SPR nodal stresses</em></div>
+    </section>
+    <section style="margin-top:18px">
       <h2>Plots</h2>
       <div class="plots" id="plots"><em style="color:var(--muted)">run a
         script to render plots</em></div>
@@ -208,12 +213,45 @@ async function refreshStress() {
   else renderStress(null, (payload && payload.error) || 'no stress data');
 }
 
+function renderSpr(data, message) {
+  if (!data) {  // expected 400s: no static result / SPR kernel not installed
+    $('spr').innerHTML =
+      `<em style="color:var(--muted)">${message || 'no SPR data'}</em>`;
+    return;
+  }
+  const comps = data.components || [];
+  const header = '<tr><th>node</th><th>n_adj</th>'
+    + comps.map(c => `<th>s${c}</th>`).join('') + '<th>von Mises</th></tr>';
+  const rows = (data.nodes || []).map(n =>
+    `<tr><td>${n.node}</td><td>${n.count ?? '—'}</td>`
+    + comps.map((c, i) => `<td>${fmtNum((n.stress || [])[i])}</td>`).join('')
+    + `<td><b>${fmtNum(n.von_mises)}</b></td></tr>`).join('');
+  const shown = (data.nodes || []).length;
+  const note = `${data.n_nodes} node${data.n_nodes === 1 ? '' : 's'}`
+    + (data.truncated ? ` (first ${shown} shown)` : '')
+    + ` — max von Mises ${fmtNum(data.max_von_mises)}`
+    + (data.result ? ` — result: ${data.result}` : '');
+  $('spr').innerHTML = `<table>${header}${rows}</table>`
+    + `<p class="hint">${note}</p>`;
+}
+
+async function refreshSpr() {
+  let payload;
+  try {
+    const r = await fetch('/api/spr?max_rows=15');
+    payload = await r.json();
+  } catch (e) { renderSpr(null, 'SPR unavailable'); return; }
+  if (payload && payload.ok) renderSpr(payload);
+  else renderSpr(null, (payload && payload.error) || 'no SPR data');
+}
+
 async function refreshData() {
   try {
     renderModel(await jget('/api/model'));
     renderResults((await jget('/api/results')).results);
   } catch (e) { /* server gone */ }
   refreshStress();
+  refreshSpr();
 }
 
 function plotNames(results) {
@@ -248,6 +286,7 @@ $('run').onclick = async () => {
       renderModel(data.model);
     }
     refreshStress();
+    refreshSpr();
   } catch (e) { $('log').innerHTML = `<span class="err">request failed:</span> ${e}`; }
 };
 $('loadform').onsubmit = async (ev) => {
@@ -268,6 +307,7 @@ $('loadform').onsubmit = async (ev) => {
       $('log').innerHTML = `<span class="err">error</span>\\n${data.error}`;
     }
     refreshStress();
+    refreshSpr();
   } catch (e) { $('log').innerHTML = `<span class="err">request failed:</span> ${e}`; }
 };
 $('refresh').onclick = () => { refreshStatus(); refreshData(); };

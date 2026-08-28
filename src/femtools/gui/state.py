@@ -165,6 +165,40 @@ class GuiState:
         except (ValueError, KeyError) as exc:
             raise GuiApiError(f"stress recovery failed: {exc}") from exc
 
+    def _resolve_static(self, name: str | None) -> tuple[Any, Any, str | None]:
+        """``(model, static, static_name)`` for a stress-recovery API call.
+
+        Call with the lock held.  Raises :class:`GuiApiError` when no
+        model is loaded or no (matching) static result is stored.
+        """
+        model = self.model
+        if model is None:
+            raise GuiApiError("no model loaded")
+        if name:
+            static = self.engine.results.get(name)
+            if static is None:
+                raise GuiApiError(f"no result named {name!r} "
+                                  f"(available: {sorted(self.engine.results)})")
+            if getattr(static, "u", None) is None:
+                raise GuiApiError(f"result {name!r} is not a static result "
+                                  "(it carries no displacement field)")
+            static_name = name
+        else:
+            static, static_name = self._latest_static()
+        if static is None:
+            raise GuiApiError("no static result: run SOLVE STATIC (script tab) first")
+        return model, static, static_name
+
+    @staticmethod
+    def _int_max_rows(max_rows: Any) -> int:
+        try:
+            max_rows = int(max_rows)
+        except (TypeError, ValueError):
+            raise GuiApiError(f"max_rows must be an integer, got {max_rows!r}") from None
+        if max_rows < 1:
+            raise GuiApiError("max_rows must be at least 1")
+        return max_rows
+
     def stress_table(self, name: str | None = None, max_rows: Any = 20) -> dict:
         """Recover element stresses from a stored static result, as JSON.
 
@@ -174,33 +208,10 @@ class GuiState:
         static result exists, or the stress-recovery kernel is not
         installed.
         """
-        try:
-            max_rows = int(max_rows)
-        except (TypeError, ValueError):
-            raise GuiApiError(f"max_rows must be an integer, got {max_rows!r}") from None
-        if max_rows < 1:
-            raise GuiApiError("max_rows must be at least 1")
+        max_rows = self._int_max_rows(max_rows)
 
         with self._lock:
-            model = self.model
-            if model is None:
-                raise GuiApiError("no model loaded")
-
-            if name:
-                static = self.engine.results.get(name)
-                if static is None:
-                    raise GuiApiError(f"no result named {name!r} "
-                                      f"(available: {sorted(self.engine.results)})")
-                if getattr(static, "u", None) is None:
-                    raise GuiApiError(f"result {name!r} is not a static result "
-                                      "(it carries no displacement field)")
-                static_name = name
-            else:
-                static, static_name = self._latest_static()
-            if static is None:
-                raise GuiApiError(
-                    "no static result: run SOLVE STATIC (script tab) first")
-
+            model, static, static_name = self._resolve_static(name)
             stress = self._recover_stress(model, static)
 
             ids = list(getattr(stress, "element_ids", []))
@@ -227,6 +238,59 @@ class GuiState:
                 "skipped": {str(k): v for k, v in
                             getattr(stress, "skipped", {}).items()},
                 "elements": rows,
+            }
+
+    def spr_table(self, name: str | None = None, max_rows: Any = 20) -> dict:
+        """ZZ-SPR nodal stresses from a stored static result, as JSON.
+
+        The superconvergent-patch-recovery counterpart of
+        :meth:`stress_table`: one Voigt tensor per **node** instead of
+        one per element.  ``name`` selects the static result as in
+        :meth:`stress_table`.  Raises :class:`GuiApiError` (HTTP 400)
+        when no model or static result exists, or when the SPR kernel
+        (``femtools.fea.recover.recover_spr``) is not installed --
+        the page shows that as a muted note, not an error page.
+        """
+        max_rows = self._int_max_rows(max_rows)
+
+        with self._lock:
+            model, static, static_name = self._resolve_static(name)
+
+            from femtools.script.kernels import recover_spr_nodal
+
+            try:
+                nodal = recover_spr_nodal(model, static)
+            except ImportError as exc:
+                raise GuiApiError(
+                    "ZZ-SPR recovery is unavailable: femtools kernel "
+                    f"{exc.name or exc} is not installed"
+                ) from exc
+            except (TypeError, ValueError, KeyError) as exc:
+                raise GuiApiError(f"SPR recovery failed: {exc}") from exc
+
+            ids = list(getattr(nodal, "node_ids", []))
+            if not ids:
+                raise GuiApiError("the static result covers no recoverable nodes")
+            vm = [float(v) for v in nodal.von_mises]
+            counts_field = getattr(nodal, "count", None)
+            counts = [] if counts_field is None else list(counts_field)
+            rows = []
+            for i, nid in enumerate(ids[:max_rows]):
+                rows.append({
+                    "node": nid,
+                    "count": int(counts[i]) if i < len(counts) else None,
+                    "von_mises": vm[i],
+                    "stress": [float(c) for c in nodal.stress[i]],
+                })
+            return {
+                "ok": True,
+                "result": static_name,
+                "components": list(getattr(nodal, "components",
+                                           ("xx", "yy", "zz", "xy", "yz", "zx"))),
+                "n_nodes": len(ids),
+                "truncated": len(ids) > max_rows,
+                "max_von_mises": max(vm),
+                "nodes": rows,
             }
 
     # ------------------------------------------------------------------

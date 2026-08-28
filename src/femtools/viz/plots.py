@@ -31,6 +31,7 @@ __all__ = [
     "plot_stress",
     "plot_mac",
     "plot_frf",
+    "plot_psd",
     "plot_mode",
     "plotly_available",
     "pyvista_available",
@@ -976,6 +977,54 @@ def plot_frf(
         a.grid(True, alpha=0.3)
     axes[-1].set_xlabel("frequency [Hz]")
     axes[0].set_title(title or "Frequency response function")
+    return _finish(fig, outfile)
+
+
+def plot_psd(
+    psd: Any,
+    output: int = 0,
+    ax: Any = None,
+    *,
+    freq: Any = None,
+    label: str | None = None,
+    title: str | None = None,
+    outfile: str | None = None,
+):
+    """Plot one response auto-spectrum (log-magnitude over frequency).
+
+    ``psd`` may be a :class:`~femtools.dynamics.random.PSDResult` (real
+    array ``(n_out, n_freq)`` plus its frequency vector) or a raw array
+    combined with ``freq=``; ``output`` selects the response row.
+    matplotlib only -- a PSD is a real, positive spectrum, so a Bode
+    pair adds nothing.  Returns the matplotlib Figure.
+    """
+    plt = _plt()
+    values = np.atleast_2d(np.asarray(getattr(psd, "psd", psd), dtype=float))
+    f = getattr(psd, "freq_hz", None) if freq is None else freq
+    if f is None:
+        raise ValueError("plot_psd needs a frequency vector: a PSDResult, or freq=")
+    f = np.asarray(f, dtype=float).reshape(-1)
+    if not 0 <= int(output) < values.shape[0]:
+        raise ValueError(
+            f"output {output} is out of range for a block of {values.shape[0]} spectra")
+    curve = values[int(output)].reshape(-1)
+    if curve.shape[0] != f.shape[0]:
+        raise ValueError(f"PSD length {curve.shape[0]} != frequency length {f.shape[0]}")
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7, 4))
+    else:
+        fig = ax.figure
+    ax.semilogy(f, np.where(curve > 0, curve, np.nan),
+                label=label or f"S[{int(output)}]")
+    ax.set_xlabel("frequency [Hz]")
+    unit = str(getattr(psd, "response", "") or "")
+    ax.set_ylabel({"receptance": "PSD [disp$^2$/Hz]",
+                   "mobility": "PSD [vel$^2$/Hz]",
+                   "accelerance": "PSD [accel$^2$/Hz]"}.get(unit, "PSD [unit$^2$/Hz]"))
+    ax.grid(True, which="both", alpha=0.3)
+    ax.legend(loc="best", fontsize=8)
+    ax.set_title(title or "Response power spectral density")
     return _finish(fig, outfile)
 
 

@@ -57,7 +57,7 @@ femtools script -c "NEW PROJECT; ADD NODE 1 0 0 0; PRINT SUMMARY"
 script     = { statement , ( ";" | newline ) } ;
 statement  = new | add_node | add_mat | add_prop | add_elem | add_load
            | add_rbe2 | add_rbe3 | spc | set | solve | recover | mac
-           | update | dump | save | print ;
+           | expand | era | update | dump | load | save | print ;
 
 new        = "NEW" , "PROJECT" , [ name ] ;
 add_node   = "ADD" , "NODE" , id , number , number , number ;
@@ -77,12 +77,18 @@ set        = "SET" , assignment , { assignment } ;
 solve      = "SOLVE" , ( "MODES" , [ "N=" int ] , [ "SHIFT=" number ] ,
                          [ "NAME=" name ]
                        | "STATIC" , [ "NAME=" name ] ) ;
-recover    = "RECOVER" , "STRESS" , [ "NAME=" name ] , [ "RESULT=" name ] ;
+recover    = "RECOVER" , ( "STRESS" | "SPR" ) ,
+             [ "NAME=" name ] , [ "RESULT=" name ] ;
 mac        = "MAC" , [ "A=" name ] , [ "B=" name ] , [ "NAME=" name ] ;
+expand     = "EXPAND" , "MAC" , "MASTER=" masterlist ,
+             [ "RESULT=" name ] , [ "NAME=" name ] ;
+era        = "ERA" , [ "RESULT=" name ] , [ "ORDER=" int ] ,
+             [ "MODES=" int ] , [ "NAME=" name ] ;
 update     = "UPDATE" , "STATIC" , "MEASURE=" measurelist ,
              [ "NAME=" name ] , [ "APPLY=" yesno ] ;
-dump       = "DUMP" , "FRF" , path , [ "RESULT=" name ] ,
+dump       = "DUMP" , ( "FRF" | "PSD" ) , path , [ "RESULT=" name ] ,
              [ "COMPRESS=" yesno ] ;
+load       = "LOAD" , "PSD" , path , [ "NAME=" name ] ;
 save       = "SAVE" , path ;
 print      = "PRINT" , [ "SUMMARY" | "RESULTS" ] ;
 
@@ -93,6 +99,8 @@ idlist     = id , { "," , id } ;
 numberlist = number , { "," , number } ;
 measurelist= measure , { "," , measure } ;
 measure    = id , ":" , dof number 1..6 , ":" , number ;
+masterlist = master , { "," , master } ;
+master     = id , ":" , dof number 1..6 | 0-based row index ;
 comps      = DOF numbers 1..6 : comma list ("1,2,3") or compact ("123") ;
 mask       = six characters from {"0","1"} , e.g. "111000" ;
 yesno      = "YES" | "NO" | "1" | "0" ;
@@ -207,12 +215,51 @@ Recovers element centroid stresses
 stress from `result.von_mises` and the Voigt components from
 `result.stress`.
 
+### `RECOVER SPR [NAME=<name>] [RESULT=<name>]`
+
+Recovers Zienkiewicz–Zhu superconvergent-patch-recovered **nodal**
+stresses (`femtools.fea.recover.recover_spr`) from a stored static
+result: the element centroid samples are recovered first and the SPR
+patch fit smooths them onto the nodes. `RESULT` behaves as in
+`RECOVER STRESS`. The nodal result is stored in `engine.results[NAME]`
+(default `"spr"`). Raises a clear `ScriptError` when the SPR kernel is
+not part of the installation.
+
 ### `MAC [A=<result>] [B=<result>] [NAME=<name>]`
 
 Computes the Modal Assurance Criterion matrix between two stored modal
 results (`femtools.correlation.mac.mac_matrix`). Both operands default to
 the most recent `SOLVE MODES` result (self-MAC). The matrix is stored in
 `engine.results[NAME]` (default `"mac"`).
+
+### `EXPAND MAC MASTER=<node>:<dof>[,...] [RESULT=<modes>] [NAME=<name>]`
+
+SEREP-expanded self-MAC
+(`femtools.correlation.expansion.expanded_mac`): the stored FE modes
+are restricted to the `MASTER` DOFs, expanded back through the same
+basis and correlated with the originals — the diagonal must come back
+as 1 for the retained modes. Each `MASTER` item is `<node>:<dof>` with
+a 1-based DOF number (resolved through the modal result's DOF map), or
+a plain 0-based row index of the mode matrix. `RESULT` names the modal
+result (default: the most recent `SOLVE MODES`). The MAC matrix is
+stored in `engine.results[NAME]` (default `"emac"`), so the GUI's MAC
+heatmap can render it by name.
+
+```text
+SOLVE MODES N=4
+EXPAND MAC MASTER=2:1,3:1,4:1,5:1,6:1,7:1
+```
+
+### `ERA [RESULT=<frf>] [ORDER=<n>] [MODES=<n>] [NAME=<name>]`
+
+Identifies modal parameters from a stored FRF block with the
+Eigensystem Realization Algorithm (`femtools.mpe.era.era`,
+Juang–Pappa 1985). `RESULT` names the FRF result and defaults to the
+most recent stored result carrying `H` and `freq_hz` (e.g. imported
+from a `.ftproj`/`.unv` file or placed by embedding code). `ORDER` is
+the model order (default 10), `MODES` caps the modes kept. The
+`ModalParameterResult` is stored in `engine.results[NAME]` (default
+`"era"`) and prints its frequencies like any modal result.
 
 ### `UPDATE STATIC MEASURE=<node>:<dof>:<value>[,...] [NAME=<name>] [APPLY=YES|NO]`
 
@@ -231,16 +278,27 @@ ADD LOAD 2 FX=1000
 UPDATE STATIC MEASURE=2:1:5.29e-5
 ```
 
-### `DUMP FRF <path> [RESULT=<name>] [COMPRESS=YES|NO]`
+### `DUMP FRF|PSD <path> [RESULT=<name>] [COMPRESS=YES|NO]`
 
-Writes a stored FRF block to a reloadable `.npz` archive
-(`femtools.dynamics.frf.dump_frf`; read it back with `load_frf` or
-inspect it with `femtools load-frf`). `RESULT` names the result to dump
-and defaults to the most recent stored result carrying `H` and
-`freq_hz` — FSL has no FRF-producing command yet, so such a result is
-typically placed in `engine.results` by embedding code. `H` and
-`freq_hz` round-trip bit-identical; `COMPRESS=YES` writes a compressed
-archive.
+Writes a stored FRF or response-PSD block to a reloadable `.npz`
+archive (`femtools.dynamics.frf.dump_frf` /
+`femtools.dynamics.random.dump_psd`; read them back with `load_frf` /
+`load_psd`, the `LOAD PSD` verb, or inspect them with
+`femtools load-frf` / `femtools load-psd`). `RESULT` names the result
+to dump and defaults to the most recent stored result carrying `H` and
+`freq_hz` (FRF) or `psd` and `freq_hz` (PSD) — FSL has no FRF/PSD
+synthesizing command yet, so such a result is typically imported from
+a file or placed in `engine.results` by embedding code. The spectra and
+the frequency axis round-trip bit-identical; `COMPRESS=YES` writes a
+compressed archive.
+
+### `LOAD PSD <path> [NAME=<name>]`
+
+Reads a response-PSD archive written by `DUMP PSD` (or the CLI's
+`dump-psd`) back into `engine.results[NAME]` (default `"psd"`) as a
+`PSDResult` — `psd`, `freq_hz` and `rms` bit-identical, ready for
+`DUMP PSD` round trips or embedding code that reads `three_sigma` /
+`peak()`.
 
 ### `SAVE <path>`
 
@@ -257,11 +315,13 @@ active model; `RESULTS` lists stored result names and types.
 All parse and execution failures raise `femtools.script.ScriptError`,
 which reports the offending statement and its 1-based index within the
 script. Commands that need sibling modules (`SOLVE MODES` /
-`SOLVE STATIC` / `RECOVER STRESS` -> `femtools.fea`, `MAC` ->
-`femtools.correlation`, `UPDATE STATIC` -> `femtools.updating`,
-`DUMP FRF` -> `femtools.dynamics`, `SAVE` -> `femtools.io`,
-`NEW PROJECT` -> `femtools.core`) raise a clear `ScriptError` if the
-module is not installed, rather than failing at import time.
+`SOLVE STATIC` / `RECOVER STRESS` / `RECOVER SPR` -> `femtools.fea`,
+`MAC` / `EXPAND MAC` -> `femtools.correlation`, `ERA` ->
+`femtools.mpe`, `UPDATE STATIC` -> `femtools.updating`, `DUMP FRF` /
+`DUMP PSD` / `LOAD PSD` -> `femtools.dynamics`, `SAVE` ->
+`femtools.io`, `NEW PROJECT` -> `femtools.core`) raise a clear
+`ScriptError` if the module (or the specific kernel, e.g.
+`recover_spr`) is not installed, rather than failing at import time.
 Referencing an unassigned `$variable` is a `ScriptError` too.
 
 ## Embedding

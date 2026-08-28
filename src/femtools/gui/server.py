@@ -66,6 +66,11 @@ class FemtoolsRequestHandler(BaseHTTPRequestHandler):
                     name=query.get("name") or None,
                     max_rows=query.get("max_rows", 20),
                 ))
+            elif url.path == "/api/spr":
+                self._send_json(self.state.spr_table(
+                    name=query.get("name") or None,
+                    max_rows=query.get("max_rows", 20),
+                ))
             elif url.path == "/api/load":  # simple path-query form of the loader
                 self._send_json(self.state.load_model(query.get("path", "")))
             elif url.path.startswith("/api/plot/"):

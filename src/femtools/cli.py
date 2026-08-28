@@ -2,9 +2,11 @@
 
 Typer application exposed as the ``femtools`` console script
 (``femtools.cli:app``).  Subcommands: ``solve-modes``, ``read-mesh``,
-``write-mesh``, ``recover-stress``, ``plot-stress``, ``mac``,
-``report-mac``, ``frf``, ``reduce``, ``estimate-frf``, ``update``,
-``pretest``, ``script``, ``gui``.
+``write-mesh``, ``recover-stress``, ``recover-spr``, ``plot-stress``,
+``mac``, ``expanded-mac``, ``report-mac``, ``frf``, ``dump-frf``,
+``load-frf``, ``dump-psd``, ``load-psd``, ``reduce``, ``estimate-frf``,
+``era``, ``update``, ``update-static``, ``pretest``, ``script``,
+``gui``.
 
 Sibling packages (``femtools.core``, ``femtools.fea``, ...) are imported
 lazily inside each command; if one is missing the command prints a clear
@@ -421,13 +423,13 @@ def _apply_load_specs(model: Any, load: list[str] | None) -> None:
             raise typer.Exit(code=2) from exc
 
 
-def _recover_pipeline(model_file: Path, load: list[str] | None) -> tuple[Any, Any]:
-    """Shared solve+recover pipeline of ``recover-stress`` / ``plot-stress``.
+def _recover_pipeline(model_file: Path, load: list[str] | None) -> tuple[Any, Any, Any]:
+    """Shared solve+recover pipeline of the stress-recovery subcommands.
 
     Lazily imports the stress-recovery kernel and the static solver (an
     installation shipping without either exits with code 3), applies the
     ``--load`` specs, runs the static solve and returns ``(model,
-    stress_result)``.
+    static_result, stress_result)``.
     """
     try:
         from femtools.fea.recover import recover_stress
@@ -467,7 +469,7 @@ def _recover_pipeline(model_file: Path, load: list[str] | None) -> tuple[Any, An
     except ValueError as exc:
         err_console.print(f"[red]error:[/red] stress recovery failed: {exc}")
         raise typer.Exit(code=2) from exc
-    return model, result
+    return model, static, result
 
 
 @app.command("recover-stress")
@@ -492,7 +494,7 @@ def recover_stress_cmd(
     """
     import numpy as np
 
-    model, result = _recover_pipeline(model_file, load)
+    model, _static, result = _recover_pipeline(model_file, load)
 
     ids, comps, vm = _stress_parts(result)
     if ids is None or comps is None:
@@ -532,6 +534,102 @@ def recover_stress_cmd(
 
 
 # ----------------------------------------------------------------------
+# recover-spr
+# ----------------------------------------------------------------------
+@app.command("recover-spr")
+def recover_spr_cmd(
+    model_file: Annotated[Path, typer.Argument(
+        exists=True, readable=True, help="Model file.")],
+    load: Annotated[list[str] | None, typer.Option(
+        "--load", "-l",
+        help="Add a nodal load 'NODE:DOF=VALUE' (DOF 1-6: fx fy fz mx my mz); "
+             "repeatable.  Loads stored in the model file are kept.")] = None,
+    output: Annotated[Path | None, typer.Option(
+        "--output", "-o",
+        help="Save node_ids, stress (and von_mises) to .npz.")] = None,
+    max_rows: Annotated[int, typer.Option(
+        "--max-rows", min=1, help="Table rows to print.")] = 20,
+) -> None:
+    """Solve a static case and recover ZZ-SPR nodal stresses.
+
+    Runs the same solve+recover pipeline as ``recover-stress`` and
+    smooths the centroid samples onto the nodes with Zienkiewicz-Zhu
+    superconvergent patch recovery
+    (``femtools.fea.recover.recover_spr``).  An installation shipping
+    without the SPR kernel exits with code 3, like every other lazily
+    bound subcommand.
+    """
+    import numpy as np
+
+    try:
+        from femtools.fea.recover import recover_spr  # noqa: F401  (probe first: fail fast)
+    except ImportError as exc:
+        raise _missing("superconvergent patch recovery (ZZ-SPR)", exc) from exc
+
+    model, static, stress = _recover_pipeline(model_file, load)
+
+    from femtools.script.kernels import recover_spr_nodal
+
+    try:
+        nodal = recover_spr_nodal(model, static, stress)
+    except ImportError as exc:
+        raise _missing("superconvergent patch recovery (ZZ-SPR)", exc) from exc
+    except (TypeError, ValueError, KeyError) as exc:
+        err_console.print(f"[red]error:[/red] SPR recovery failed: {exc}")
+        raise typer.Exit(code=2) from exc
+
+    ids = None
+    for attr in ("node_ids", "nodes", "ids"):
+        ids = getattr(nodal, attr, None)
+        if ids is not None:
+            break
+    comps = getattr(nodal, "stress", None)
+    if ids is None or comps is None or not len(list(ids)):
+        err_console.print("[red]error:[/red] the SPR kernel returned no nodal "
+                          f"stresses ({type(nodal).__name__})")
+        raise typer.Exit(code=2)
+    ids = list(ids)
+    comps = np.atleast_2d(np.asarray(comps, dtype=float))
+    vm = getattr(nodal, "von_mises", None)
+    vm = None if vm is None else np.asarray(vm, dtype=float).reshape(-1)
+
+    n_comp = int(comps.shape[1])
+    table = Table(title=f"SPR nodal stress ({model_file.name})")
+    table.add_column("node", justify="right")
+    comp_labels = (["sxx", "syy", "szz", "sxy", "syz", "szx"] if n_comp == 6
+                   else [f"s{k + 1}" for k in range(n_comp)])
+    for label in comp_labels:
+        table.add_column(label, justify="right")
+    if vm is not None:
+        table.add_column("von Mises", justify="right")
+    for row_i, nid in enumerate(ids[:max_rows]):
+        row = [str(nid)] + [f"{float(c):.5g}" for c in np.atleast_1d(comps[row_i])]
+        if vm is not None and row_i < vm.size:
+            row.append(f"{float(vm[row_i]):.5g}")
+        table.add_row(*row)
+    console.print(table)
+    if len(ids) > max_rows:
+        console.print(f"... {len(ids) - max_rows} more nodes "
+                      "(raise --max-rows or save with --output)")
+    if vm is not None and vm.size:
+        console.print(f"recovered {len(ids)} nodes, "
+                      f"max von Mises {float(np.max(vm)):.6g}")
+
+    if output is not None:
+        payload: dict[str, Any] = {
+            "node_ids": np.asarray(ids),
+            "stress": comps,
+        }
+        if vm is not None:
+            payload["von_mises"] = vm
+        strain = getattr(nodal, "strain", None)
+        if strain is not None and np.size(strain):
+            payload["strain"] = np.asarray(strain, dtype=float)
+        np.savez(str(output), **payload)
+        console.print(f"saved SPR nodal stress to [bold]{output}[/bold]")
+
+
+# ----------------------------------------------------------------------
 # plot-stress
 # ----------------------------------------------------------------------
 @app.command("plot-stress")
@@ -560,7 +658,7 @@ def plot_stress_cmd(
     """
     import numpy as np
 
-    model, result = _recover_pipeline(model_file, load)
+    model, _static, result = _recover_pipeline(model_file, load)
 
     from femtools.viz.plots import plot_stress
 
@@ -640,6 +738,131 @@ def mac_cmd(
 
         plot_mac(mac, outfile=str(plot))
         console.print(f"saved MAC heatmap to [bold]{plot}[/bold]")
+
+
+# ----------------------------------------------------------------------
+# expanded-mac
+# ----------------------------------------------------------------------
+def _master_rows(master: str, modal: Any) -> list[int]:
+    """Resolve the ``--master`` spec to mode-matrix row indices.
+
+    'NODE:DOF[,NODE:DOF...]' items are resolved through the modal DOF
+    map; plain comma-separated integers are taken as 0-based rows (the
+    only form available for a bare ``.npz`` mode set).
+    """
+    if ":" in master:
+        dof_map = getattr(modal, "dof_map", None)
+        if dof_map is None:
+            err_console.print(
+                "[red]error:[/red] NODE:DOF master selections need a model file "
+                "(an .npz mode set carries no DOF map); pass plain row indices")
+            raise typer.Exit(code=2)
+        rows = []
+        for node, dof in _parse_dof_list(master, "--master"):
+            try:
+                rows.append(int(dof_map.index(node, dof - 1)))
+            except KeyError as exc:
+                err_console.print(f"[red]error:[/red] bad --master DOF {node}:{dof}: {exc}")
+                raise typer.Exit(code=2) from exc
+        return rows
+    try:
+        rows = [int(item) for item in master.split(",") if item.strip()]
+    except ValueError:
+        err_console.print(
+            f"[red]error:[/red] bad --master spec {master!r} "
+            "(expected NODE:DOF pairs like 2:1,5:3 or row indices like 0,1,2)")
+        raise typer.Exit(code=2) from None
+    if not rows:
+        err_console.print("[red]error:[/red] --master selected no DOFs")
+        raise typer.Exit(code=2)
+    return rows
+
+
+@app.command("expanded-mac")
+def expanded_mac_cmd(
+    model_file: Annotated[Path, typer.Argument(
+        exists=True, readable=True,
+        help="Model file, or .npz with a 'modes' array.")],
+    master: Annotated[str, typer.Option(
+        "--master", "-m",
+        help="Measured (master) DOFs: 'NODE:DOF[,NODE:DOF...]' (DOF 1-6) for a "
+             "model file, or 0-based mode-matrix row indices 'I[,I...]'.")],
+    n_modes: Annotated[int, typer.Option(
+        "--n-modes", "-n", min=1,
+        help="Modes to solve when the input is a model file.")] = 6,
+    shift: Annotated[float, typer.Option("--shift")] = 0.0,
+    output: Annotated[Path | None, typer.Option(
+        "--output", "-o", help="Save the MAC matrix (.npz or .csv).")] = None,
+    plot: Annotated[Path | None, typer.Option(
+        "--plot", help="Save a MAC heatmap (PNG).")] = None,
+) -> None:
+    """SEREP-expanded self-MAC of a mode set through a master DOF subset.
+
+    Restricts the modes to the master DOFs, expands them back with SEREP
+    through the same basis and correlates the expansion with the
+    original modes (``femtools.correlation.expansion.expanded_mac``) --
+    the result should be the identity for the retained modes.  An
+    installation shipping without the expansion kernel exits with
+    code 3, like every other lazily bound subcommand.
+    """
+    import numpy as np
+
+    try:
+        from femtools.correlation.expansion import expanded_mac  # noqa: F401 (fail fast)
+    except ImportError as exc:
+        raise _missing("expanded-MAC correlation", exc) from exc
+
+    if model_file.suffix.lower() == ".npz":
+        phi, _ = _load_modes(model_file, n_modes, shift)
+        modal: Any = None
+    else:
+        modal = _solve(_load_model(model_file), n_modes, shift)
+        phi = modal.modes
+    phi = np.asarray(phi)
+    rows = _master_rows(master, modal)
+    bad = [r for r in rows if not 0 <= r < phi.shape[0]]
+    if bad:
+        err_console.print(f"[red]error:[/red] master rows {bad} are out of range "
+                          f"for a {phi.shape[0]}-DOF mode matrix")
+        raise typer.Exit(code=2)
+
+    from femtools.script.kernels import expanded_mac_matrix
+
+    try:
+        mac, expansion = expanded_mac_matrix(phi, rows)
+    except ImportError as exc:
+        raise _missing("expanded-MAC correlation", exc) from exc
+    except (ValueError, np.linalg.LinAlgError) as exc:
+        err_console.print(f"[red]error:[/red] expanded MAC failed: {exc}")
+        raise typer.Exit(code=2) from exc
+
+    table = Table(title=f"expanded MAC ({model_file.name}, "
+                        f"{len(rows)} master DOFs)")
+    table.add_column("exp\\FE", justify="right")
+    for j in range(mac.shape[1]):
+        table.add_column(str(j + 1), justify="right")
+    for i in range(mac.shape[0]):
+        table.add_row(str(i + 1), *(f"{mac[i, j]:.3f}" for j in range(mac.shape[1])))
+    console.print(table)
+    if mac.size and mac.shape[0] == mac.shape[1]:
+        diag = np.diag(mac)
+        off = float(np.max(mac - np.diag(diag))) if mac.size > 1 else 0.0
+        console.print(f"diag min={float(np.min(diag)):.6f}  off-diag max={off:.6f}")
+    residual = getattr(expansion, "residual", None)
+    if residual is not None and np.size(residual):
+        console.print(f"expansion residual max={float(np.max(residual)):.3e}")
+
+    if output is not None:
+        if output.suffix.lower() == ".csv":
+            np.savetxt(str(output), mac, delimiter=",", fmt="%.8g")
+        else:
+            np.savez(str(output), mac=mac, master=np.asarray(rows, dtype=int))
+        console.print(f"saved expanded MAC to [bold]{output}[/bold]")
+    if plot is not None:
+        from femtools.viz import plot_mac
+
+        plot_mac(mac, title="expanded MAC", outfile=str(plot))
+        console.print(f"saved expanded-MAC heatmap to [bold]{plot}[/bold]")
 
 
 # ----------------------------------------------------------------------
@@ -1098,6 +1321,194 @@ def load_frf_cmd(
 
 
 # ----------------------------------------------------------------------
+# dump-psd / load-psd
+# ----------------------------------------------------------------------
+_PSD_KEYS = ("psd", "S", "spectra")
+
+
+@app.command("dump-psd")
+def dump_psd_cmd(
+    source_file: Annotated[Path, typer.Argument(
+        exists=True, readable=True,
+        help="Model file to synthesize from, or a plain .npz carrying "
+             "'psd' and 'freq_hz' arrays.")],
+    output: Annotated[Path, typer.Option(
+        "--output", "-o", help="PSD archive to write (.npz).")],
+    input_dofs: Annotated[str | None, typer.Option(
+        "--input", "-i",
+        help="Excitation DOFs 'NODE:DOF[,NODE:DOF...]' (DOF 1-6); required "
+             "when synthesizing from a model file.")] = None,
+    output_dofs: Annotated[str | None, typer.Option(
+        "--response", "--output-dof", "-r",
+        help="Response DOFs 'NODE:DOF[,NODE:DOF...]'; required when "
+             "synthesizing from a model file.")] = None,
+    force_psd: Annotated[float, typer.Option(
+        "--force-psd", "-S", min=0.0,
+        help="One-sided force PSD level [force^2/Hz], applied uncorrelated "
+             "to every excitation DOF.")] = 1.0,
+    fmin: Annotated[float, typer.Option("--fmin", help="Start frequency [Hz].")] = 0.0,
+    fmax: Annotated[float, typer.Option("--fmax", help="End frequency [Hz].")] = 100.0,
+    n_freq: Annotated[int, typer.Option("--n-freq", min=2,
+                                        help="Frequency points.")] = 500,
+    n_modes: Annotated[int, typer.Option("--n-modes", "-n", min=1,
+                                         help="Modes kept in the modal basis.")] = 20,
+    damping: Annotated[str, typer.Option(
+        "--damping", "-z", help=_DAMPING_HELP)] = "0.02",
+    compress: Annotated[bool, typer.Option(
+        "--compress/--no-compress", help="Write a compressed archive.")] = False,
+) -> None:
+    """Write a reloadable response-PSD archive (``femtools.dynamics.random.dump_psd``).
+
+    Synthesizes modal FRFs like the ``frf`` command, closes them with a
+    flat force PSD into stationary response spectra
+    (``femtools.dynamics.random.psd_response``) and stores them with the
+    format tag ``load-psd`` checks for; ``psd``, ``freq_hz`` and ``rms``
+    round-trip bit-identical.  A plain ``.npz`` already carrying ``psd``
+    and ``freq_hz`` is canonicalized instead (the RMS is integrated when
+    absent).  Requires the random-response kernel
+    (``femtools.dynamics.random``); an installation shipping without it
+    exits with code 3, like every other lazily bound subcommand.
+    """
+    import numpy as np
+
+    try:
+        from femtools.dynamics.random import dump_psd
+    except ImportError as exc:
+        raise _missing("PSD archiving", exc) from exc
+
+    if source_file.suffix.lower() == ".npz":
+        try:
+            data = np.load(str(source_file))
+        except (OSError, ValueError) as exc:
+            err_console.print(f"[red]error:[/red] cannot read {source_file}: {exc}")
+            raise typer.Exit(code=2) from exc
+        block: dict[str, Any] = {}
+        for name, keys in (("psd", _PSD_KEYS), ("freq_hz", _FRF_FREQ_KEYS)):
+            for key in keys:
+                if key in data:
+                    block[name] = data[key]
+                    break
+        missing = [name for name in ("psd", "freq_hz") if name not in block]
+        if missing:
+            err_console.print(
+                f"[red]error:[/red] {source_file} has no {'/'.join(missing)} array "
+                f"(found: {sorted(data.keys())}); expected an .npz carrying "
+                "response auto-spectra and their frequency axis")
+            raise typer.Exit(code=2)
+        for key in ("rms", "response"):
+            if key in data:
+                block[key] = data[key] if key == "rms" else str(np.asarray(data[key]).item())
+        spectra: Any = block
+        meta: dict[str, Any] = {"source": source_file.name}
+    else:
+        if input_dofs is None or output_dofs is None:
+            err_console.print(
+                "[red]error:[/red] synthesizing a PSD from a model file needs "
+                "--input and --response DOF selections")
+            raise typer.Exit(code=2)
+        _, frf, damping_spec, _, _ = _synth_frf(
+            source_file, input_dofs, output_dofs, fmin, fmax, n_freq, n_modes, damping)
+        from femtools.dynamics.random import psd_response
+
+        try:
+            spectra = psd_response(frf, force_psd=force_psd)
+        except (TypeError, ValueError) as exc:
+            err_console.print(f"[red]error:[/red] PSD synthesis failed: {exc}")
+            raise typer.Exit(code=2) from exc
+        meta = {"source": source_file.name,
+                "damping": _describe_damping(damping_spec),
+                "force_psd": force_psd}
+
+    try:
+        saved = dump_psd(spectra, output, compress=compress, meta=meta)
+    except (TypeError, ValueError) as exc:
+        err_console.print(f"[red]error:[/red] cannot archive PSD: {exc}")
+        raise typer.Exit(code=2) from exc
+
+    auto = np.atleast_2d(np.asarray(
+        spectra["psd"] if isinstance(spectra, dict) else spectra.psd, dtype=float))
+    console.print(
+        f"archived PSD block {auto.shape[0]} outputs x {auto.shape[1]} "
+        f"frequencies to [bold]{saved}[/bold]")
+
+
+@app.command("load-psd")
+def load_psd_cmd(
+    archive: Annotated[Path, typer.Argument(
+        exists=True, readable=True, help="PSD archive written by dump-psd.")],
+    max_rows: Annotated[int, typer.Option(
+        "--max-rows", min=1, help="Per-DOF statistic rows to print.")] = 10,
+    plot: Annotated[Path | None, typer.Option(
+        "--plot", help="Save a PSD plot (PNG).")] = None,
+    output_index: Annotated[int, typer.Option(
+        "--plot-output", min=0, help="Response row to plot (0-based).")] = 0,
+) -> None:
+    """Inspect a response-PSD archive written by ``dump-psd``.
+
+    Loads the archive with ``femtools.dynamics.random.load_psd``, prints
+    a summary (shape, band, response type, per-DOF RMS and 3-sigma
+    levels, provenance) and optionally saves a log-magnitude plot of one
+    spectrum.  Requires the random-response kernel; an installation
+    shipping without it exits with code 3.
+    """
+    import zipfile
+
+    import numpy as np
+
+    try:
+        from femtools.dynamics.random import load_psd
+    except ImportError as exc:
+        raise _missing("PSD archiving", exc) from exc
+
+    try:
+        spectra = load_psd(archive)
+    except (ValueError, OSError, zipfile.BadZipFile) as exc:
+        err_console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    freq = np.asarray(spectra.freq_hz, dtype=float).reshape(-1)
+    table = Table(title=f"PSD archive {archive.name}")
+    table.add_column("field", justify="left")
+    table.add_column("value", justify="left")
+    table.add_row("shape", f"{spectra.n_out} outputs x {spectra.n_freq} frequencies")
+    if freq.size:
+        table.add_row("band", f"{float(freq[0]):g} - {float(freq[-1]):g} Hz")
+    table.add_row("response", str(spectra.response))
+    table.add_row("cross spectra", "yes" if spectra.cross_psd is not None else "no")
+    for name in ("outputs", "inputs"):
+        dofs = getattr(spectra, name, None)
+        if dofs is not None:
+            values = np.asarray(dofs).reshape(-1).tolist()
+            table.add_row(f"{name} (DOF ids)", ", ".join(str(int(v)) for v in values))
+    for key, value in (spectra.meta or {}).items():
+        if key not in ("loaded_from", "frf_meta"):
+            table.add_row(f"meta.{key}", str(value))
+    console.print(table)
+
+    rms = np.asarray(spectra.rms, dtype=float).reshape(-1)
+    stat = Table(title="response statistics")
+    stat.add_column("output", justify="right")
+    stat.add_column("rms (1-sigma)", justify="right")
+    stat.add_column("3-sigma", justify="right")
+    for i in range(min(rms.size, max_rows)):
+        stat.add_row(str(i), f"{float(rms[i]):.6g}", f"{3.0 * float(rms[i]):.6g}")
+    console.print(stat)
+    if rms.size > max_rows:
+        console.print(f"... {rms.size - max_rows} more outputs (raise --max-rows)")
+
+    if plot is not None:
+        if output_index >= spectra.n_out:
+            err_console.print(
+                f"[red]error:[/red] output {output_index} is out of range for a "
+                f"block of {spectra.n_out} spectra")
+            raise typer.Exit(code=2)
+        from femtools.viz import plot_psd
+
+        plot_psd(spectra, output_index, outfile=str(plot))
+        console.print(f"saved PSD plot to [bold]{plot}[/bold]")
+
+
+# ----------------------------------------------------------------------
 # reduce
 # ----------------------------------------------------------------------
 _REDUCE_METHODS = ("guyan", "irs", "serep", "craig-bampton")
@@ -1544,6 +1955,136 @@ def estimate_frf_cmd(
         plot_frf(np.asarray(H), 0, 0, freq=freq,
                  title=f"{est.upper()} FRF estimate", outfile=str(plot))
         console.print(f"saved FRF plot to [bold]{plot}[/bold]")
+
+
+# ----------------------------------------------------------------------
+# era
+# ----------------------------------------------------------------------
+_IRF_KEYS = ("h", "irf", "impulse", "markov")
+_DT_KEYS = ("dt", "sample_step", "ts")
+
+
+def _era_data(data: Any, data_file: Path) -> tuple[Any, float | None, Any, Any]:
+    """Split an ``.npz`` payload into ``(h, dt, frf, freq_hz)`` for ERA.
+
+    A file carrying a frequency axis is an FRF block (e.g. saved by
+    ``frf -o`` / ``estimate-frf -o`` or archived by ``dump-frf``);
+    anything else must carry impulse responses plus their time base.
+    """
+    import numpy as np
+
+    keys = list(data.keys())
+    freq = next((data[key] for key in _FRF_FREQ_KEYS if key in keys), None)
+    if freq is not None:
+        H = next((data[key] for key in _FRF_H_KEYS if key in keys), None)
+        if H is None:
+            err_console.print(
+                f"[red]error:[/red] {data_file} carries a frequency axis but no "
+                f"H/frf array (found: {sorted(keys)})")
+            raise typer.Exit(code=2)
+        return None, None, np.asarray(H), np.asarray(freq, dtype=float).reshape(-1)
+
+    h = next((data[key] for key in _IRF_KEYS if key in keys), None)
+    if h is None:
+        err_console.print(
+            f"[red]error:[/red] {data_file} has neither an FRF block "
+            f"(H + freq_hz) nor impulse responses ({'/'.join(_IRF_KEYS)}); "
+            f"found: {sorted(keys)}")
+        raise typer.Exit(code=2)
+    dt = next((float(np.asarray(data[key], dtype=float).reshape(-1)[0])
+               for key in _DT_KEYS if key in keys), None)
+    if dt is None:
+        dt = 1.0 / _resolve_fs(data, None)  # exits with a clear message when absent
+    return np.asarray(h, dtype=float), dt, None, None
+
+
+@app.command("era")
+def era_cmd(
+    data_file: Annotated[Path, typer.Argument(
+        exists=True, readable=True,
+        help=".npz with impulse responses ('h'/'irf', time along the last axis, "
+             "plus 'dt'/'fs'/'t'), or an FRF block ('H' + 'freq_hz', e.g. saved "
+             "by 'frf -o', 'estimate-frf -o' or 'dump-frf').")],
+    order: Annotated[int, typer.Option(
+        "--order", "-n", min=1, help="Model order (mode pairs kept in the "
+                                     "realization).")] = 10,
+    fmin: Annotated[float | None, typer.Option(
+        "--fmin", help="Keep only poles above this frequency [Hz].")] = None,
+    fmax: Annotated[float | None, typer.Option(
+        "--fmax", help="Keep only poles below this frequency [Hz].")] = None,
+    output: Annotated[Path | None, typer.Option(
+        "--output", "-o",
+        help="Save freq_hz, damping, poles (and modes) to .npz.")] = None,
+) -> None:
+    """Identify modal parameters with the Eigensystem Realization Algorithm.
+
+    Wraps ``femtools.mpe.era.era`` (Juang-Pappa 1985) over measured
+    impulse responses; an FRF block is inverse-transformed first with
+    ``femtools.mpe.lsce.irf_from_frf``.  Requires the ERA kernel; an
+    installation shipping without it exits with code 3, like every
+    other lazily bound subcommand.
+    """
+    import numpy as np
+
+    try:
+        from femtools.mpe.era import era  # noqa: F401  (probe first: fail fast)
+    except ImportError as exc:
+        raise _missing("ERA modal identification", exc) from exc
+
+    try:
+        data = np.load(str(data_file))
+    except (OSError, ValueError) as exc:
+        err_console.print(f"[red]error:[/red] cannot read {data_file}: {exc}")
+        raise typer.Exit(code=2) from exc
+    h, dt, frf, freq_hz = _era_data(data, data_file)
+
+    f_range = None
+    if fmin is not None or fmax is not None:
+        f_range = (0.0 if fmin is None else float(fmin),
+                   np.inf if fmax is None else float(fmax))
+
+    from femtools.script.kernels import era_from_data
+
+    try:
+        result = era_from_data(h, dt, frf=frf, freq_hz=freq_hz,
+                               order=order, f_range=f_range)
+    except ImportError as exc:
+        raise _missing("ERA modal identification", exc) from exc
+    except (ValueError, RuntimeError) as exc:
+        # RuntimeError: the realization found no physical poles
+        err_console.print(f"[red]error:[/red] ERA identification failed: {exc}")
+        raise typer.Exit(code=2) from exc
+
+    freqs = np.atleast_1d(np.asarray(result.freq_hz, dtype=float))
+    zetas = np.atleast_1d(np.asarray(getattr(result, "damping", []), dtype=float))
+    table = Table(title=f"ERA modal parameters ({data_file.name}, order {order})")
+    table.add_column("mode", justify="right")
+    table.add_column("frequency [Hz]", justify="right")
+    table.add_column("damping [%]", justify="right")
+    for i, f in enumerate(freqs):
+        zeta = f"{100.0 * float(zetas[i]):.4f}" if i < zetas.size else "-"
+        table.add_row(str(i + 1), f"{float(f):.6g}", zeta)
+    console.print(table)
+    shapes = getattr(result, "mode_shapes", None)
+    if shapes is not None:
+        shapes = np.atleast_2d(np.asarray(shapes))
+        console.print(f"identified shapes: {shapes.shape[0]} outputs x "
+                      f"{shapes.shape[1]} modes")
+    if not freqs.size:
+        err_console.print("[yellow]warning:[/yellow] no physical poles were "
+                          "identified; raise --order or widen the band")
+
+    if output is not None:
+        payload: dict[str, Any] = {
+            "freq_hz": freqs,
+            "damping": zetas,
+            "poles": np.asarray(getattr(result, "poles", []), dtype=complex),
+            "method": np.asarray(str(getattr(result, "method", "era")) or "era"),
+        }
+        if shapes is not None:
+            payload["modes"] = np.asarray(shapes)
+        np.savez(str(output), **payload)
+        console.print(f"saved ERA result to [bold]{output}[/bold]")
 
 
 # ----------------------------------------------------------------------
