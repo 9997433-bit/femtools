@@ -25,7 +25,7 @@ from .beam import beam2
 from .frames import line_frame, shell_frame
 from .scalar import damper, mass_element, spring
 from .shell import quad4, tria3
-from .solid import hex8, tet4
+from .solid import hex8, tet4, tet10
 
 __all__ = [
     "ElementContext",
@@ -49,6 +49,7 @@ __all__ = [
     "shell_frame",
     "spring",
     "tet4",
+    "tet10",
     "tria3",
     "truss2d",
 ]

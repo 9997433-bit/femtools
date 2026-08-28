@@ -9,7 +9,8 @@ dictionaries that expose the same field names.
 patch, locking and rigid-body cases quoted in the documentation,
 :mod:`femtools.fea.reduction` the Guyan / IRS / SEREP condensation bases,
 :mod:`femtools.fea.recover` the element stress and strain recovery (plus the
-nodal average of :func:`~femtools.fea.recover.average_nodal`) and
+nodal average of :func:`~femtools.fea.recover.average_nodal` and the
+Zienkiewicz-Zhu patch recovery of :func:`~femtools.fea.recover.recover_spr`) and
 :mod:`femtools.fea.mpc` the ``RBE2`` rigid bodies and ``RBE3`` interpolation
 constraints, which :func:`~femtools.fea.assemble.assemble_km` composes and
 applies on its own.
@@ -37,6 +38,7 @@ from .recover import (
     NodalStressResult,
     StressResult,
     average_nodal,
+    recover_spr,
     recover_strain,
     recover_stress,
 )
@@ -77,6 +79,7 @@ __all__ = [
     "mass_normalize",
     "material_from_record",
     "plane_stress_D",
+    "recover_spr",
     "recover_strain",
     "recover_stress",
     "serep",
