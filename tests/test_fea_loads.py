@@ -31,6 +31,7 @@ def test_solve_static_uses_model_loads_for_axial_bar(
     force = 2.0e3
     model.add_load(node_id=2, force=(force, 0.0, 0.0))
 
-    static = solve_static(model)
+    result = solve_static(model, full_result=True)
     expected = force * data["L"] / (data["E"] * data["A"])
-    assert static.u[static.dof_map.index(2, 0)] == pytest.approx(expected, rel=1e-12, abs=0.0)
+    ux = result.assembly.dof_map.index(2, 0)
+    assert result.u[ux] == pytest.approx(expected, rel=1e-12, abs=0.0)
