@@ -164,9 +164,10 @@ class ConstraintTransform:
     dof_map:
         The DOF numbering the transform is written against.
     G:
-        ``(n_dof, n_dof)`` operator.  Identity on the independent DOFs, the
-        rigid-body coefficients on the dependent rows, zero on the dependent
-        columns.  Idempotent, so applying it twice changes nothing.
+        ``(n_dof, n_dof)`` operator, built on first use.  Identity on the
+        independent DOFs, the rigid-body coefficients on the dependent rows,
+        zero on the dependent columns.  Idempotent, so applying it twice
+        changes nothing.
     dependent:
         Eliminated global DOF indices, ascending.
     sources:
@@ -180,16 +181,27 @@ class ConstraintTransform:
     """
 
     dof_map: DofMap
-    G: sp.csr_matrix
     dependent: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))
     sources: dict[int, Any] = field(default_factory=dict)
+    _matrix: sp.csr_matrix | None = field(default=None, repr=False)
 
     # -- construction ---------------------------------------------------
     @classmethod
     def identity(cls, dof_map: DofMap) -> ConstraintTransform:
-        """The empty transform: nothing is eliminated."""
-        n = dof_map.n_dof
-        return cls(dof_map=dof_map, G=sp.identity(n, format="csr"))
+        """The empty transform: nothing is eliminated.
+
+        The operator is not materialised -- every model without rigid bodies
+        builds one of these, and an ``n_dof`` sparse identity per assembly is a
+        cost with nothing to show for it.
+        """
+        return cls(dof_map=dof_map)
+
+    @property
+    def G(self) -> sp.csr_matrix:  # noqa: N802 - the name used in the literature
+        """The square operator (see the class docstring)."""
+        if self._matrix is None:
+            self._matrix = sp.identity(self.dof_map.n_dof, format="csr")
+        return self._matrix
 
     @classmethod
     def from_rows(
@@ -230,12 +242,14 @@ class ConstraintTransform:
             (np.concatenate(data), (np.concatenate(rr), np.concatenate(cc))), shape=(n, n)
         ).tocsr()
         G.sum_duplicates()
-        return cls(dof_map=dof_map, G=G, dependent=dependent, sources=dict(sources or {}))
+        return cls(
+            dof_map=dof_map, dependent=dependent, sources=dict(sources or {}), _matrix=G
+        )
 
     # -- basics ---------------------------------------------------------
     @property
     def n_dof(self) -> int:
-        return int(self.G.shape[0])
+        return int(self.dof_map.n_dof)
 
     @property
     def is_identity(self) -> bool:

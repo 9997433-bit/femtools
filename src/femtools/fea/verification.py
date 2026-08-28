@@ -1112,7 +1112,7 @@ def stress_patch_error(etype: str = "HEX8", **case: Any) -> dict[str, float]:
         free_check = {nid: gradient @ coords[nid] for nid in coords if nid not in boundary}
 
     asm = assemble_km(model)
-    u = solve_static(model, {}, assembly=asm, enforced=enforced)
+    u = np.asarray(solve_static(model, {}, assembly=asm, enforced=enforced))
     result = recover_stress(model, u, assembly=asm)
 
     def _voigt_of(tensor: np.ndarray, *, engineering: bool) -> np.ndarray:
@@ -1232,8 +1232,10 @@ def rbe2_offset_moment(
     }
 
     asm_rigid = assemble_km(rigid)
-    u_rigid = solve_static(rigid, {(tip + 1, 0): force}, assembly=asm_rigid)
-    u_direct = solve_static(direct, {(tip, 0): force, (tip, 4): arm * force})
+    u_rigid = np.asarray(solve_static(rigid, {(tip + 1, 0): force}, assembly=asm_rigid))
+    u_direct = np.asarray(
+        solve_static(direct, {(tip, 0): force, (tip, 4): arm * force})
+    )
 
     dofs = asm_rigid.dof_map
     beam_dofs = np.concatenate([dofs.node_dofs(nid) for nid in range(1, tip + 1)])
