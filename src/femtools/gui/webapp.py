@@ -57,6 +57,10 @@ def create_app(state: GuiState | None = None) -> Any:
     async def results() -> dict:
         return gui.results_summary()
 
+    @app.get("/api/stress")
+    async def stress(name: str = "", max_rows: int = 20) -> dict:
+        return gui.stress_table(name=name or None, max_rows=max_rows)
+
     @app.post("/api/script")
     async def run_script(request: ScriptRequest) -> dict:
         return gui.run_script(request.source)

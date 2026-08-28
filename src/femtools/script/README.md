@@ -56,7 +56,8 @@ femtools script -c "NEW PROJECT; ADD NODE 1 0 0 0; PRINT SUMMARY"
 ```ebnf
 script     = { statement , ( ";" | newline ) } ;
 statement  = new | add_node | add_mat | add_prop | add_elem | add_load
-           | spc | set | solve | mac | save | print ;
+           | add_rbe2 | add_rbe3 | spc | set | solve | recover | mac
+           | save | print ;
 
 new        = "NEW" , "PROJECT" , [ name ] ;
 add_node   = "ADD" , "NODE" , id , number , number , number ;
@@ -66,11 +67,17 @@ add_prop   = "ADD" , ("PROP" | "PROPERTY") , id , "TYPE=" ptype ,
 add_elem   = "ADD" , ("ELEM" | "ELEMENT") , id , "TYPE=" etype ,
              "NODES=" idlist , [ "PROP=" id ] , { option } ;
 add_load   = "ADD" , "LOAD" , id , component , { component } ;
+add_rbe2   = "ADD" , "RBE2" , id , "INDEP=" id , "DEP=" idlist ,
+             [ "DOF=" comps ] ;
+add_rbe3   = "ADD" , "RBE3" , id , "DEP=" id , "INDEP=" idlist ,
+             [ "DOF=" comps ] , [ "IDOF=" comps ] ,
+             [ "WEIGHTS=" numberlist ] ;
 spc        = "SPC" , id , ( mask | "ALL" | "FREE" | "DOF=" idlist ) ;
 set        = "SET" , assignment , { assignment } ;
 solve      = "SOLVE" , ( "MODES" , [ "N=" int ] , [ "SHIFT=" number ] ,
                          [ "NAME=" name ]
                        | "STATIC" , [ "NAME=" name ] ) ;
+recover    = "RECOVER" , "STRESS" , [ "NAME=" name ] , [ "RESULT=" name ] ;
 mac        = "MAC" , [ "A=" name ] , [ "B=" name ] , [ "NAME=" name ] ;
 save       = "SAVE" , path ;
 print      = "PRINT" , [ "SUMMARY" | "RESULTS" ] ;
@@ -79,6 +86,8 @@ option     = key , "=" , value ;
 component  = ("FX"|"FY"|"FZ"|"MX"|"MY"|"MZ") , "=" , number ;
 assignment = name , "=" , value ;
 idlist     = id , { "," , id } ;
+numberlist = number , { "," , number } ;
+comps      = DOF numbers 1..6 : comma list ("1,2,3") or compact ("123") ;
 mask       = six characters from {"0","1"} , e.g. "111000" ;
 ```
 
@@ -122,6 +131,23 @@ Applies a nodal force (`FX FY FZ`) and/or moment (`MX MY MZ`) in global
 components — the load case that `SOLVE STATIC` solves. At least one
 component is required; components you omit are zero.
 
+### `ADD RBE2 <id> INDEP=<node> DEP=<n1,n2,...> [DOF=<comps>]`
+
+Adds a rigid body element (Nastran RBE2 layout) via `FEModel.add_rbe2`:
+the `DEP` nodes rigidly follow the single `INDEP` node.  `DOF` selects
+the constrained components of the dependent nodes (default all six)
+either as a comma list (`DOF=1,2,3`) or compact digits (`DOF=123`).
+`INDEPENDENT=` and `DEPS=`/`DEPENDENTS=` are accepted aliases.
+
+### `ADD RBE3 <id> DEP=<node> INDEP=<n1,n2,...> [DOF=<comps>] [IDOF=<comps>] [WEIGHTS=<w1,w2,...>]`
+
+Adds an interpolation constraint (Nastran RBE3 layout) via
+`FEModel.add_rbe3`: the single `DEP` node's `DOF` components (default
+`1,2,3`) become a weighted average of the `INDEP` nodes' `IDOF`
+components (default `1,2,3`).  `WEIGHTS` is an optional comma list of
+positive weights, one per independent node (default equal weights).
+Unlike `ADD RBE2` this is not a rigid weld.
+
 ### `SPC <node_id> <constraint>`
 
 Applies a single-point constraint on the six nodal DOFs
@@ -164,6 +190,16 @@ database). The `StaticResult` is stored in `engine.results[NAME]`
 (default `"static"`); read displacements from it with
 `result.node_displacement(node_id)` or `result.u`.
 
+### `RECOVER STRESS [NAME=<name>] [RESULT=<name>]`
+
+Recovers element centroid stresses
+(`femtools.fea.recover.recover_stress`) from a stored static result.
+`RESULT` names the static result to use (default: the most recent
+`SOLVE STATIC`).  The `StressResult` is stored in
+`engine.results[NAME]` (default `"stress"`); read the equivalent
+stress from `result.von_mises` and the Voigt components from
+`result.stress`.
+
 ### `MAC [A=<result>] [B=<result>] [NAME=<name>]`
 
 Computes the Modal Assurance Criterion matrix between two stored modal
@@ -186,11 +222,11 @@ active model; `RESULTS` lists stored result names and types.
 All parse and execution failures raise `femtools.script.ScriptError`,
 which reports the offending statement and its 1-based index within the
 script. Commands that need sibling modules (`SOLVE MODES` /
-`SOLVE STATIC` -> `femtools.fea`, `MAC` -> `femtools.correlation`,
-`SAVE` -> `femtools.io`, `NEW PROJECT` -> `femtools.core`) raise a clear
-`ScriptError` if the module is not installed, rather than failing at
-import time. Referencing an unassigned `$variable` is a `ScriptError`
-too.
+`SOLVE STATIC` / `RECOVER STRESS` -> `femtools.fea`, `MAC` ->
+`femtools.correlation`, `SAVE` -> `femtools.io`, `NEW PROJECT` ->
+`femtools.core`) raise a clear `ScriptError` if the module is not
+installed, rather than failing at import time. Referencing an
+unassigned `$variable` is a `ScriptError` too.
 
 ## Embedding
 

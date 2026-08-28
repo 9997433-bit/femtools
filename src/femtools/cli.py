@@ -2,9 +2,9 @@
 
 Typer application exposed as the ``femtools`` console script
 (``femtools.cli:app``).  Subcommands: ``solve-modes``, ``read-mesh``,
-``write-mesh``, ``recover-stress``, ``mac``, ``report-mac``, ``frf``,
-``reduce``, ``estimate-frf``, ``update``, ``pretest``, ``script``,
-``gui``.
+``write-mesh``, ``recover-stress``, ``plot-stress``, ``mac``,
+``report-mac``, ``frf``, ``reduce``, ``estimate-frf``, ``update``,
+``pretest``, ``script``, ``gui``.
 
 Sibling packages (``femtools.core``, ``femtools.fea``, ...) are imported
 lazily inside each command; if one is missing the command prints a clear
@@ -406,28 +406,14 @@ def _stress_parts(result: Any) -> tuple[list[Any] | None, Any, Any]:
             comps, None if vm is None else np.asarray(vm, dtype=float).reshape(-1))
 
 
-@app.command("recover-stress")
-def recover_stress_cmd(
-    model_file: Annotated[Path, typer.Argument(
-        exists=True, readable=True, help="Model file.")],
-    load: Annotated[list[str] | None, typer.Option(
-        "--load", "-l",
-        help="Add a nodal load 'NODE:DOF=VALUE' (DOF 1-6: fx fy fz mx my mz); "
-             "repeatable.  Loads stored in the model file are kept.")] = None,
-    output: Annotated[Path | None, typer.Option(
-        "--output", "-o",
-        help="Save element_ids, stress (and von_mises) to .npz.")] = None,
-    max_rows: Annotated[int, typer.Option(
-        "--max-rows", min=1, help="Table rows to print.")] = 20,
-) -> None:
-    """Solve a linear static case and recover element centroid stresses.
+def _recover_pipeline(model_file: Path, load: list[str] | None) -> tuple[Any, Any]:
+    """Shared solve+recover pipeline of ``recover-stress`` / ``plot-stress``.
 
-    Requires the stress-recovery kernel (``femtools.fea.recover``); an
-    installation shipping without it exits with code 3, like every
-    other lazily bound subcommand.
+    Lazily imports the stress-recovery kernel and the static solver (an
+    installation shipping without either exits with code 3), applies the
+    ``--load`` specs, runs the static solve and returns ``(model,
+    stress_result)``.
     """
-    import numpy as np
-
     try:
         from femtools.fea.recover import recover_stress
     except ImportError as exc:
@@ -476,6 +462,32 @@ def recover_stress_cmd(
     except ValueError as exc:
         err_console.print(f"[red]error:[/red] stress recovery failed: {exc}")
         raise typer.Exit(code=2) from exc
+    return model, result
+
+
+@app.command("recover-stress")
+def recover_stress_cmd(
+    model_file: Annotated[Path, typer.Argument(
+        exists=True, readable=True, help="Model file.")],
+    load: Annotated[list[str] | None, typer.Option(
+        "--load", "-l",
+        help="Add a nodal load 'NODE:DOF=VALUE' (DOF 1-6: fx fy fz mx my mz); "
+             "repeatable.  Loads stored in the model file are kept.")] = None,
+    output: Annotated[Path | None, typer.Option(
+        "--output", "-o",
+        help="Save element_ids, stress (and von_mises) to .npz.")] = None,
+    max_rows: Annotated[int, typer.Option(
+        "--max-rows", min=1, help="Table rows to print.")] = 20,
+) -> None:
+    """Solve a linear static case and recover element centroid stresses.
+
+    Requires the stress-recovery kernel (``femtools.fea.recover``); an
+    installation shipping without it exits with code 3, like every
+    other lazily bound subcommand.
+    """
+    import numpy as np
+
+    model, result = _recover_pipeline(model_file, load)
 
     ids, comps, vm = _stress_parts(result)
     if ids is None or comps is None:
@@ -512,6 +524,57 @@ def recover_stress_cmd(
             payload["von_mises"] = vm
         np.savez(str(output), **payload)
         console.print(f"saved stress result to [bold]{output}[/bold]")
+
+
+# ----------------------------------------------------------------------
+# plot-stress
+# ----------------------------------------------------------------------
+@app.command("plot-stress")
+def plot_stress_cmd(
+    model_file: Annotated[Path, typer.Argument(
+        exists=True, readable=True, help="Model file.")],
+    load: Annotated[list[str] | None, typer.Option(
+        "--load", "-l",
+        help="Add a nodal load 'NODE:DOF=VALUE' (DOF 1-6: fx fy fz mx my mz); "
+             "repeatable.  Loads stored in the model file are kept.")] = None,
+    component: Annotated[str, typer.Option(
+        "--component", "-c",
+        help="Fringe value: 'von_mises' or a Voigt component "
+             "(xx yy zz xy yz zx, also spelled sxx ...).")] = "von_mises",
+    output: Annotated[Path, typer.Option(
+        "--output", "-o", help="Plot file (PNG).")] = Path("stress.png"),
+    cmap: Annotated[str, typer.Option(
+        "--cmap", help="matplotlib colormap name.")] = "viridis",
+) -> None:
+    """Solve a static case, recover stresses and save a colored mesh plot.
+
+    Colors the mesh by von Mises stress (or a named component) with
+    :func:`femtools.viz.plot_stress`.  Requires the same kernels as
+    ``recover-stress`` (``femtools.fea.recover`` and the static solver);
+    an installation shipping without them exits with code 3.
+    """
+    import numpy as np
+
+    model, result = _recover_pipeline(model_file, load)
+
+    from femtools.viz.plots import plot_stress
+
+    try:
+        plot_stress(model, result, component=component, cmap=cmap,
+                    outfile=str(output))
+    except ValueError as exc:
+        # unknown component name, or a result with nothing to color by
+        err_console.print(f"[red]error:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+    n_recovered = len(getattr(result, "element_ids", []) or [])
+    vm = getattr(result, "von_mises", None)
+    if vm is not None and np.size(vm):
+        console.print(f"recovered {n_recovered} elements, "
+                      f"max von Mises {float(np.max(vm)):.6g}")
+    else:
+        console.print(f"recovered {n_recovered} elements")
+    console.print(f"saved stress plot to [bold]{output}[/bold]")
 
 
 # ----------------------------------------------------------------------

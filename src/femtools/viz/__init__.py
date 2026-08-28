@@ -15,7 +15,9 @@ plot is requested, so importing :mod:`femtools.viz` never needs it.
 optional ``pyvista`` package when it is importable (see
 :func:`pyvista_available`) and falls back to the matplotlib 3-D
 wireframe otherwise; like plotly, pyvista is never imported by
-``import femtools.viz`` itself.
+``import femtools.viz`` itself.  :func:`plot_stress` colors the mesh by
+a recovered stress field (von Mises by default) with matplotlib, or
+through the same optional pyvista path with ``backend="pyvista"``.
 
 :mod:`femtools.viz.report` additionally builds self-contained HTML or
 plain-text MAC correlation reports (matplotlib is optional there: the
@@ -31,6 +33,7 @@ from femtools.viz.plots import (
     plot_mesh,
     plot_mesh3d,
     plot_mode,
+    plot_stress,
     plotly_available,
     pyvista_available,
     set_default_backend,
@@ -40,6 +43,7 @@ from femtools.viz.report import mac_report_html, mac_report_text, save_mac_repor
 __all__ = [
     "plot_mesh",
     "plot_mesh3d",
+    "plot_stress",
     "plot_mac",
     "plot_frf",
     "plot_mode",

@@ -28,6 +28,7 @@ import numpy as np
 __all__ = [
     "plot_mesh",
     "plot_mesh3d",
+    "plot_stress",
     "plot_mac",
     "plot_frf",
     "plot_mode",
@@ -444,6 +445,376 @@ def _mpl_mesh3d(model: Any, *, color: str, title: str | None, outfile: str | Non
     ax.set_title(title or f"{getattr(model, 'name', 'model')}: "
                           f"{len(coords)} nodes, {len(model.elements)} elements")
     return _finish(fig, outfile)
+
+
+# ----------------------------------------------------------------------
+# stress fringe plot (matplotlib default; optional pyvista like plot_mesh3d)
+# ----------------------------------------------------------------------
+# filled-face tables per element type (indices into the element node list);
+# surface elements are their own face, solids expose their boundary faces
+_FACE_TABLE: dict[str, tuple[tuple[int, ...], ...]] = {
+    "TRIA3": ((0, 1, 2),),
+    "QUAD4": ((0, 1, 2, 3),),
+    "TET4": ((0, 2, 1), (0, 1, 3), (1, 2, 3), (0, 3, 2)),
+    "HEX8": (
+        (0, 3, 2, 1), (4, 5, 6, 7),
+        (0, 1, 5, 4), (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7),
+    ),
+}
+
+_LINE_TYPES = frozenset({"BAR2", "BEAM2", "TRUSS2D", "SPRING", "DAMPER"})
+
+#: Voigt component order assumed for 6-wide stress rows (matches
+#: ``femtools.fea.recover.COMPONENTS`` without importing the kernel).
+_VOIGT = ("xx", "yy", "zz", "xy", "yz", "zx")
+_VM_ALIASES = frozenset({"von_mises", "vonmises", "von-mises", "vm", "mises"})
+
+
+def _von_mises6(rows: np.ndarray) -> np.ndarray:
+    """Von Mises equivalent of ``(n, 6)`` Voigt stress rows."""
+    s = np.atleast_2d(np.asarray(rows, dtype=float))
+    dev = (s[:, 0] - s[:, 1]) ** 2 + (s[:, 1] - s[:, 2]) ** 2 + (s[:, 2] - s[:, 0]) ** 2
+    shear = s[:, 3] ** 2 + s[:, 4] ** 2 + s[:, 5] ** 2
+    return np.sqrt(0.5 * dev + 3.0 * shear)
+
+
+def _component_scalars(rows: np.ndarray, component: Any,
+                       components: tuple[str, ...]) -> tuple[np.ndarray, str]:
+    """Reduce ``(n, k)`` component rows to per-element scalars ``(values, label)``."""
+    rows = np.atleast_2d(np.asarray(rows, dtype=float))
+    if isinstance(component, (int, np.integer)):
+        idx = int(component)
+        if not 0 <= idx < rows.shape[1]:
+            raise ValueError(f"component index {idx} out of range 0..{rows.shape[1] - 1}")
+        label = components[idx] if idx < len(components) else f"component {idx}"
+        return rows[:, idx], f"stress {label}"
+    name = str(component).strip().lower()
+    if name in _VM_ALIASES:
+        if rows.shape[1] != 6:
+            raise ValueError(
+                "von Mises needs 6 Voigt components per element, got "
+                f"{rows.shape[1]}; pass component=<index> instead")
+        return _von_mises6(rows), "von Mises stress"
+    lookup = [str(c).lower() for c in components]
+    key = name[1:] if name.startswith("s") and name[1:] in lookup else name
+    if key in lookup:
+        idx = lookup.index(key)
+        if idx >= rows.shape[1]:
+            raise ValueError(f"component {component!r} is column {idx} but the stress "
+                             f"rows only have {rows.shape[1]} columns")
+        return rows[:, idx], f"stress {components[idx]}"
+    raise ValueError(
+        f"unknown stress component {component!r}: use 'von_mises', one of "
+        f"{', '.join(components)}, or a 0-based column index")
+
+
+def _stress_values(stress: Any, component: Any) -> tuple[dict[Any, float], str]:
+    """Duck-typed ``{element_id: scalar}`` extraction plus a colorbar label.
+
+    Accepts a ``StressResult``-like object (``element_ids`` plus a
+    ``(n, 6)`` ``stress`` array and optionally a precomputed per-element
+    array attribute such as ``von_mises`` or ``max_shear``) or a plain
+    mapping ``{element_id: scalar | 6 Voigt components}``.
+    """
+    if isinstance(stress, dict):
+        if not stress:
+            raise ValueError("the stress mapping is empty: nothing to color by")
+        widths = {np.asarray(v, dtype=float).reshape(-1).size for v in stress.values()}
+        if widths == {1}:
+            name = str(component).strip().lower()
+            label = "stress" if name in _VM_ALIASES else f"stress {component}"
+            return ({eid: float(np.asarray(v).reshape(-1)[0])
+                     for eid, v in stress.items()}, label)
+        rows = np.vstack([np.asarray(v, dtype=float).reshape(1, -1)
+                          for v in stress.values()])
+        values, label = _component_scalars(rows, component, _VOIGT)
+        return dict(zip(stress.keys(), values.tolist(), strict=True)), label
+
+    ids = None
+    for attr in ("element_ids", "eids", "elements", "ids"):
+        ids = getattr(stress, attr, None)
+        if ids is not None:
+            break
+    if ids is None:
+        raise ValueError(
+            f"cannot read element ids from {type(stress).__name__}; pass a "
+            "StressResult or a {element_id: value} mapping")
+    ids = list(ids)
+
+    # a per-element array attribute named like the component wins: this
+    # resolves 'von_mises' (and e.g. 'max_shear') on a StressResult directly
+    name = str(component).strip().lower()
+    attr_name = "von_mises" if name in _VM_ALIASES else name
+    direct = getattr(stress, attr_name, None)
+    if direct is not None:
+        arr = np.asarray(direct, dtype=float).reshape(-1)
+        if arr.size == len(ids):
+            label = ("von Mises stress" if attr_name == "von_mises"
+                     else str(component).strip())
+            return dict(zip(ids, arr.tolist(), strict=True)), label
+
+    rows = getattr(stress, "stress", None)
+    if rows is None:
+        raise ValueError(f"{type(stress).__name__} has no 'stress' component array")
+    components = tuple(getattr(stress, "components", _VOIGT))
+    values, label = _component_scalars(rows, component, components)
+    if values.size != len(ids):
+        raise ValueError(f"{len(ids)} element ids but {values.size} stress rows")
+    return dict(zip(ids, values.tolist(), strict=True)), label
+
+
+def _element_faces(etype: str, nodes: tuple[int, ...],
+                   coords: dict[int, np.ndarray]) -> list[list[np.ndarray]]:
+    """Filled polygons (vertex lists) of one element; [] for non-surface types."""
+    faces = _FACE_TABLE.get(etype)
+    if faces is None:
+        # unknown types with 3+ nodes: close the node loop, like the wireframe
+        if etype in _LINE_TYPES or etype == "MASS" or len(nodes) < 3:
+            return []
+        faces = (tuple(range(len(nodes))),)
+    out = []
+    for face in faces:
+        try:
+            out.append([coords[nodes[i]] for i in face])
+        except (KeyError, IndexError):
+            continue
+    return out
+
+
+def plot_stress(
+    model: Any,
+    stress: Any,
+    component: Any = "von_mises",
+    ax: Any = None,
+    *,
+    cmap: str = "viridis",
+    vmin: float | None = None,
+    vmax: float | None = None,
+    show_edges: bool = True,
+    colorbar: bool = True,
+    missing_color: str = "0.75",
+    title: str | None = None,
+    outfile: str | None = None,
+    backend: str | None = None,
+    window_size: tuple[int, int] = (1024, 768),
+    show: bool = False,
+):
+    """Color the mesh of *model* by a recovered stress field.
+
+    ``stress`` is a :class:`femtools.fea.recover.StressResult` (or any
+    object with ``element_ids`` and a ``(n, 6)`` Voigt ``stress`` array)
+    or a plain mapping ``{element_id: scalar | 6 components}``.
+    ``component`` selects the fringe value: ``"von_mises"`` (default), a
+    Voigt component name (``"xx"``, ``"yy"``, ``"zz"``, ``"xy"``,
+    ``"yz"``, ``"zx"``, also spelled ``"sxx"`` ...), a 0-based column
+    index, or the name of a per-element array attribute of the result
+    (e.g. ``"max_shear"``).
+
+    Surface elements are drawn as filled polygons, solid elements by
+    their boundary faces and line elements as colored segments; elements
+    without a recovered value (e.g. ``StressResult.skipped`` entries)
+    stay as a ``missing_color`` wireframe.  Planar (XY) models are drawn
+    in 2D, everything else in 3D.
+
+    matplotlib is the default and only required backend.  Pass
+    ``backend="pyvista"`` to render through the same optional pyvista
+    path as :func:`plot_mesh3d` (shaded VTK cells with per-cell
+    scalars); that raises ImportError when pyvista is not installed and
+    is never imported otherwise.  Returns the matplotlib Figure (or the
+    ``pyvista.Plotter``, whose ``outfile=`` is an off-screen screenshot
+    and ``show=True`` opens the interactive window).
+    """
+    choice = "matplotlib" if backend is None else str(backend).strip().lower()
+    if choice not in ("matplotlib", "pyvista"):
+        raise ValueError(f"unknown plot_stress backend {backend!r}; "
+                         "use 'matplotlib', 'pyvista' or None (matplotlib)")
+    values, label = _stress_values(stress, component)
+    if choice == "pyvista":
+        if ax is not None:
+            raise ValueError("ax= is a matplotlib Axes and cannot be combined "
+                             "with backend='pyvista'")
+        return _pyvista_stress(model, values, label, cmap=cmap, vmin=vmin,
+                               vmax=vmax, show_edges=show_edges, title=title,
+                               window_size=window_size, show=show,
+                               outfile=outfile)
+
+    plt = _plt()
+    from matplotlib import cm as _cm
+    from matplotlib.collections import LineCollection, PolyCollection
+    from matplotlib.colors import Normalize
+
+    coords = _node_coords(model)
+    xyz = np.asarray(list(coords.values())) if coords else np.zeros((0, 3))
+    three_d = not _is_planar(xyz)
+
+    polys: list[list[np.ndarray]] = []
+    poly_vals: list[float] = []
+    lines: list[tuple[np.ndarray, np.ndarray]] = []
+    line_vals: list[float] = []
+    missing_elems: list[tuple[str, tuple[int, ...], Any]] = []
+    for etype, nodes, eid in _element_edges(model):
+        value = values.get(eid)
+        if value is None or not np.isfinite(value):
+            missing_elems.append((etype, nodes, eid))
+            continue
+        faces = _element_faces(etype, nodes, coords)
+        if faces:
+            polys.extend(faces)
+            poly_vals.extend([float(value)] * len(faces))
+        elif len(nodes) >= 2 and nodes[0] in coords and nodes[1] in coords:
+            lines.append((coords[nodes[0]], coords[nodes[1]]))
+            line_vals.append(float(value))
+        else:
+            missing_elems.append((etype, nodes, eid))
+    if not polys and not lines:
+        raise ValueError(
+            "no element of the model has a stress value to color by "
+            "(check that the stress result belongs to this model)")
+
+    if ax is None:
+        fig = plt.figure(figsize=(7, 5))
+        ax = fig.add_subplot(111, projection="3d" if three_d else None)
+    else:
+        fig = ax.figure
+        three_d = getattr(ax, "name", "") == "3d"
+
+    all_vals = np.asarray(poly_vals + line_vals, dtype=float)
+    lo = float(np.min(all_vals)) if vmin is None else float(vmin)
+    hi = float(np.max(all_vals)) if vmax is None else float(vmax)
+    if hi <= lo:
+        hi = lo + max(abs(lo), 1.0) * 1e-12
+    norm = Normalize(vmin=lo, vmax=hi)
+    colormap = plt.get_cmap(cmap)
+
+    if missing_elems:
+        # uncovered elements stay visible as a neutral wireframe
+        seg_miss: list[tuple[np.ndarray, np.ndarray]] = []
+        pts_miss: list[np.ndarray] = []
+        for etype, nodes, _eid in missing_elems:
+            edges = _EDGE_TABLE.get(etype)
+            if edges is None:
+                n = len(nodes)
+                edges = tuple((i, i + 1) for i in range(n - 1))
+                if n > 2:
+                    edges += ((n - 1, 0),)
+            if not edges and nodes and nodes[0] in coords:
+                pts_miss.append(coords[nodes[0]])
+                continue
+            for a, b in edges:
+                try:
+                    seg_miss.append((coords[nodes[a]], coords[nodes[b]]))
+                except (KeyError, IndexError):
+                    continue
+        _draw_wireframe(ax, seg_miss, pts_miss, three_d=three_d,
+                        color=missing_color, lw=1.0, alpha=0.9)
+
+    edge_kw = {"edgecolors": "0.2", "linewidths": 0.5} if show_edges else \
+              {"edgecolors": "face", "linewidths": 0.0}
+    if three_d:
+        from mpl_toolkits.mplot3d.art3d import Line3DCollection, Poly3DCollection
+
+        if polys:
+            pc = Poly3DCollection([np.asarray(p) for p in polys], **edge_kw)
+            pc.set_facecolor(colormap(norm(np.asarray(poly_vals))))
+            ax.add_collection3d(pc)
+        if lines:
+            lc = Line3DCollection([np.asarray(seg) for seg in lines], linewidths=3.0)
+            lc.set_array(np.asarray(line_vals))
+            lc.set_cmap(colormap)
+            lc.set_norm(norm)
+            ax.add_collection3d(lc)
+        if len(xyz):
+            ax.auto_scale_xyz(xyz[:, 0], xyz[:, 1], xyz[:, 2], had_data=True)
+        ax.set_zlabel("z")
+    else:
+        if polys:
+            pc = PolyCollection([np.asarray(p)[:, :2] for p in polys], **edge_kw)
+            pc.set_facecolor(colormap(norm(np.asarray(poly_vals))))
+            ax.add_collection(pc)
+        if lines:
+            lc = LineCollection([np.asarray(seg)[:, :2] for seg in lines],
+                                linewidths=3.0)
+            lc.set_array(np.asarray(line_vals))
+            lc.set_cmap(colormap)
+            lc.set_norm(norm)
+            ax.add_collection(lc)
+        ax.autoscale_view()
+        ax.set_aspect("equal", adjustable="datalim")
+
+    if colorbar:
+        sm = _cm.ScalarMappable(norm=norm, cmap=colormap)
+        sm.set_array([])
+        fig.colorbar(sm, ax=ax, label=label)
+
+    ax.set_xlabel("x")
+    ax.set_ylabel("y")
+    peak = float(np.max(all_vals))
+    ax.set_title(title or f"{getattr(model, 'name', 'model')}: {label} "
+                          f"(max {peak:.4g})")
+    return _finish(fig, outfile)
+
+
+def _pyvista_stress(
+    model: Any,
+    values: dict[Any, float],
+    label: str,
+    *,
+    cmap: str,
+    vmin: float | None,
+    vmax: float | None,
+    show_edges: bool,
+    title: str | None,
+    window_size: tuple[int, int],
+    show: bool,
+    outfile: str | None,
+):
+    """pyvista renderer for :func:`plot_stress` (same path as plot_mesh3d)."""
+    pv = _pyvista()
+    grid = _pyvista_grid(model)
+    coords = _node_coords(model)
+
+    # cell order matches _pyvista_grid: every element with mappable nodes
+    cell_vals: list[float] = []
+    for _etype, nodes, eid in _element_edges(model):
+        if not any(n in coords for n in nodes):
+            continue
+        value = values.get(eid)
+        cell_vals.append(float(value) if value is not None else float("nan"))
+    scalars = np.asarray(cell_vals, dtype=float)
+    if isinstance(grid, pv.PolyData) or scalars.size != grid.n_cells:
+        raise ValueError(
+            "no element of the model has a stress value to color by "
+            "(check that the stress result belongs to this model)")
+    grid.cell_data[label] = scalars
+
+    finite = scalars[np.isfinite(scalars)]
+    clim = None
+    if finite.size:
+        clim = (float(np.min(finite)) if vmin is None else float(vmin),
+                float(np.max(finite)) if vmax is None else float(vmax))
+
+    plotter = pv.Plotter(off_screen=not show, window_size=list(window_size))
+    plotter.add_mesh(
+        grid,
+        scalars=label,
+        cmap=cmap,
+        clim=clim,
+        show_edges=show_edges,
+        nan_color="lightgray",
+        line_width=2.0,
+        point_size=8.0,
+        scalar_bar_args={"title": label},
+    )
+    plotter.add_axes()
+    plotter.add_text(
+        title or f"{getattr(model, 'name', 'model')}: {label}",
+        font_size=10,
+    )
+    if outfile:
+        plotter.screenshot(str(outfile))
+    if show:
+        plotter.show()
+    return plotter
 
 
 def plot_mac(

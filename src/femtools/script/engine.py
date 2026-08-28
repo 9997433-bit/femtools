@@ -8,8 +8,9 @@ grammar.
 
 The engine binds lazily to the rest of femtools: ``femtools.core`` is
 only imported when ``NEW PROJECT`` runs, ``femtools.fea`` when
-``SOLVE MODES`` / ``SOLVE STATIC`` runs, and so on.  Missing siblings
-produce a clear :class:`ScriptError` instead of an import-time crash.
+``SOLVE MODES`` / ``SOLVE STATIC`` / ``RECOVER STRESS`` runs, and so
+on.  Missing siblings produce a clear :class:`ScriptError` instead of
+an import-time crash.
 
 ``SET name=value`` assigns a script variable; later statements can
 reference it as ``$name`` anywhere a token is expected (``$$`` writes a
@@ -168,6 +169,40 @@ def _parse_spc_mask(spec: Any) -> tuple[bool, ...]:
     )
 
 
+def _parse_node_list(spec: Any, what: str) -> tuple[int, ...]:
+    """Parse an RBE node list: one node id or a comma list of ids."""
+    if isinstance(spec, int):
+        return (spec,)
+    if isinstance(spec, tuple) and spec and all(isinstance(n, int) for n in spec):
+        return tuple(spec)
+    raise ScriptError(f"{what} must be a node id or a comma list of node ids, got {spec!r}")
+
+
+def _parse_rbe_components(spec: Any, what: str) -> tuple[int, ...]:
+    """Parse RBE DOF components: a comma list (1,2,3) or compact digits (123)."""
+    if isinstance(spec, tuple):
+        comps = spec
+    elif isinstance(spec, int) and spec > 0:
+        comps = tuple(int(c) for c in str(spec))
+    else:
+        comps = None
+    if not comps or any(not isinstance(c, int) or not 1 <= c <= 6 for c in comps):
+        raise ScriptError(
+            f"{what} components must be DOF numbers 1..6 "
+            f"(comma list like 1,2,3 or compact digits like 123), got {spec!r}"
+        )
+    return tuple(int(c) for c in comps)
+
+
+def _parse_weights(spec: Any) -> tuple[float, ...]:
+    """Parse RBE3 weights: one number or a comma list of numbers."""
+    values = spec if isinstance(spec, tuple) else (spec,)
+    try:
+        return tuple(float(v) for v in values)
+    except (TypeError, ValueError):
+        raise ScriptError(f"WEIGHTS must be a comma list of numbers, got {spec!r}") from None
+
+
 class ScriptEngine:
     """Interpreter for FSL scripts.
 
@@ -195,6 +230,7 @@ class ScriptEngine:
         self.echo = echo
         self._model_factory = model_factory
         self._last_modes_name: str | None = None
+        self._last_static_name: str | None = None
 
     # ------------------------------------------------------------------
     # public API
@@ -291,10 +327,12 @@ class ScriptEngine:
         self.model = self._make_model(name)
         self.results.clear()
         self._last_modes_name = None
+        self._last_static_name = None
 
     def _cmd_add(self, rest: list[str], statement: str) -> None:
         if not rest:
-            raise ScriptError("expected ADD NODE|MAT|PROP|ELEM|LOAD ...", statement=statement)
+            raise ScriptError("expected ADD NODE|MAT|PROP|ELEM|LOAD|RBE2|RBE3 ...",
+                              statement=statement)
         kind = rest[0].upper()
         sub = {
             "NODE": self._add_node,
@@ -305,6 +343,8 @@ class ScriptEngine:
             "ELEM": self._add_elem,
             "ELEMENT": self._add_elem,
             "LOAD": self._add_load,
+            "RBE2": self._add_rbe2,
+            "RBE3": self._add_rbe3,
         }.get(kind)
         if sub is None:
             raise ScriptError(f"unknown ADD target {kind!r}", statement=statement)
@@ -424,6 +464,61 @@ class ScriptEngine:
                        force=force if has_force else None,
                        moment=moment if has_moment else None)
 
+    def _add_rbe2(self, args: list[Any], opts: dict[str, Any], statement: str) -> None:
+        model = self._require_model(statement)
+        if len(args) != 1 or not isinstance(args[0], int):
+            raise ScriptError(
+                "expected ADD RBE2 <id> INDEP=<node> DEP=<n1,n2,...> [DOF=<comps>]",
+                statement=statement,
+            )
+        indep = opts.pop("INDEP", opts.pop("INDEPENDENT", None))
+        dep = opts.pop("DEP", opts.pop("DEPS", opts.pop("DEPENDENTS", None)))
+        if indep is None or dep is None:
+            raise ScriptError("ADD RBE2 requires INDEP=<node> and DEP=<node list>",
+                              statement=statement)
+        if not isinstance(indep, int):
+            raise ScriptError(f"INDEP must be a single node id, got {indep!r}",
+                              statement=statement)
+        kwargs: dict[str, Any] = {}
+        dof = opts.pop("DOF", opts.pop("COMPONENTS", None))
+        if dof is not None:
+            kwargs["components"] = _parse_rbe_components(dof, "RBE2")
+        if opts:
+            raise ScriptError(f"unexpected options {sorted(opts)}", statement=statement)
+        model.add_rbe2(id=args[0], independent=indep,
+                       dependents=_parse_node_list(dep, "DEP"), **kwargs)
+
+    def _add_rbe3(self, args: list[Any], opts: dict[str, Any], statement: str) -> None:
+        model = self._require_model(statement)
+        if len(args) != 1 or not isinstance(args[0], int):
+            raise ScriptError(
+                "expected ADD RBE3 <id> DEP=<node> INDEP=<n1,n2,...> "
+                "[DOF=<comps>] [IDOF=<comps>] [WEIGHTS=<w1,w2,...>]",
+                statement=statement,
+            )
+        dep = opts.pop("DEP", opts.pop("DEPENDENT", None))
+        indep = opts.pop("INDEP", opts.pop("INDEPENDENTS", None))
+        if dep is None or indep is None:
+            raise ScriptError("ADD RBE3 requires DEP=<node> and INDEP=<node list>",
+                              statement=statement)
+        if not isinstance(dep, int):
+            raise ScriptError(f"DEP must be a single node id, got {dep!r}",
+                              statement=statement)
+        kwargs: dict[str, Any] = {}
+        dof = opts.pop("DOF", opts.pop("COMPONENTS", None))
+        if dof is not None:
+            kwargs["components"] = _parse_rbe_components(dof, "RBE3")
+        idof = opts.pop("IDOF", opts.pop("INDEPENDENT_COMPONENTS", None))
+        if idof is not None:
+            kwargs["independent_components"] = _parse_rbe_components(idof, "RBE3")
+        weights = opts.pop("WEIGHTS", opts.pop("WEIGHT", None))
+        if weights is not None:
+            kwargs["weights"] = _parse_weights(weights)
+        if opts:
+            raise ScriptError(f"unexpected options {sorted(opts)}", statement=statement)
+        model.add_rbe3(id=args[0], dependent=dep,
+                       independents=_parse_node_list(indep, "INDEP"), **kwargs)
+
     def _cmd_spc(self, rest: list[str], statement: str) -> None:
         model = self._require_model(statement)
         args, opts = _split_args_options(rest)
@@ -494,6 +589,47 @@ class ScriptEngine:
             # e.g. a singular stiffness from an under-constrained model
             raise ScriptError(f"SOLVE STATIC failed: {exc}", statement=statement) from exc
         self.results[name] = result
+        self._last_static_name = name
+
+    def _cmd_recover(self, rest: list[str], statement: str) -> None:
+        args, opts = _split_args_options(rest)
+        if len(args) != 1 or str(args[0]).upper() != "STRESS":
+            raise ScriptError("expected RECOVER STRESS [NAME=..] [RESULT=..]",
+                              statement=statement)
+        model = self._require_model(statement)
+        name = str(opts.pop("NAME", "stress"))
+        result_name = opts.pop("RESULT", self._last_static_name)
+        if opts:
+            raise ScriptError(f"unexpected options {sorted(opts)}", statement=statement)
+        if result_name is None:
+            raise ScriptError(
+                "no static result: run SOLVE STATIC first (or pass RESULT=name)",
+                statement=statement,
+            )
+        result_name = str(result_name)
+        static = self.results.get(result_name)
+        if static is None:
+            raise ScriptError(f"no result named {result_name!r} "
+                              f"(available: {sorted(self.results)})", statement=statement)
+        if getattr(static, "u", None) is None:
+            raise ScriptError(
+                f"result {result_name!r} is not a static result "
+                "(it carries no displacement field)",
+                statement=statement,
+            )
+        try:
+            from femtools.fea.recover import recover_stress
+        except ImportError as exc:
+            raise ScriptError(
+                "femtools.fea is not available; RECOVER STRESS needs the "
+                "stress-recovery kernel"
+            ) from exc
+        try:
+            self.results[name] = recover_stress(model, static)
+        except (ValueError, KeyError) as exc:
+            # e.g. a displacement field of the wrong length, or an element
+            # type without a registered recovery rule
+            raise ScriptError(f"RECOVER STRESS failed: {exc}", statement=statement) from exc
 
     def _cmd_mac(self, rest: list[str], statement: str) -> None:
         args, opts = _split_args_options(rest)
@@ -580,6 +716,7 @@ class ScriptEngine:
         "SPC": _cmd_spc,
         "SET": _cmd_set,
         "SOLVE": _cmd_solve,
+        "RECOVER": _cmd_recover,
         "MAC": _cmd_mac,
         "SAVE": _cmd_save,
         "PRINT": _cmd_print,

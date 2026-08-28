@@ -137,6 +137,85 @@ class GuiState:
                 "results": self.results_summary()["results"],
             }
 
+    def stress_table(self, name: str | None = None, max_rows: Any = 20) -> dict:
+        """Recover element stresses from a stored static result, as JSON.
+
+        ``name`` selects the static result (default: the most recent
+        stored result carrying a displacement field).  Raises
+        :class:`GuiApiError` (HTTP 400) when no model is loaded, no
+        static result exists, or the stress-recovery kernel is not
+        installed.
+        """
+        try:
+            max_rows = int(max_rows)
+        except (TypeError, ValueError):
+            raise GuiApiError(f"max_rows must be an integer, got {max_rows!r}") from None
+        if max_rows < 1:
+            raise GuiApiError("max_rows must be at least 1")
+
+        with self._lock:
+            model = self.model
+            if model is None:
+                raise GuiApiError("no model loaded")
+
+            static = None
+            static_name = None
+            if name:
+                static = self.engine.results.get(name)
+                if static is None:
+                    raise GuiApiError(f"no result named {name!r} "
+                                      f"(available: {sorted(self.engine.results)})")
+                if getattr(static, "u", None) is None:
+                    raise GuiApiError(f"result {name!r} is not a static result "
+                                      "(it carries no displacement field)")
+                static_name = name
+            else:
+                for rname, result in self.engine.results.items():
+                    if (getattr(result, "u", None) is not None
+                            and getattr(result, "modes", None) is None):
+                        static, static_name = result, rname
+            if static is None:
+                raise GuiApiError(
+                    "no static result: run SOLVE STATIC (script tab) first")
+
+            try:
+                from femtools.fea.recover import recover_stress
+            except ImportError as exc:
+                raise GuiApiError(
+                    "stress recovery is unavailable: femtools module "
+                    f"{exc.name or exc} is not installed"
+                ) from exc
+            try:
+                stress = recover_stress(model, static)
+            except (ValueError, KeyError) as exc:
+                raise GuiApiError(f"stress recovery failed: {exc}") from exc
+
+            ids = list(getattr(stress, "element_ids", []))
+            if not ids:
+                raise GuiApiError("the static result covers no recoverable elements")
+            etypes = list(getattr(stress, "etypes", []) or ["?"] * len(ids))
+            vm = [float(v) for v in stress.von_mises]
+            rows = []
+            for i, eid in enumerate(ids[:max_rows]):
+                rows.append({
+                    "element": eid,
+                    "type": etypes[i] if i < len(etypes) else "?",
+                    "von_mises": vm[i],
+                    "stress": [float(c) for c in stress.stress[i]],
+                })
+            return {
+                "ok": True,
+                "result": static_name,
+                "components": list(getattr(stress, "components",
+                                           ("xx", "yy", "zz", "xy", "yz", "zx"))),
+                "n_elements": len(ids),
+                "truncated": len(ids) > max_rows,
+                "max_von_mises": max(vm),
+                "skipped": {str(k): v for k, v in
+                            getattr(stress, "skipped", {}).items()},
+                "elements": rows,
+            }
+
     # ------------------------------------------------------------------
     def render_png(self, kind: str, *, name: str = "mac", index: int = 0) -> bytes:
         """Render a plot ('mesh', 'mac' or 'mode') to PNG bytes (Agg)."""
