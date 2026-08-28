@@ -9,6 +9,8 @@ from typing import Any
 import numpy as np
 import pytest
 
+from femtools.core.errors import ModelError
+from femtools.core.model import FEModel
 from femtools.io import bdf as bdf_module
 from femtools.io import cdb as cdb_module
 from femtools.io import project as project_module
@@ -77,6 +79,76 @@ def _roundtrip(
     assert path.exists()
     loaded = reader(path)
     return getattr(loaded, "model", loaded)
+
+
+def _rbe2_model() -> FEModel:
+    model = FEModel(name="rbe2-validation")
+    model.add_node(1, (0.0, 0.0, 0.0))
+    model.add_node(2, (1.0, 0.0, 0.0))
+    model.add_node(3, (0.0, 1.0, 0.0))
+    return model
+
+
+def test_add_rbe2_stores_valid_constraint_on_model() -> None:
+    model = _rbe2_model()
+
+    rbe2 = model.add_rbe2(10, independent=1, dependents=(2, 3), components=(1, 3, 6))
+
+    assert model.rbe2 == [rbe2]
+    assert rbe2.id == 10
+    assert rbe2.independent == 1
+    assert rbe2.dependents == (2, 3)
+    assert rbe2.components == (1, 3, 6)
+
+
+def test_add_rbe2_rejects_duplicate_id() -> None:
+    model = _rbe2_model()
+    original = model.add_rbe2(10, independent=1, dependents=(2,))
+
+    with pytest.raises(ModelError, match="duplicate RBE2 id 10"):
+        model.add_rbe2(10, independent=1, dependents=(3,))
+
+    assert model.rbe2 == [original]
+
+
+@pytest.mark.parametrize(
+    ("independent", "dependents"),
+    [
+        (99, (2,)),
+        (1, (2, 99)),
+    ],
+)
+def test_add_rbe2_rejects_missing_nodes(
+    independent: int,
+    dependents: tuple[int, ...],
+) -> None:
+    model = _rbe2_model()
+
+    with pytest.raises(ModelError, match=r"RBE2 10: undefined node\(s\) \[99\]"):
+        model.add_rbe2(10, independent=independent, dependents=dependents)
+
+    assert model.rbe2 == []
+
+
+def test_add_rbe2_rejects_independent_node_in_dependents() -> None:
+    model = _rbe2_model()
+
+    with pytest.raises(ModelError, match="independent node cannot also be dependent"):
+        model.add_rbe2(10, independent=1, dependents=(1, 2))
+
+    assert model.rbe2 == []
+
+
+@pytest.mark.parametrize("components", [(0,), (7,), (1, 2, 7)])
+def test_add_rbe2_rejects_components_outside_one_through_six(
+    components: tuple[int, ...],
+) -> None:
+    model = _rbe2_model()
+
+    with pytest.raises(ModelError, match=r"components must be in 1\.\.6"):
+        model.add_rbe2(10, independent=1, dependents=(2,), components=components)
+
+    assert model.rbe2 == []
 
 
 def test_project_roundtrip_preserves_model(
