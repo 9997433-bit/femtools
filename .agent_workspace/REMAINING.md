@@ -8,7 +8,31 @@ Round 7 freezes the APIs below. Existing `docs/CONTRACT_API.md` still holds; do 
 stable top-level exports.
 
 **Round 8 landed** on `cursor/femtools-cycle-c-d551` (PR #3). The names below import and are
-stable top-level exports. Round 9 is not opened from this close-out.
+stable top-level exports.
+
+## Round 9 frozen APIs
+
+Round 9 closes Cycle C: promote two already-landed kernels, add a mapped-MAC
+convenience and a PSD dump, thicken the Nastran text driver with SOL 101 punch,
+and polish CLI/script/GUI/examples. Do not reopen N/A rows.
+
+```python
+from femtools.fea.mpc import apply_mpc
+# Public composer of model.rbe2 + model.rbe3 into one ConstraintTransform.
+# apply_rbe2 / apply_rbe3 stay thin wrappers. assemble_km(mpc=False) disables all.
+
+from femtools.updating.responses import static_stress_response
+# recover_stress as an update_model response. Displacement-driven 10% E from stress.
+
+from femtools.correlation.dofmap import mapped_mac
+# map_nearest_nodes + mapped_mode_matrix + mac_matrix. Translated block → diag 1.
+
+from femtools.dynamics.random import dump_psd, load_psd
+# npz dump/load of PSDResult; spectra and freq_hz bit-identical after load.
+```
+
+Nastran SOL 101 is a **method** on `NastranPunchDriver` (text punch), not a new
+top-level name. OP2/RST/ODB stay N/A.
 
 ## Round 8 frozen APIs
 
