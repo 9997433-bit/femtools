@@ -36,6 +36,7 @@ __all__ = [
     "modal_response_function",
     "frf_response_function",
     "static_displacement_response",
+    "static_stress_response",
     "mac_vector",
     "pair_by_mac",
 ]
@@ -524,6 +525,156 @@ def static_displacement_response(
     def _f(p: np.ndarray) -> np.ndarray:
         m = apply_parameters(model, pset, p, copy_model=True, baseline=base)
         values = _solve(m)
+        return values if factor is None else values * factor
+
+    return _f
+
+
+#: Voigt component names accepted by :func:`static_stress_response`, mapped onto
+#: the column of ``StressResult.stress`` / ``StressResult.strain``.
+_STRESS_COMPONENTS: dict[str, int] = {
+    "xx": 0, "yy": 1, "zz": 2, "xy": 3, "yz": 4, "zx": 5,
+    "11": 0, "22": 1, "33": 2, "12": 3, "23": 4, "13": 5,
+    "sxx": 0, "syy": 1, "szz": 2, "sxy": 3, "syz": 4, "szx": 5,
+    "exx": 0, "eyy": 1, "ezz": 2, "exy": 3, "eyz": 4, "ezx": 5,
+    "axial": 0,
+}
+
+#: Spellings of the frame-independent equivalent stress.
+_VON_MISES_NAMES = frozenset({"von_mises", "vonmises", "mises", "vm", "equivalent", "seqv"})
+
+
+def _recover_stress() -> Callable[..., Any]:
+    try:
+        from femtools.fea.recover import recover_stress
+    except Exception as exc:  # pragma: no cover - exercised when fea is absent
+        raise RuntimeError(
+            "femtools.fea.recover is not available; static_stress_response needs the "
+            "stress recovery kernel."
+        ) from exc
+    return recover_stress
+
+
+def static_stress_response(
+    model: Any,
+    parameters: Any,
+    elements: Any = None,
+    *,
+    component: str = "von_mises",
+    quantity: str = "stress",
+    frame: str = "element",
+    layer: Any = "mid",
+    loads: Any = None,
+    solver: Callable[..., Any] | None = None,
+    solver_kwargs: dict[str, Any] | None = None,
+    scale: ArrayLike | None = None,
+) -> Callable[[np.ndarray], np.ndarray]:
+    """Build ``p -> sigma(p)`` at selected elements from a linear static solution.
+
+    The stress counterpart of :func:`static_displacement_response`: it feeds
+    :func:`femtools.fea.recover.recover_stress` into
+    :func:`femtools.updating.update_model`, so a model can be updated against
+    measured *stresses or strains* — strain gauges, a photoelastic or DIC field,
+    a proof-load survey — instead of, or alongside, deflections and frequencies.
+
+    Parameters
+    ----------
+    model:
+        :class:`femtools.core.model.FEModel` (or a project wrapper around one),
+        deep-copied for every evaluation.
+    parameters:
+        Parameter specification -- see :func:`femtools.updating.as_parameters`.
+    elements:
+        Element ids to report, in the given order.  ``None`` (default) reports
+        every element the recovery covers, in model order.
+    component:
+        ``"von_mises"`` (default) or a Voigt component (``"xx"``, ``"xy"``, ...).
+    quantity:
+        ``"stress"`` (default) or ``"strain"`` — the latter is what a gauge
+        rosette actually measures.
+    frame:
+        ``"element"`` (default, the frame ``StressResult.stress`` is written in)
+        or ``"basic"`` to rotate into global axes first.  Ignored for
+        ``component="von_mises"``, which is frame independent.
+    layer:
+        Through-thickness station for shells, as in :func:`recover_stress`.
+    loads:
+        Anything :func:`femtools.fea.loads.build_load_vector` accepts. ``None``
+        uses the model's own loads.  Pass ``solver_kwargs={"enforced": ...}`` to
+        drive the model by prescribed displacement instead.
+    solver:
+        Optional ``solver(model, loads) -> StaticResult`` callback replacing
+        :func:`femtools.fea.static.solve_static`.  It must return a result the
+        recovery can read the assembly from, not a bare vector.
+    scale:
+        Optional multiplier applied to the response (scalar or one per element).
+
+    Returns
+    -------
+    Callable ``p -> ndarray`` with one entry per requested element.
+
+    Examples
+    --------
+    Recover a wrong Young's modulus from a constant-stress patch driven by
+    prescribed end displacements::
+
+        f = static_stress_response(model, parameters, component="xx",
+                                   solver_kwargs={"enforced": {(tip, 0): 1.0e-4}})
+        res = update_model(model, parameters, targets=measured, response=f)
+    """
+    model = unwrap_model(model)
+    pset: ParameterSet = as_parameters(parameters)
+    base = snapshot_baseline(model, pset)
+    kwargs = dict(solver_kwargs or {})
+    factor = None if scale is None else np.asarray(scale, dtype=float)
+
+    key = str(component).strip().lower()
+    if key in _VON_MISES_NAMES:
+        column = None
+    elif key in _STRESS_COMPONENTS:
+        column = _STRESS_COMPONENTS[key]
+    else:
+        raise ValueError(
+            f"unknown stress component {component!r}; expected 'von_mises' or one of "
+            f"{sorted(set(_STRESS_COMPONENTS))}"
+        )
+
+    what = str(quantity).strip().lower()
+    if what not in ("stress", "strain"):
+        raise ValueError(f"quantity must be 'stress' or 'strain', got {quantity!r}")
+    basic = str(frame).strip().lower()
+    if basic not in ("element", "basic", "global"):
+        raise ValueError(f"frame must be 'element' or 'basic', got {frame!r}")
+    if column is None and what == "strain":
+        raise ValueError("von Mises is a stress measure; pass an explicit strain component")
+
+    wanted = None if elements is None else list(elements)
+    cached_rows: list[np.ndarray | None] = [None]
+
+    def _values(result: Any) -> np.ndarray:
+        if column is None:
+            return np.asarray(result.von_mises, dtype=float)
+        if what == "strain":
+            table = result.strain_basic if basic != "element" else result.strain
+        else:
+            table = result.stress_basic if basic != "element" else result.stress
+        return np.asarray(table, dtype=float)[:, column]
+
+    def _f(p: np.ndarray) -> np.ndarray:
+        m = apply_parameters(model, pset, p, copy_model=True, baseline=base)
+        applied = _normalize_static_loads(m, loads)
+        if solver is not None:
+            out = solver(m, applied)
+        else:
+            out = _default_static_solver()(m, applied, full_result=True, **kwargs)
+        recovered = _recover_stress()(m, out, layer=layer)
+        if cached_rows[0] is None:
+            cached_rows[0] = np.array(
+                range(len(recovered)) if wanted is None
+                else [recovered.index_of(eid) for eid in wanted],
+                dtype=int,
+            )
+        values = _values(recovered)[cached_rows[0]]
         return values if factor is None else values * factor
 
     return _f
