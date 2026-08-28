@@ -227,6 +227,51 @@ with the arm; topometry compliance ratio **0.158** (OC, 166 iterations, converge
 volume conserved to 2e-13, root 7.0 mm vs tip column 2.6 mm); HEX8 uniform-tension patch
 $s_{xx} = P/A$ to 6e-16, BEAM2 end moments $M(x) = P(L-x)$ to 2e-14.
 
+### Round-9 status (2026-08-28 — pending measurement)
+
+Round-9 frozen APIs are landing on this tree during the round; the boxes below stay
+unchecked until the close-out audit measures each gate the way Rounds 7–8 were measured
+(import alone is not "measured"). Import status observed while writing this block
+(2026-08-28, mid-round — the tree was still merging): `apply_mpc`,
+`static_stress_response`, `mapped_mac` and `dump_psd`/`load_psd` already import;
+the Nastran driver is still SOL 103-only; CLI polish is uncommitted work in flight.
+
+- [ ] **R9 apply_mpc** — `femtools.fea.mpc.apply_mpc`: one explicit entry point for the
+      combined RBE2 + RBE3 elimination (`rbe2=` / `rbe3=` overrides, shared
+      `ConstraintTransform`). Gate: bit-identical to `apply_rbe2` / `apply_rbe3` on
+      single-table models; RBE2/RBE3 goldens unchanged.
+- [ ] **R9 static_stress_response** — `femtools.updating.static_stress_response`:
+      stress/strain-gauge residual for `update_from_static` (feeds
+      `recover_stress` into the same Gauss–Newton loop). Gate: constant-stress HEX8
+      patch pins a 10% E error from measured stress alone; displacement-path
+      goldens unchanged.
+- [ ] **R9 mapped_mac** — `femtools.correlation.mapped_mac`: one-call
+      map + gather + MAC wrapper (`MappedMACResult` keeps `.mac`, `.nodes`,
+      `.phi_fe`). Gate: bit-identical to the composed
+      `map_nearest_nodes` + `mapped_mode_matrix` + `mac_matrix` path; the kernel-gated
+      section of `examples/mapped_mac.py` already measures `max|dev| = 0.0` and
+      `min_diagonal = 1.0` on this tree — dedicated pytest still pending.
+- [ ] **R9 dump_psd** — `femtools.dynamics.random.dump_psd` / `load_psd`. Gate: PSD
+      matrix and frequency vector bit-identical after an npz round-trip (same contract
+      as the R8 FRF dump); `psd_response` numerics unchanged.
+- [ ] **R9 SOL 101 text punch** — static displacements through the Nastran text driver
+      (`write_bdf` SOL 101 executive / punch read-back, no OP2). Not on this tree yet:
+      `drivers/nastran.py` is SOL 103-only at the time of writing.
+- [ ] **R9 CLI/GUI polish** — CLI subcommands / script verbs / GUI endpoints for the
+      Round-9 kernels, with the established lazy-fail contract (missing-module message,
+      exit 3). In flight; unmeasured.
+
+Consequence for examples: Round 9 adds the two kernel-backed demos sanctioned by the
+Round-9 brief — `examples/update_static.py` (10% E recovered from a static tip
+deflection via `update_from_static`; measured rel E error **2.2e-13** single gauge /
+**2.0e-13** 3-gauge sweep, tip deflection vs $FL^3/3EI$ **2.3e-13**) and
+`examples/mapped_mac.py` (translated + renumbered QUAD4 plate; mapped MAC
+`max|diag − 1|` = **2.2e-16**, worst sensor-to-node distance 5.6e-17 m, rogue sensor
+beyond `tol` flagged as −1, one-call `mapped_mac` bit-identical to the composition) —
+bringing the example set to **13/13 PASS** (2026-08-28, this tree). Both skip whole
+(`raise SystemExit(0) from None`) when their kernels are absent, so the suite stays
+green on partial trees.
+
 ## 0. Master table
 
 | # | Case | Exact reference | Metric | Tol |
