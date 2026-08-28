@@ -1,3 +1,43 @@
+# Remaining capabilities — Cycle D (Rounds 10–12)
+
+Continue the original 1:1 functional equivalent of FEMtools. **Do not** implement NI/DAQ hardware or proprietary closed binaries (OP2/RST/ODB). Public algorithms and public text-card layouts only.
+
+Round 10 freezes the APIs below. Existing `docs/CONTRACT_API.md` still holds; do not break it. Goldens (HEX8 98.6%, Rubin 0.028%, H1/H2=γ², 6 RBM on tilted shells, displacement-driven 10% E ~1e-9) must stay.
+
+## Round 10 frozen APIs
+
+Round 10 opens Cycle D: quadratic tetrahedron, Zienkiewicz–Zhu SPR, CTETRA10 text I/O, punch `$STRESSES`, Juang–Pappa ERA, residual flexibility as a public FRF correction, and SEREP-expanded MAC. Do not reopen N/A rows. Do not implement EAS-30.
+
+```python
+from femtools.fea.elements import tet10
+# 10-node quadratic tetrahedron, registered as etype "TET10".
+# Constant-strain patch exact. HEX8 98.6% / 6 RBM unchanged.
+
+from femtools.fea.recover import recover_spr
+# ZZ-SPR (Zienkiewicz–Zhu 1992). Constant-stress patch remains exact at nodes.
+# average_nodal stays 1/n_adj and is not SPR.
+
+from femtools.io.bdf import read_bdf, write_bdf  # CTETRA 10-node → TET10 (no midside drop)
+from femtools.io.pch import read_pch_stress     # public punch $STRESSES text
+# HEX20 still warn+drop to HEX8. OP2 stays N/A.
+
+from femtools.mpe.era import era
+# Juang–Pappa ERA. Synthetic 2-DOF: frequencies within df, MAC>0.99.
+
+from femtools.correlation.expansion import expanded_mac
+# expand_serep + mac_matrix. Expanding FE onto itself through a master subset → I.
+
+from femtools.dynamics.residuals import residual_flexibility
+# Static residual-flexibility block for modal_frf(upper_residual=).
+# Fewer modes + residual must lower L2 vs the truncated modal FRF.
+```
+
+## Explicitly still N/A
+
+NI DAQ, commercial OP2/RST/ODB binary dumps, license servers, CAD kernels.
+
+---
+
 # Remaining capabilities — Cycle C (Rounds 7–9)
 
 Continue the original 1:1 functional equivalent of FEMtools. **Do not** implement NI/DAQ hardware or proprietary closed binaries (OP2/RST/ODB). Public algorithms and public text-card layouts only.

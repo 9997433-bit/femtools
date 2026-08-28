@@ -71,6 +71,7 @@ ELEMENT_NODE_COUNTS: dict[str, tuple[int, ...]] = {
     "TRIA3": (3,),  # 3-node shell
     "HEX8": (8,),  # 8-node solid brick
     "TET4": (4,),  # 4-node solid tetrahedron
+    "TET10": (10,),  # 10-node quadratic tetrahedron (Round 10)
     "MASS": (1,),  # lumped mass at a node
     "SPRING": (1, 2),  # node-to-node (2) or grounded (1) spring
     "DAMPER": (1, 2),  # node-to-node (2) or grounded (1) viscous damper
@@ -86,7 +87,7 @@ _PROPERTY_NEEDS_MATERIAL: frozenset[str] = frozenset({"bar", "beam", "shell", "s
 
 #: Element types that require a property reference.
 _ELEMENT_NEEDS_PROPERTY: frozenset[str] = frozenset(
-    {"BAR2", "BEAM2", "TRUSS2D", "QUAD4", "TRIA3", "HEX8", "TET4"}
+    {"BAR2", "BEAM2", "TRUSS2D", "QUAD4", "TRIA3", "HEX8", "TET4", "TET10"}
 )
 
 
