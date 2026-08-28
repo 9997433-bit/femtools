@@ -5,9 +5,10 @@ femtools is solver-independent: models cross the boundary as text decks
 the adapter that owns one such boundary -- it knows how to write the input
 deck for its solver, how to launch the executable, and which result file
 to read back.  :class:`SolverDriver` is the :class:`typing.Protocol` those
-adapters implement; femtools itself ships **no** vendor drivers and **no**
-proprietary binary parsers (OP2/RST/ODB are explicitly out of scope --
-punch/UNV text output covers the modal exchange loop).
+adapters implement; femtools ships **no** proprietary binary parsers
+(OP2/RST/ODB are explicitly out of scope -- punch/UNV text output covers
+the modal exchange loop).  One concrete text-only adapter is included:
+:class:`femtools.drivers.nastran.NastranPunchDriver`.
 
 The contract is structural (PEP 544): any object with the right methods
 qualifies, no registration or subclassing required.  A minimal Nastran

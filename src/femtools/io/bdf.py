@@ -1,6 +1,6 @@
 """Nastran-like bulk data (BDF) translator.
 
-Supported cards (Round 1 subset):
+Supported cards (Round 1 subset, extended in Round 7):
 
 * geometry: ``GRID`` (CP/CD/PS honoured), ``CORD2R``, ``CORD2C``, ``CORD2S``
 * elements: ``CROD``, ``CBAR``, ``CBEAM``, ``CTRIA3``, ``CQUAD4``,
@@ -12,6 +12,18 @@ Supported cards (Round 1 subset):
   ``PSOLID``
 * materials: ``MAT1``
 * constraints/loads: ``SPC1`` (with ``THRU``), ``SPC``, ``FORCE``, ``MOMENT``
+* rigid elements: ``RBE2`` (with ``THRU``) into :meth:`FEModel.add_rbe2`;
+  the trailing thermal ``ALPHA`` field is ignored with a warning.  ``RBE3``
+  stays unsupported (one aggregated ``UserWarning``, like any other card).
+
+``INCLUDE`` statements are followed (Round 7): the referenced file is
+spliced in textually at the statement's position, so continuations across
+file boundaries behave like Nastran's own preprocessor.  Relative names
+resolve against the directory of the *including* file, nesting is limited
+to 8 levels and include cycles are detected; a missing file, a cycle or
+too-deep nesting raise :class:`BdfError`.  Only the quoted or bare
+single-line form is supported (``INCLUDE 'sub/wing.blk'``); INCLUDE lines
+inside the skipped executive/case-control section are not expanded.
 
 Element type mapping (femtools <-> Nastran):
 
@@ -86,8 +98,79 @@ def _split_line(line: str) -> tuple[str, list[str]]:
     return head, [padded[a:b].strip() for a, b in slots]
 
 
-def _logical_cards(text: str) -> list[list[str]]:
-    """Physical lines -> logical cards ``[name, field2, field3, ...]``."""
+#: Maximum INCLUDE nesting below the top-level file.
+_INCLUDE_MAX_DEPTH = 8
+
+
+def _include_target(line: str, source: str, lineno: int) -> str:
+    """File name of a (comment-stripped) INCLUDE statement line."""
+    body = line.strip()[len("INCLUDE") :].strip()
+    if body[:1] in ("'", '"'):
+        end = body.find(body[0], 1)
+        if end < 0:
+            raise BdfError(
+                f"unterminated quote in INCLUDE statement: {line.strip()!r}",
+                file=source,
+                line=lineno,
+            )
+        target = body[1:end]
+    else:
+        target = body.rstrip(",").strip()
+    if not target:
+        raise BdfError("INCLUDE statement without a file name", file=source, line=lineno)
+    return target
+
+
+def _expanded_lines(lines: list[str], directory: Path, chain: tuple[Path, ...]) -> list[str]:
+    """Physical lines with INCLUDE statements spliced in (textual expansion).
+
+    ``chain`` is the stack of files currently being expanded (the last
+    entry is the including file): relative names resolve against
+    ``directory``, revisiting a file on the stack is a cycle and more
+    than :data:`_INCLUDE_MAX_DEPTH` nested INCLUDEs is an error.
+    """
+    out: list[str] = []
+    source = chain[-1].name
+    for lineno, raw in enumerate(lines, start=1):
+        stripped = _strip_comment(raw).strip()
+        if not stripped.upper().startswith("INCLUDE"):
+            out.append(raw)
+            continue
+        target = _include_target(_strip_comment(raw), source, lineno)
+        candidate = Path(target)
+        if not candidate.is_absolute():
+            candidate = directory / candidate
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError as exc:
+            raise BdfError(
+                f"INCLUDE file {target!r} not found (relative to {directory})",
+                file=source,
+                line=lineno,
+            ) from exc
+        if resolved in chain:
+            names = [p.name for p in chain[chain.index(resolved) :]] + [resolved.name]
+            raise BdfError(
+                f"INCLUDE cycle detected: {' -> '.join(names)}", file=source, line=lineno
+            )
+        if len(chain) > _INCLUDE_MAX_DEPTH:
+            raise BdfError(
+                f"INCLUDE nesting deeper than {_INCLUDE_MAX_DEPTH} levels "
+                f"(while including {target!r})",
+                file=source,
+                line=lineno,
+            )
+        text = resolved.read_text(encoding="utf-8", errors="replace")
+        out.extend(_expanded_lines(text.splitlines(), resolved.parent, (*chain, resolved)))
+    return out
+
+
+def _logical_cards(text: str, path: Path) -> list[list[str]]:
+    """Physical lines -> logical cards ``[name, field2, field3, ...]``.
+
+    INCLUDE statements after BEGIN BULK are expanded relative to ``path``
+    (see :func:`_expanded_lines`).
+    """
     lines = text.splitlines()
     # skip executive/case control when present
     start = 0
@@ -96,18 +179,13 @@ def _logical_cards(text: str) -> list[list[str]]:
             start = i + 1
             break
     cards: list[list[str]] = []
-    for raw in lines[start:]:
+    for raw in _expanded_lines(lines[start:], path.parent, (path.resolve(),)):
         line = _strip_comment(raw.rstrip("\n"))
         if not line.strip():
             continue
         upper = line.upper().lstrip()
         if upper.startswith("ENDDATA"):
             break
-        if upper.startswith("INCLUDE"):
-            warnings.warn(
-                "read_bdf: INCLUDE statements are not followed", UserWarning, stacklevel=3
-            )
-            continue
         head, data = _split_line(line)
         if head == "" or head.startswith("+") or head.startswith("*"):
             if not cards:
@@ -186,11 +264,14 @@ def read_bdf(path: str | Path) -> FEModel:
     """Read a Nastran-like bulk data file into an :class:`FEModel`.
 
     Cards are collected first and the model is built in dependency order
-    (coordinate systems, grids, materials, properties, elements,
-    constraints, loads), so card order in the file does not matter.
+    (coordinate systems, grids, materials, properties, elements, rigid
+    elements, constraints, loads), so card order in the file does not
+    matter.  INCLUDE statements are expanded relative to the including
+    file (max depth 8, cycle-safe; see the module docstring).
     """
-    text = Path(path).read_text(encoding="utf-8", errors="replace")
-    cards = _logical_cards(text)
+    path = Path(path)
+    text = path.read_text(encoding="utf-8", errors="replace")
+    cards = _logical_cards(text, path)
     by_name: dict[str, list[list[str]]] = {}
     for c in cards:
         by_name.setdefault(c[0], []).append(c)
@@ -383,6 +464,43 @@ def read_bdf(path: str | Path) -> FEModel:
             id=eid, type="DAMPER", nodes=nodes, dofs=dofs, property_id=_new_lumped(c=b)
         )
 
+    # -- rigid elements ------------------------------------------------------------------
+    # RBE2: EID GN CM GM1 GM2 ... [ALPHA [TREF]]; the GM list may use THRU and
+    # ends at the first real-typed field (the thermal data, which is ignored).
+    for c in by_name.pop("RBE2", []):
+        eid = _i(c, 1)
+        gn = _i(c, 2)
+        cm = _s(c, 3)
+        if not cm or any(ch not in "123456" for ch in cm):
+            raise BdfError(f"RBE2 {eid}: CM must be digits 1-6, got {cm!r}")
+        deps: list[int] = []
+        j = 4
+        while j < len(c):
+            tok = _s(c, j)
+            if not tok:
+                j += 1
+                continue
+            if tok.upper() == "THRU":
+                last = _i(c, j + 1)
+                if not deps or last is None:
+                    raise BdfError(f"RBE2 {eid}: malformed THRU")
+                deps.extend(range(deps[-1] + 1, last + 1))
+                j += 2
+                continue
+            if "." in tok:  # ALPHA (and TREF): thermal expansion of the rigid link
+                notes.append(f"RBE2 {eid}: thermal expansion ALPHA ignored")
+                break
+            deps.append(_i(c, j))
+            j += 1
+        if not deps:
+            raise BdfError(f"RBE2 {eid}: no dependent grids")
+        model.add_rbe2(
+            id=eid,
+            independent=gn,
+            dependents=deps,
+            components=tuple(int(ch) for ch in cm),
+        )
+
     # -- constraints -------------------------------------------------------------------
     for nid, ps in pending_ps:
         model.add_spc(node_id=nid, mask=comps_to_mask(ps), sid=0)
@@ -526,6 +644,7 @@ def write_bdf(path: str | Path | FEModel, model: FEModel | str | Path | None = N
     Lumped MASS/SPRING/DAMPER elements are written as CONM2/CELAS2/CDAMP2
     with values taken from their lumped property; the auto property card
     itself is not emitted (Nastran keeps these values on the element).
+    :attr:`FEModel.rbe2` entries are written as RBE2 cards.
     """
     from ._compat import coerce_path_model
 
@@ -628,6 +747,10 @@ def write_bdf(path: str | Path | FEModel, model: FEModel | str | Path | None = N
             )
         else:  # pragma: no cover - catalogue is closed
             raise BdfError(f"element type {t} has no BDF mapping")
+
+    for rbe in model.rbe2:
+        cm = "".join(str(comp) for comp in sorted(set(rbe.components)))
+        lines += _card8("RBE2", rbe.id, rbe.independent, int(cm), *rbe.dependents)
 
     for spc in model.spcs:
         comps = spc.comps
