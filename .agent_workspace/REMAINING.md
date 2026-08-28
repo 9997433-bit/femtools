@@ -5,8 +5,49 @@ Continue the original 1:1 functional equivalent of FEMtools. **Do not** implemen
 Round 7 freezes the APIs below. Existing `docs/CONTRACT_API.md` still holds; do not break it. Goldens (HEX8 98.6%, Rubin 0.028%, H1/H2=γ², 6 RBM on tilted shells) must stay.
 
 **Round 7 landed** on `cursor/femtools-cycle-c-d551` (PR #3). The names below import and are
-stable top-level exports. Round 8/9 still thicken workflows (examples, GUI, interface
-polish) without reopening N/A rows.
+stable top-level exports.
+
+## Round 8 frozen APIs
+
+Round 8 thickens the 1:1 workflow on top of Round 7: interpolation MPCs, nodal stress
+average, extra text drivers, FRF persistence, mapped-shape MAC, plot/script/GUI, and a
+static-update convenience. Do not reopen N/A rows.
+
+```python
+from femtools.core.model import RBE3  # already on FEModel.rbe3 / add_rbe3
+
+from femtools.fea.mpc import apply_rbe3
+# Interpolation MPC: dependent node = weighted average of independents.
+# assemble_km honors model.rbe3 (composed with model.rbe2). Free-free still 6 RBM.
+
+from femtools.fea.recover import average_nodal
+# Average centroid StressResult onto incident nodes (1/n_adj). Not ZZ-SPR.
+# Constant-stress patch remains exact at every node.
+
+from femtools.io.bdf import read_bdf, write_bdf  # parse + emit RBE3 via add_rbe3
+
+from femtools.drivers.ansys import AnsysCdbDriver
+from femtools.drivers.abaqus import AbaqusInpDriver
+# SolverDriver text adapters. write_cdb / write_inp. run() raises SolverError if
+# the executable is missing. read_modal from .pch/.unv text only. RST/ODB → SolverError.
+# Tests must not require ANSYS or Abaqus.
+
+from femtools.dynamics.frf import dump_frf, load_frf  # or dynamics.superelement analog
+# npz dump/load of FRFResult; H and freq_hz bit-identical after load.
+
+from femtools.correlation.dofmap import mapped_mode_matrix
+# FE mode rows at map_nearest_nodes ids. Translated cube → MAC diagonal 1.
+
+from femtools.viz.plots import plot_stress
+# Color mesh by StressResult.von_mises (or a component). matplotlib default.
+
+from femtools.updating.updater import update_from_static
+# static_displacement_response + update_model. 10% E from tip deflection.
+```
+
+## Explicitly still N/A
+
+NI DAQ, commercial OP2/RST/ODB binary dumps, license servers, CAD kernels.
 
 ## Round 7 frozen APIs
 

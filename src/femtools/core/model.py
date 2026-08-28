@@ -51,6 +51,7 @@ __all__ = [
     "Property",
     "SPC",
     "RBE2",
+    "RBE3",
     "Load",
     "DOFSet",
     "FEModel",
@@ -399,6 +400,55 @@ class RBE2:
 
 
 @dataclass
+class RBE3:
+    """Interpolation constraint: one dependent node follows many independents.
+
+    Public Nastran ``RBE3`` layout (reference grid + weighted independent
+    grids).  Stored on :class:`FEModel` so BDF ``RBE3`` cards and
+    :func:`femtools.fea.mpc.apply_rbe3` share a single table.  Unlike
+    :class:`RBE2` this is not a rigid weld -- the dependent motion is a
+    weighted average of the independents.  The assembler consumes this
+    list; it is not an element.
+    """
+
+    id: int
+    dependent: int
+    independents: tuple[int, ...]
+    components: tuple[int, ...] = (1, 2, 3)
+    independent_components: tuple[int, ...] = (1, 2, 3)
+    weights: tuple[float, ...] | None = None
+
+    def __post_init__(self) -> None:
+        self.id = int(self.id)
+        self.dependent = int(self.dependent)
+        self.independents = tuple(int(n) for n in self.independents)
+        comps = tuple(int(c) for c in self.components)
+        icomps = tuple(int(c) for c in self.independent_components)
+        if not comps or any(c < 1 or c > 6 for c in comps):
+            raise ModelError(f"RBE3 {self.id}: components must be in 1..6, got {self.components}")
+        if not icomps or any(c < 1 or c > 6 for c in icomps):
+            raise ModelError(
+                f"RBE3 {self.id}: independent_components must be in 1..6, "
+                f"got {self.independent_components}"
+            )
+        if self.dependent in self.independents:
+            raise ModelError(f"RBE3 {self.id}: dependent node cannot also be independent")
+        if not self.independents:
+            raise ModelError(f"RBE3 {self.id}: at least one independent node is required")
+        if self.weights is not None:
+            w = tuple(float(v) for v in self.weights)
+            if len(w) != len(self.independents):
+                raise ModelError(
+                    f"RBE3 {self.id}: {len(w)} weights for {len(self.independents)} independents"
+                )
+            if any(v <= 0.0 for v in w):
+                raise ModelError(f"RBE3 {self.id}: weights must be positive")
+            self.weights = w
+        self.components = comps
+        self.independent_components = icomps
+
+
+@dataclass
 class Load:
     """Nodal load (force and/or moment vector) in global coordinates."""
 
@@ -509,6 +559,7 @@ class FEModel:
     properties: dict[int, Property] = field(default_factory=dict)
     spcs: list[SPC] = field(default_factory=list)
     rbe2: list[RBE2] = field(default_factory=list)
+    rbe3: list[RBE3] = field(default_factory=list)
     sets: dict[str, NodeSet | ElementSet] = field(default_factory=dict)
     coord_systems: dict[int, CoordSys] = field(default_factory=dict)
     units: UnitSystem = field(default_factory=UnitSystem)
@@ -650,6 +701,34 @@ class FEModel:
             if missing:
                 raise ModelError(f"RBE2 {rbe.id}: undefined node(s) {missing}")
         self.rbe2.append(rbe)
+        return rbe
+
+    def add_rbe3(
+        self,
+        id: int,
+        dependent: int,
+        independents: Sequence[int],
+        components: Sequence[int] = (1, 2, 3),
+        independent_components: Sequence[int] = (1, 2, 3),
+        weights: Sequence[float] | None = None,
+        check_refs: bool = True,
+    ) -> RBE3:
+        """Interpolation constraint (Nastran RBE3 layout): ``dependent`` follows independents."""
+        rbe = RBE3(
+            id=id,
+            dependent=dependent,
+            independents=tuple(independents),
+            components=tuple(components),
+            independent_components=tuple(independent_components),
+            weights=None if weights is None else tuple(weights),
+        )
+        if any(item.id == rbe.id for item in self.rbe3):
+            raise ModelError(f"duplicate RBE3 id {rbe.id}")
+        if check_refs:
+            missing = [n for n in (rbe.dependent, *rbe.independents) if n not in self.nodes]
+            if missing:
+                raise ModelError(f"RBE3 {rbe.id}: undefined node(s) {missing}")
+        self.rbe3.append(rbe)
         return rbe
 
     def add_load(
