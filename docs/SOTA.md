@@ -255,10 +255,10 @@ implementations; `docs/ACCEPTANCE.md` (owned by R1-F3) elaborates the golden cas
 ## 10. Merged-code gap (Round-2 closure and residual distances)
 
 Known distances between the merged code and the state of the art it targets. Status tags in
-`docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4/R6/R7/R8 is merged and tested but may still carry
+`docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4/R6/R7/R8/R9 is merged and tested but may still carry
 one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+
-and N/A rows of the product map, not repeated here; the in-flight (not merged) Round-9
-rows are tagged R9-wip there and covered in §13.
+and N/A rows of the product map, not repeated here. Round 9 close-out promotions are
+covered in §13.
 
 ### Closed in Round 2
 
@@ -408,13 +408,13 @@ are public textbooks and journal papers only.
   R7 static-displacement responses. Each is covered by the references already cited for
   the machinery it wraps.
 
-## 13. Round 9 (in flight — PRODUCT_MAP tag R9-wip): close-out promotions, persistence, mapped MAC, SOL 101 text punch
+## 13. Round 9 — close-out promotions, persistence, mapped MAC, SOL 101 text punch
 
-Round 9 (Cycle C's third and closing round) is in progress on this tree; its rows are
-tagged **R9-wip** in `docs/PRODUCT_MAP.md` and are *not merged* until parent glue
-retags them. **No new numerical algorithm enters the codebase in this round** — every
-Round-9 name is a contract promotion, a composition, or a persistence/presentation
-layer over machinery already referenced in §1–§12, so no new citations are required.
+Round 9 (Cycle C's third and closing round) merged on this tree; its rows are
+tagged **R9** in `docs/PRODUCT_MAP.md`. **No new numerical algorithm enters the
+codebase in this round** — every Round-9 name is a contract promotion, a
+composition, or a persistence/presentation layer over machinery already referenced
+in §1–§12, so no new citations are required.
 
 * **`fea.mpc.apply_mpc` (contract promotion).** The public composer of `model.rbe2` +
   `model.rbe3` into the single `ConstraintTransform` that `assemble_km` already

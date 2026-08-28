@@ -37,6 +37,8 @@ Round-7 names (``recover_stress``, ``apply_rbe2``, ``write_cdb``, ``write_k``,
 Round-8 names (``apply_rbe3``, ``average_nodal``, ``AnsysCdbDriver``,
 ``AbaqusInpDriver``, ``dump_frf``, ``mapped_mode_matrix``, ``plot_stress``,
 ``update_from_static``, …) follow the same way.
+Round-9 names (``apply_mpc``, ``static_stress_response``, ``mapped_mac``,
+``dump_psd``, ``load_psd``) close Cycle C the same way.
 """
 
 from __future__ import annotations
@@ -47,8 +49,8 @@ from typing import TYPE_CHECKING
 __version__ = "0.1.0"
 
 # Top-level name -> defining module (contract API of docs/CONTRACT_API.md, the frozen
-# Round-4 / Round-6 / Round-7 / Round-8 APIs of .agent_workspace/REMAINING.md —
-# docs/PRODUCT_MAP.md tags R4 / R6 / R7 / R8 — plus the exception hierarchy promised
+# Round-4 / Round-6 / Round-7 / Round-8 / Round-9 APIs of .agent_workspace/REMAINING.md —
+# docs/PRODUCT_MAP.md tags R4 / R6 / R7 / R8 / R9 — plus the exception hierarchy promised
 # at package root by docs/ARCHITECTURE.md §9).
 _EXPORTS: dict[str, str] = {
     # error hierarchy
@@ -115,6 +117,7 @@ _EXPORTS: dict[str, str] = {
     "StressResult": "femtools.fea.recover",
     "apply_rbe2": "femtools.fea.mpc",
     "apply_rbe3": "femtools.fea.mpc",
+    "apply_mpc": "femtools.fea.mpc",
     "ConstraintTransform": "femtools.fea.mpc",
     "average_nodal": "femtools.fea.recover",
     # dynamics
@@ -131,6 +134,8 @@ _EXPORTS: dict[str, str] = {
     "FreeCMSResult": "femtools.dynamics.cms_free",
     "psd_response": "femtools.dynamics.random",
     "PSDResult": "femtools.dynamics.random",
+    "dump_psd": "femtools.dynamics.random",
+    "load_psd": "femtools.dynamics.random",
     "dump_cms": "femtools.dynamics.superelement",
     "load_cms": "femtools.dynamics.superelement",
     "modal_strain_energy": "femtools.dynamics.energy",
@@ -147,6 +152,7 @@ _EXPORTS: dict[str, str] = {
     "mac_contribution": "femtools.correlation.mac",
     "map_nearest_nodes": "femtools.correlation.dofmap",
     "mapped_mode_matrix": "femtools.correlation.dofmap",
+    "mapped_mac": "femtools.correlation.dofmap",
     "pair_modes": "femtools.correlation.pairing",
     "frac": "femtools.correlation.frf_corr",
     "csac": "femtools.correlation.frf_corr",
@@ -175,6 +181,7 @@ _EXPORTS: dict[str, str] = {
     "UQResult": "femtools.updating.uq",
     "identify_harmonic_forces": "femtools.updating.force_id",
     "static_displacement_response": "femtools.updating.responses",
+    "static_stress_response": "femtools.updating.responses",
     # optimization
     "size_optimize": "femtools.optimization.size",
     "topology_simp": "femtools.optimization.topology",
@@ -309,6 +316,7 @@ if TYPE_CHECKING:
     from femtools.core.validation import validate_model as validate_model
     from femtools.correlation.alignment import align_geometry as align_geometry
     from femtools.correlation.dofmap import map_nearest_nodes as map_nearest_nodes
+    from femtools.correlation.dofmap import mapped_mac as mapped_mac
     from femtools.correlation.dofmap import mapped_mode_matrix as mapped_mode_matrix
     from femtools.correlation.expansion import (
         expand_guyan as expand_guyan,
@@ -369,6 +377,12 @@ if TYPE_CHECKING:
         PSDResult as PSDResult,
     )
     from femtools.dynamics.random import (
+        dump_psd as dump_psd,
+    )
+    from femtools.dynamics.random import (
+        load_psd as load_psd,
+    )
+    from femtools.dynamics.random import (
         psd_response as psd_response,
     )
     from femtools.dynamics.residuals import residual_vectors as residual_vectors
@@ -391,6 +405,7 @@ if TYPE_CHECKING:
     )
     from femtools.fea.elements import available_elements as available_elements
     from femtools.fea.mpc import ConstraintTransform as ConstraintTransform
+    from femtools.fea.mpc import apply_mpc as apply_mpc
     from femtools.fea.mpc import apply_rbe2 as apply_rbe2
     from femtools.fea.mpc import apply_rbe3 as apply_rbe3
     from femtools.fea.recover import StressResult as StressResult
@@ -484,6 +499,9 @@ if TYPE_CHECKING:
     from femtools.updating.frf_updating import update_from_frf as update_from_frf
     from femtools.updating.responses import (
         static_displacement_response as static_displacement_response,
+    )
+    from femtools.updating.responses import (
+        static_stress_response as static_stress_response,
     )
     from femtools.updating.selection import select_parameters as select_parameters
     from femtools.updating.sensitivity import sensitivity_matrix as sensitivity_matrix

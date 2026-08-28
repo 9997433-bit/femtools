@@ -227,39 +227,33 @@ with the arm; topometry compliance ratio **0.158** (OC, 166 iterations, converge
 volume conserved to 2e-13, root 7.0 mm vs tip column 2.6 mm); HEX8 uniform-tension patch
 $s_{xx} = P/A$ to 6e-16, BEAM2 end moments $M(x) = P(L-x)$ to 2e-14.
 
-### Round-9 status (2026-08-28 — pending measurement)
+### Round-9 status (2026-08-28 — measured on this tree)
 
-Round-9 frozen APIs are landing on this tree during the round; the boxes below stay
-unchecked until the close-out audit measures each gate the way Rounds 7–8 were measured
-(import alone is not "measured"). Import status observed while writing this block
-(2026-08-28, mid-round — the tree was still merging): `apply_mpc`,
-`static_stress_response`, `mapped_mac` and `dump_psd`/`load_psd` already import;
-the Nastran driver is still SOL 103-only; CLI polish is uncommitted work in flight.
+Round-9 frozen APIs (`REMAINING.md` Round-9 section / `ROUND9_BRIEF.md`) import and
+are stable top-level exports (SOL 101 is a driver method, not a new top-level name).
 
-- [ ] **R9 apply_mpc** — `femtools.fea.mpc.apply_mpc`: one explicit entry point for the
-      combined RBE2 + RBE3 elimination (`rbe2=` / `rbe3=` overrides, shared
-      `ConstraintTransform`). Gate: bit-identical to `apply_rbe2` / `apply_rbe3` on
-      single-table models; RBE2/RBE3 goldens unchanged.
-- [ ] **R9 static_stress_response** — `femtools.updating.static_stress_response`:
-      stress/strain-gauge residual for `update_from_static` (feeds
-      `recover_stress` into the same Gauss–Newton loop). Gate: constant-stress HEX8
-      patch pins a 10% E error from measured stress alone; displacement-path
-      goldens unchanged.
-- [ ] **R9 mapped_mac** — `femtools.correlation.mapped_mac`: one-call
-      map + gather + MAC wrapper (`MappedMACResult` keeps `.mac`, `.nodes`,
-      `.phi_fe`). Gate: bit-identical to the composed
-      `map_nearest_nodes` + `mapped_mode_matrix` + `mac_matrix` path; the kernel-gated
-      section of `examples/mapped_mac.py` already measures `max|dev| = 0.0` and
-      `min_diagonal = 1.0` on this tree — dedicated pytest still pending.
-- [ ] **R9 dump_psd** — `femtools.dynamics.random.dump_psd` / `load_psd`. Gate: PSD
-      matrix and frequency vector bit-identical after an npz round-trip (same contract
-      as the R8 FRF dump); `psd_response` numerics unchanged.
-- [ ] **R9 SOL 101 text punch** — static displacements through the Nastran text driver
-      (`write_bdf` SOL 101 executive / punch read-back, no OP2). Not on this tree yet:
-      `drivers/nastran.py` is SOL 103-only at the time of writing.
-- [ ] **R9 CLI/GUI polish** — CLI subcommands / script verbs / GUI endpoints for the
-      Round-9 kernels, with the established lazy-fail contract (missing-module message,
-      exit 3). In flight; unmeasured.
+- [x] **R9 apply_mpc** — `femtools.fea.mpc.apply_mpc`. Gate: empty `rbe3` → `apply_rbe2`
+      G bit-identical; empty `rbe2` → `apply_rbe3` G bit-identical; mixed RBE2/RBE3
+      chain keeps exactly **6** free–free rigid-body modes; overlapping dependent DOF
+      raises; `mpc=False` disables both (`tests/test_round9_o1.py`).
+- [x] **R9 static_stress_response** — `femtools.updating.static_stress_response`.
+      Displacement-driven HEX8 patch recovers 10% E with error **0.0**; BAR2 rod
+      **1.1e-16**. Dead-load stress does not recover E (negative control).
+      `update_from_static` displacement path 4.4e-16 unchanged (`tests/test_round9_o4.py`).
+- [x] **R9 mapped_mac** — `femtools.correlation.dofmap.mapped_mac`. Gate: bit-identical
+      to `map_nearest_nodes` + `mapped_mode_matrix` + `mac_matrix`; translated
+      unequal-edge block `max|diag − 1|` = 5.6e-16. Example `mapped_mac.py`:
+      `min_diagonal = 1.0`.
+- [x] **R9 dump_psd** — `femtools.dynamics.random.dump_psd` / `load_psd`. Gate:
+      spectra and `freq_hz` **bit-identical** after npz round-trip (`max|ΔS| = 0`);
+      Miles / Rubin goldens unchanged.
+- [x] **R9 SOL 101 text punch** — `NastranPunchDriver.write_input(..., sol=101)` and
+      `read_static` via `read_pch_static` (`$DISPLACEMENTS` text). Default remains
+      SOL 103 (byte-identical to R7). `.op2` → `SolverError` naming OP2 as N/A.
+      Stubbed-executable tests (`tests/test_round9_io.py`).
+- [x] **R9 CLI/GUI polish** — CLI `dump-frf` / `load-frf` / `update-static` lazy-fail
+      with the missing-module message (exit 3). Script `UPDATE STATIC` / `DUMP FRF`.
+      GUI HTML displays `GET /api/stress` after a static solve; 400 bodies as hints.
 
 Consequence for examples: Round 9 adds the two kernel-backed demos sanctioned by the
 Round-9 brief — `examples/update_static.py` (10% E recovered from a static tip

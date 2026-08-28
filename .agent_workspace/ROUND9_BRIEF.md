@@ -7,13 +7,15 @@ No DAQ, no OP2/RST/ODB.
 Frozen names: `.agent_workspace/REMAINING.md` (Round 9 section).
 File ownership: `.agent_workspace/FILE_OWNERSHIP.md`.
 
-Round 9 is the Cycle-C close-out: promote two already-landed kernels to the frozen
-contract, add one mapped-MAC convenience, thicken CLI/script/GUI, and keep every
-example green. Do **not** reopen N/A rows. Do **not** invent ZZ-SPR, EAS-30, or
-binary result parsers.
+## Close-out
 
-Parent glue after all ten land: top-level `_EXPORTS` for the frozen names,
-PRODUCT_MAP R9-wip → R9, ACCEPTANCE measured, then PR #3 marked ready.
+All ten Round-9 agents delivered. Kernels and tests are merged on
+`cursor/femtools-cycle-c-d551`. Parent glue: top-level `_EXPORTS` (143 names),
+PRODUCT_MAP R9-wip → R9, ACCEPTANCE Round-9 rows measured. Goldens unchanged
+(HEX8 98.6%, Rubin 0.028%, H1/H2=γ², tilted-shell 6 RBM, 10% E recovery).
+DAQ / OP2 / RST / ODB remain N/A.
+
+The per-agent briefs below are historical.
 
 ## R9-O1 — `apply_mpc` contract (cloud)
 

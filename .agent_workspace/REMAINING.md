@@ -10,6 +10,10 @@ stable top-level exports.
 **Round 8 landed** on `cursor/femtools-cycle-c-d551` (PR #3). The names below import and are
 stable top-level exports.
 
+**Round 9 landed** on `cursor/femtools-cycle-c-d551` (PR #3). The names below import and are
+stable top-level exports (SOL 101 is a driver method). Cycle C is closed; DAQ / OP2 /
+RST / ODB remain N/A.
+
 ## Round 9 frozen APIs
 
 Round 9 closes Cycle C: promote two already-landed kernels, add a mapped-MAC
