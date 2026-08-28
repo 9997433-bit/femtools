@@ -13,7 +13,8 @@ Round-4 kernels landed. The three Round-4 examples (`guyan_serep.py`, `cms_rubin
 `h1_ssi.py`) now run against `femtools.fea.reduction`, `femtools.dynamics.cms_free`,
 `femtools.mpe.frf_estimation` and `femtools.mpe.ssi` — see the Round-4 block below.
 Checked = measured passing with the quoted numbers; unchecked = not yet exercised by a
-test or example on this tree.
+test or example on this tree. The list below is kept current as later rounds close the
+debt — the per-round status blocks that follow record when each batch was measured.
 
 - [x] **1a** axial bar, 2-node discrete — `tests/test_golden_fea.py::test_two_node_axial_bar_frequency` green
 - [ ] **1b** axial bar N-element dispersion — no test/example yet
@@ -342,6 +343,17 @@ Consequence for examples: Round 10 adds `examples/tet10_patch.py` (TET10 patch +
 (numbers in row 31), growing the example set to **15/15 PASS** measured on this tree
 (2026-08-28). Both new examples `raise SystemExit(0)` with a clear message when their
 kernels are absent; the existing 13 examples are unchanged.
+
+### Round-11 status (2026-08-28 — acceptance test debt, R11-O5F)
+
+No new kernel and no new frozen name: `tests/test_round11_o5f_acceptance.py` closes the
+six master-table rows whose kernels were merged in Round 1 but had never been checked
+numerically — **3b**, **5**, **11**, **13**, **15** and **16**, whose measured numbers
+are quoted in the status list at the top of this file. `tests/`: **599 passed /
+3 skipped**. Examples: **15/15 PASS**. Boundary probes: **39/39 pass**. `_EXPORTS`
+stays at **149**, and the HEX8 0.9855 / Rubin / H1-H2 / 6-RBM / 10 %-E goldens are
+untouched. Rows **1b**, **1c**, **7a**, **9**, **10**, **12** and the full 60×20 MBB
+SIMP criteria remain open test debt.
 
 ## 0. Master table
 
