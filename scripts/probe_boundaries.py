@@ -1463,6 +1463,8 @@ def probe_era() -> dict[str, Any]:
         kwargs["n_block_rows"] = 80
     if "n_modes" in parameters:
         kwargs["n_modes"] = 2
+    if "stabilization" in parameters:
+        kwargs["stabilization"] = False
     if "f_range" in parameters:
         kwargs["f_range"] = (1.0, 60.0)
     if "max_damping" in parameters:

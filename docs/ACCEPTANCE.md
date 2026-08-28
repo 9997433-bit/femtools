@@ -266,66 +266,59 @@ bringing the example set to **13/13 PASS** (2026-08-28, this tree). Both skip wh
 (`raise SystemExit(0) from None`) when their kernels are absent, so the suite stays
 green on partial trees.
 
-### Round-10 status (2026-08-28 — rows unchecked until the parent measures the merged tree)
+### Round-10 status (2026-08-28 — parent-measured on the merged Cycle-D tree)
 
 Round-10 frozen APIs (`REMAINING.md` Round-10 section / `ROUND10_BRIEF.md`) open
-Cycle D. Audited on the shared Cycle-D tree by R10-F3 (2026-08-28, re-probed after the
-cloud kernels landed mid-round): `tet10` + `recover_spr` (R10-O1), `era` (R10-O4),
-`residual_flexibility` (R10-O2) and `expanded_mac` (R10-O3) all import and their
-exclusive test files are green (`tests/test_round10_o1.py` + `test_round10_o2.py` +
-`test_round10_o3.py` + `test_round10_o4.py`: **81 passed**); only
-`io.pch.read_pch_stress` / 10-node CTETRA (R10-F2) does **not** import yet.
-Numbers quoted below are R10-F3 measurements on this tree, flagged provisional;
-every row stays unchecked until the parent re-measures the fully merged tree.
+Cycle D. Parent glue promoted them to stable top-level exports (`_EXPORTS` 149).
+`tests/`: 590 passed / 3 skipped. Examples: **15/15 PASS**. Boundary probes:
+39/39 pass.
 
-- [ ] **29** TET10 constant-strain patch + rigid modes — `femtools.fea.elements.tet10`
-      imports; `tests/test_round10_o1.py` green. Gates (§12.1) measured provisionally
+- [x] **29** TET10 constant-strain patch + rigid modes — `femtools.fea.elements.tet10`
+      imports; `tests/test_round10_o1.py` green. Gates (§12.1) measured
       by `examples/tet10_patch.py` (2026-08-28, PASS): four distorted TET10 around a
       buried node under $u = a + A x$ recover strain $\mathrm{sym}(A)$ to **3.2e-15**
       and stress $D\,\mathrm{sym}(A)$ to **8.6e-16** (tol 1e-12); free–free single
       TET10: exactly **6** rigid-body modes (first elastic 21 187.9 Hz); consistent
       mass closes $r^\top M r = \rho V$ to **3.2e-16**.
-- [ ] **30** ZZ-SPR nodal recovery — `femtools.fea.recover.recover_spr` imports;
-      `tests/test_round10_o1.py` green. Gate (§12.2) measured provisionally by the
+- [x] **30** ZZ-SPR nodal recovery — `femtools.fea.recover.recover_spr` imports;
+      `tests/test_round10_o1.py` green. Gate (§12.2) measured by the
       kernel-gated section of `examples/tet10_patch.py` (2026-08-28): constant-stress
       patch exact at **every** node — TET4 twin **4.1e-15**, TET10 patch **5.1e-15**
       (tol 1e-10), all 5 patch nodes carrying values; distinct from `average_nodal`,
       which stays the 1/n_adj incidence average.
-- [ ] **31** ERA synthetic 2-DOF — `femtools.mpe.era.era` imports on this tree;
+- [x] **31** ERA synthetic 2-DOF — `femtools.mpe.era.era` imports;
       `tests/test_round10_o4.py` green and `examples/era_2dof.py` measured PASS
-      provisionally (2026-08-28): analytic-IRF single-order path
+      (2026-08-28): analytic-IRF single-order path
       $|\Delta f| \le$ **3.6e-15 Hz** (gate: one line, 0.125 Hz), rel ζ err **0.0 %**,
       MAC **1.000000**; FRF route (internal `irf_from_frf`, exponential window unbiased
       analytically in the realization) $|\Delta f| \le$ **6.8e-5 Hz** (one line,
       0.0625 Hz), rel ζ err ≤ **0.02 %**, MAC **1.000000**.
-- [ ] **32** expanded MAC identity — `femtools.correlation.expansion.expanded_mac`
+- [x] **32** expanded MAC identity — `femtools.correlation.expansion.expanded_mac`
       imports; `tests/test_round10_o3.py` green. Probe (2026-08-28, case-2 cantilever,
       6 modes, 18 random master rows): SEREP fixed point `diagonal_error` **2.2e-16**,
       mass-weighted (`weights=M`) `identity_error` **4.4e-16**, SEREP fit residual
       **1.0e-15**; the *unweighted* off-diagonal collapses onto the plain AutoMAC of
       the FE modes (0.240 here — a property of the mode set, not of the expansion;
       see §12.4).
-- [ ] **33** residual-flexibility FRF correction —
+- [x] **33** residual-flexibility FRF correction —
       `femtools.dynamics.residuals.residual_flexibility` imports;
       `tests/test_round10_o2.py` green. Probe (2026-08-28, case-2 cantilever, 4 kept
       modes, retained band 7.9–31.4 Hz, Rayleigh ζ = 2 %): rel L2 vs `direct_frf`
       **1.90e-2 → 1.31e-3** with `upper_residual=residual_flexibility(...)` — a
       **14.5×** improvement (gate: ratio < 0.25). The 20-mode 5 % golden (case 7b)
       and Rubin 0.028 % are untouched.
-- [ ] **R10 CTETRA10 / punch `$STRESSES`** — `io.pch.read_pch_stress` not importable
-      yet, and `read_bdf` still midside-drops 10-node CTETRA on this tree. Gates
-      (§12.6): 10-node `CTETRA` → `type="TET10"` with all 10 node ids, round-tripped
+- [x] **R10 CTETRA10 / punch `$STRESSES`** — `io.pch.read_pch_stress` imports;
+      `read_bdf` keeps 10-node CTETRA as `TET10` with all 10 node ids, round-tripped
       by `write_bdf`; 4-node CTETRA stays TET4; HEX20 still warn+drops to HEX8;
       `$STRESSES` / `$ELEMENT STRESSES` punch text parsed into element ids + Voigt
       tensors with `$DISPLACEMENTS`/eigenvector blocks skipped the tolerant way;
-      **no OP2**, stub-tested like R7/R9 (no Nastran binary required).
+      **no OP2**, stub-tested like R7/R9 (`tests/test_round10_io.py`).
 
 Consequence for examples: Round 10 adds `examples/tet10_patch.py` (TET10 patch +
 6 RBM + kernel-gated SPR section — numbers in rows 29–30) and `examples/era_2dof.py`
 (numbers in row 31), growing the example set to **15/15 PASS** measured on this tree
-(2026-08-28, after the R10-O1/O4 kernels landed mid-round). Both new examples
-`raise SystemExit(0)` with a clear message when their kernels are absent, so the
-suite stays green on partial trees; the existing 13 examples are unchanged.
+(2026-08-28). Both new examples `raise SystemExit(0)` with a clear message when their
+kernels are absent; the existing 13 examples are unchanged.
 
 ## 0. Master table
 
@@ -375,7 +368,8 @@ suite stays green on partial trees; the existing 13 examples are unchanged.
 
 Rows 21–28 are Round-6 contracts; as of the 2026-08-28 R7-F3 re-audit their kernels all
 import on this tree and every row is **measured passing** (status block above) —
-constructions in §10. Rows 29–33 are Round-10 contracts, unchecked in the Round-10
+constructions in §10. Rows 29–33 are Round-10 contracts, parent-measured on the
+merged Cycle-D tree (status block above).
 status block until the parent measures the merged tree — constructions in §12.
 
 ## 1. Axial bar
@@ -715,7 +709,7 @@ Fixed seeds via `np.random.default_rng(seed)` only; eigenvector sign convention 
 `fea.md` §6.2; degenerate-subspace comparisons via MAC/S2MAC, never entrywise; no test may
 depend on ARPACK iteration counts or wall time.
 
-## 12. Round-10 golden constructions (rows 29–33 unchecked until the parent measures)
+## 12. Round-10 golden constructions (rows 29–33, parent-measured)
 
 Formulas live in the matching `docs/algorithms/` files (fea.md §14–§15, mpe_rbpe.md §8,
 correlation.md §6, dynamics.md §4.1, io.md §7–§8). Status and provisional probe numbers

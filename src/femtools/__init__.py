@@ -455,6 +455,7 @@ if TYPE_CHECKING:
     from femtools.io.project import save_project as save_project
     from femtools.io.unv import read_unv as read_unv
     from femtools.io.unv import write_unv as write_unv
+    from femtools.mpe.era import era as era
     from femtools.mpe.fdd import efdd as efdd
     from femtools.mpe.fdd import fdd as fdd
     from femtools.mpe.frf_estimation import (
@@ -466,7 +467,6 @@ if TYPE_CHECKING:
     from femtools.mpe.frf_estimation import (
         estimate_h2 as estimate_h2,
     )
-    from femtools.mpe.era import era as era
     from femtools.mpe.lsce import lsce as lsce
     from femtools.mpe.p_lscf import poly_lscf as poly_lscf
     from femtools.mpe.ssi import ssi_cov as ssi_cov
