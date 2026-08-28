@@ -8,6 +8,11 @@ Typical workflow::
     result = pair_modes(phi_t, phi_a, f_test, f_fe, method="hungarian")
     print(result.table())
 
+Two geometric helpers sit on either side of it: :func:`map_nearest_nodes`
+attaches digitized measurement points to the nodes of the mesh before the DOF
+maps can be written down, and :func:`mac_contribution` splits a single MAC
+value back into one signed number per DOF once it comes out too low.
+
 A solved model can be used wherever mode shapes are expected: a
 :class:`~femtools.fea.eigen.ModalResult` supplies its ``modes``, its real
 ``dof_map`` and its frequencies on its own, so the analysis side of the same
@@ -25,8 +30,10 @@ from .alignment import AlignmentResult, align_geometry, rotate_modes
 from .dofmap import (
     COMPONENT_NAMES,
     DOFMap,
+    NearestNodeMap,
     align_modes,
     as_dofmap,
+    map_nearest_nodes,
     match_dofs,
     parse_component,
     parse_components,
@@ -40,6 +47,7 @@ from .mac import (
     comac,
     ecomac,
     fmac,
+    mac_contribution,
     mac_matrix,
     mac_pairs,
     mac_value,
@@ -63,6 +71,7 @@ __all__ = [
     "ExpansionResult",
     "FMACResult",
     "ModePair",
+    "NearestNodeMap",
     "PairingResult",
     "align_geometry",
     "align_modes",
@@ -79,10 +88,12 @@ __all__ = [
     "fmac",
     "frac",
     "frf_difference",
+    "mac_contribution",
     "mac_matrix",
     "mac_pairs",
     "mac_value",
     "macx",
+    "map_nearest_nodes",
     "match_dofs",
     "modal_scale_factor",
     "nmd",

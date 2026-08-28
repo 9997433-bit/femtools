@@ -39,7 +39,7 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from ._linalg import as_mode_matrix
+from ._linalg import as_mode_matrix, coordinate_table
 from .dofmap import DOFMap
 
 __all__ = ["AlignmentResult", "align_geometry", "rotate_modes"]
@@ -172,7 +172,19 @@ def _points(source: Any, name: str) -> tuple[NDArray[Any] | None, NDArray[np.flo
         if ids.size != xyz.shape[0]:
             raise ValueError(f"{name}: {ids.size} ids for {xyz.shape[0]} points")
     else:
-        xyz = np.asarray(source, dtype=float)
+        try:
+            xyz = np.asarray(source, dtype=float)
+        except (TypeError, ValueError):
+            # A model, or a result carrying one: keep its node ids, which is
+            # what lets the fit match the two clouds by number.
+            table = coordinate_table(source)
+            if table is None:
+                raise ValueError(
+                    f"{name} must be an (n_point, 3) array, a {{node: xyz}} mapping, "
+                    f"an (ids, xyz) pair or a model carrying nodal coordinates, got "
+                    f"{type(source).__name__}"
+                ) from None
+            ids, xyz = table
     if xyz.ndim != 2 or xyz.shape[1] not in (2, 3):
         raise ValueError(f"{name} must be (n_point, 2) or (n_point, 3), got shape {xyz.shape}")
     return ids, xyz

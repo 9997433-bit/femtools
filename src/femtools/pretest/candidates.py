@@ -29,7 +29,13 @@ from typing import Any
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from ..correlation._linalg import as_mode_matrix, mode_frequencies, mode_source, row_index
+from ..correlation._linalg import (
+    as_mode_matrix,
+    coordinate_table,
+    mode_frequencies,
+    mode_source,
+    row_index,
+)
 from ..correlation.dofmap import DOFMap
 from ._result import IdSequenceMixin
 
@@ -242,12 +248,14 @@ def node_coordinates(
     source:
         A model exposing ``nodes`` (``{id: node}`` with ``xyz``/``coords``),
         a ``{node: xyz}`` mapping, an ``(ids, xyz)`` pair, an ``(n_node, 3)``
-        array or an object carrying any of those (a ``ModalResult`` reaches
-        its model through ``assembly``).
+        array, or an object carrying any of those as ``model`` / ``assembly``.
+        A solved result is not one of them: the kernel keeps matrices and a
+        DOF map, not geometry, so pass the model next to it.
     dof_map:
-        Target ordering.  Without it the coordinates come back in the
-        model's own node order.  A bare array carries no node ids, so its
-        rows are then read in the order of ``np.unique(dof_map.nodes)``.
+        Target ordering: one row per node of the map, in ascending node id
+        (``per_dof`` follows the map's own order instead).  Without a map the
+        coordinates come back in the model's own node order.  A bare array
+        carries no node ids, so its rows are read as ``np.unique(dof_map.nodes)``.
     per_dof:
         Return one row per DOF of ``dof_map`` instead of one per node, ready
         for :func:`~femtools.pretest.target_modes.rigid_body_modes`.
@@ -255,7 +263,7 @@ def node_coordinates(
         ``"raise"`` (default) or ``"none"``, which returns ``None`` when the
         coordinates cannot be recovered.
     """
-    table = _coordinate_table(source)
+    table = coordinate_table(source)
     if table is None:
         if missing == "none":
             return None
@@ -286,65 +294,6 @@ def node_coordinates(
         unknown = np.unique(wanted[~found])[:5].tolist()
         raise KeyError(f"no coordinates for node(s) {unknown}")
     return xyz[order][pos]
-
-
-def _coordinate_table(source: Any) -> tuple[NDArray[np.int64] | None, NDArray[np.float64]] | None:
-    """``(node_ids, xyz)`` recovered from a model-like object, if possible.
-
-    The ids are ``None`` for a bare coordinate array, which carries none.
-    """
-    if source is None:
-        return None
-    if isinstance(source, dict):
-        if not source:
-            return None
-        ids = np.fromiter((int(k) for k in source), dtype=np.int64, count=len(source))
-        xyz = np.array([np.asarray(v, dtype=float).reshape(-1)[:3] for v in source.values()])
-        return ids, xyz
-    if isinstance(source, tuple) and len(source) == 2 and np.ndim(source[1]) == 2:
-        pair_ids = np.asarray(source[0], dtype=np.int64).reshape(-1)
-        pair_xyz = _xyz_array(source[1])
-        if pair_xyz is None:
-            return None
-        if pair_ids.size != pair_xyz.shape[0]:
-            raise ValueError(f"{pair_ids.size} node ids for {pair_xyz.shape[0]} coordinate rows")
-        return pair_ids, pair_xyz
-    if isinstance(source, (np.ndarray, list)):
-        bare = _xyz_array(source)
-        return None if bare is None else (None, bare)
-    nodes = getattr(source, "nodes", None)
-    if isinstance(nodes, dict) and nodes:
-        ids = np.fromiter((int(k) for k in nodes), dtype=np.int64, count=len(nodes))
-        xyz = np.array([_node_xyz(v) for v in nodes.values()])
-        return ids, xyz
-    for name in ("model", "assembly"):
-        nested = getattr(source, name, None)
-        if nested is not None and nested is not source:
-            table = _coordinate_table(nested)
-            if table is not None:
-                return table
-    return None
-
-
-def _xyz_array(source: Any) -> NDArray[np.float64] | None:
-    """``(n_node, 3)`` coordinates from an array-like, or ``None`` if it is not one."""
-    try:
-        arr = np.asarray(source, dtype=float)
-    except (TypeError, ValueError):
-        return None
-    if arr.ndim != 2 or arr.shape[1] not in (2, 3):
-        return None
-    if arr.shape[1] == 2:  # a planar test geometry
-        arr = np.column_stack((arr, np.zeros(arr.shape[0])))
-    return arr
-
-
-def _node_xyz(node: Any) -> NDArray[np.float64]:
-    for name in ("xyz", "coords", "coordinates", "position"):
-        value = getattr(node, name, None)
-        if value is not None:
-            return np.asarray(value, dtype=float).reshape(-1)[:3]
-    return np.asarray(node, dtype=float).reshape(-1)[:3]
 
 
 def _mode_columns(mode_index: ArrayLike | None, n_mode: int) -> NDArray[np.intp]:

@@ -17,26 +17,34 @@ solved model — ``ModalResult.dof_map``, ``AssemblyResult.dof_map``,
     modal = solve_modes(model, n_modes=12)
     dofs = DOFMap.from_mapping(modal)          # 6 * n_node (node, component)
     phi_t = modal.modes[dofs.translational()]  # measurable rows only
+
+Which node of the model a test channel belongs to is a *geometric* question,
+answered before any of the above: :func:`map_nearest_nodes` matches a digitized
+test point cloud against the mesh and returns the FE node id nearest to each
+measurement point together with its distance.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from inspect import isroutine
-from typing import Any
+from typing import Any, NamedTuple
 
 import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
-from ._linalg import mode_source, row_index
+from ._assignment import linear_sum_assignment
+from ._linalg import coordinate_table, mode_source, row_index
 
 __all__ = [
     "DOFMap",
+    "NearestNodeMap",
     "as_dofmap",
     "parse_component",
     "parse_components",
     "parse_dof_label",
     "match_dofs",
+    "map_nearest_nodes",
     "align_modes",
     "restrict",
 ]
@@ -633,3 +641,321 @@ def restrict(matrix: Any, index: ArrayLike, index_col: ArrayLike | None = None) 
             )
         return dense[rows]
     return dense[np.ix_(rows, cols)]
+
+
+# -- geometric test-to-model node mapping ---------------------------------
+
+#: Point pairs held in memory at once by the exact chunked search.
+_CHUNK_PAIRS = 2_000_000
+
+#: Point pairs handled by the exact chunked search before a KD-tree is used.
+_KDTREE_PAIRS = 2_000_000
+
+#: Largest cost matrix built for the ``unique=True`` assignment.
+_ASSIGN_ENTRY_LIMIT = 4_000_000
+
+
+class NearestNodeMap(NamedTuple):
+    """Result of :func:`map_nearest_nodes`, one entry per test point.
+
+    A plain ``(ids, distance)`` tuple — ``fe_ids, dist = map_nearest_nodes(...)``
+    unpacks it — with the usual quality figures reachable as attributes.
+    """
+
+    #: FE node id nearest to each test point, ``-1`` where none was accepted.
+    ids: NDArray[np.int64]
+    #: Distance to that node, in the units of the coordinates.  Kept for a
+    #: rejected point too, so ``tol`` can be judged from the result itself.
+    distance: NDArray[np.float64]
+
+    @property
+    def matched(self) -> NDArray[np.bool_]:
+        """Boolean mask of the test points that got a node."""
+        return np.asarray(self.ids) >= 0
+
+    @property
+    def unmatched(self) -> NDArray[np.intp]:
+        """Positions of the test points left without a node."""
+        return np.flatnonzero(~self.matched).astype(np.intp)
+
+    @property
+    def n_matched(self) -> int:
+        return int(np.count_nonzero(self.matched))
+
+    @property
+    def is_one_to_one(self) -> bool:
+        """True when every test point got a node and no node was used twice."""
+        ids = np.asarray(self.ids)
+        return bool(ids.size) and bool(self.matched.all()) and np.unique(ids).size == ids.size
+
+    @property
+    def max_distance(self) -> float:
+        """Largest matched distance (0 for an empty match)."""
+        d = np.asarray(self.distance)[self.matched]
+        return float(d.max()) if d.size else 0.0
+
+    @property
+    def rms_distance(self) -> float:
+        """RMS of the matched distances — the scalar geometry-fit figure."""
+        d = np.asarray(self.distance)[self.matched]
+        return float(np.sqrt(np.mean(d**2))) if d.size else 0.0
+
+    def table(self) -> str:
+        """Plain-text listing, one line per test point."""
+        head = f"{'test':>5} {'fe node':>9} {'distance':>13}"
+        lines = [head, "-" * len(head)]
+        ids = np.asarray(self.ids)
+        dist = np.asarray(self.distance)
+        for k in range(ids.size):
+            node = "-" if ids[k] < 0 else str(int(ids[k]))
+            lines.append(f"{k:>5} {node:>9} {dist[k]:>13.6g}")
+        lines.append(
+            f"matched {self.n_matched}/{ids.size}, max {self.max_distance:.6g}, "
+            f"rms {self.rms_distance:.6g}" + ("" if self.is_one_to_one else ", not one-to-one")
+        )
+        return "\n".join(lines)
+
+
+def _cloud(source: Any, name: str) -> tuple[NDArray[np.int64] | None, NDArray[np.float64]]:
+    """``(ids, xyz)`` of a point cloud; ``ids`` is ``None`` for a bare array."""
+    try:
+        table = coordinate_table(source)
+    except ValueError as exc:
+        raise ValueError(f"{name}: {exc}") from None
+    if table is None:
+        raise ValueError(
+            f"{name} must be an (n_point, 3) array, a {{node: xyz}} mapping, an "
+            f"(ids, xyz) pair or a model carrying nodal coordinates, got "
+            f"{type(source).__name__}"
+        )
+    ids, xyz = table
+    xyz = np.asarray(xyz, dtype=float)
+    if xyz.ndim != 2 or xyz.shape[1] not in (2, 3):
+        raise ValueError(f"{name} must hold 2-D or 3-D points, got shape {xyz.shape}")
+    if xyz.shape[1] == 2:  # a planar test geometry lies in z = 0
+        xyz = np.column_stack((xyz, np.zeros(xyz.shape[0])))
+    return ids, np.ascontiguousarray(xyz)
+
+
+def _distance_block(query: NDArray[np.float64], ref: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Exact ``(n_query, n_ref)`` Euclidean distances, filled in row chunks.
+
+    The straight difference is used rather than the ``|q|^2 + |r|^2 - 2 q.r``
+    expansion: the expansion loses half the significant digits near zero, and
+    coincident points must come back as an exact 0.0, not as 1e-8.
+    """
+    n, m = query.shape[0], ref.shape[0]
+    out = np.empty((n, m), dtype=float)
+    rows = max(1, int(_CHUNK_PAIRS // max(m, 1)))
+    for start in range(0, n, rows):
+        block = query[start : start + rows]
+        diff = block[:, None, :] - ref[None, :, :]
+        np.sqrt(np.einsum("ijk,ijk->ij", diff, diff), out=out[start : start + rows])
+    return out
+
+
+def _brute_nearest(
+    query: NDArray[np.float64], ref: NDArray[np.float64]
+) -> tuple[NDArray[np.intp], NDArray[np.float64]]:
+    """Nearest reference point per query row; ties go to the lowest position."""
+    n, m = query.shape[0], ref.shape[0]
+    pos = np.empty(n, dtype=np.intp)
+    dist = np.empty(n, dtype=float)
+    rows = max(1, int(_CHUNK_PAIRS // max(m, 1)))
+    for start in range(0, n, rows):
+        block = query[start : start + rows]
+        diff = block[:, None, :] - ref[None, :, :]
+        d2 = np.einsum("ijk,ijk->ij", diff, diff)
+        best = np.argmin(d2, axis=1)  # first minimum: deterministic on a tie
+        pos[start : start + rows] = best
+        dist[start : start + rows] = np.sqrt(d2[np.arange(block.shape[0]), best])
+    return pos, dist
+
+
+def _tree_nearest(
+    query: NDArray[np.float64], ref: NDArray[np.float64]
+) -> tuple[NDArray[np.intp], NDArray[np.float64]]:
+    """KD-tree nearest neighbour, with the same lowest-position tie rule."""
+    try:
+        from scipy.spatial import cKDTree
+    except ImportError:  # pragma: no cover - SciPy is a hard dependency
+        return _brute_nearest(query, ref)
+    tree = cKDTree(ref)
+    dist, pos = tree.query(query, k=2)
+    dist = np.asarray(dist, dtype=float)
+    out = np.ascontiguousarray(np.asarray(pos, dtype=np.intp)[:, 0])
+    # A tie is visible as an equal second distance, so the ball query that
+    # resolves it deterministically runs only for the few points that need it.
+    for i in np.flatnonzero(dist[:, 1] <= dist[:, 0]):
+        hits = tree.query_ball_point(query[i], float(dist[i, 0]))
+        if hits:
+            out[i] = min(hits)
+    # Recomputed rather than taken from the tree, so that the two search
+    # paths return the same floating-point distance to the same node.
+    diff = query - ref[out]
+    return out, np.sqrt(np.einsum("ij,ij->i", diff, diff))
+
+
+def _nearest(
+    query: NDArray[np.float64], ref: NDArray[np.float64]
+) -> tuple[NDArray[np.intp], NDArray[np.float64]]:
+    n, m = query.shape[0], ref.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=np.intp), np.zeros(0)
+    if m < 2 or n * m <= _KDTREE_PAIRS:
+        return _brute_nearest(query, ref)
+    return _tree_nearest(query, ref)
+
+
+def _candidate_columns(
+    query: NDArray[np.float64], ref: NDArray[np.float64], k: int
+) -> NDArray[np.intp]:
+    """Reference points that an optimal one-to-one assignment can use.
+
+    In an optimal assignment of ``n`` query rows, the point matched to a row
+    is always among that row's ``n`` nearest: at most ``n - 1`` of them are
+    taken by other rows, so a row sent further away could always be moved
+    back onto a free one at a lower cost.  Keeping the union of the ``n``
+    nearest per row therefore leaves the optimum untouched while shrinking a
+    whole-mesh cost matrix to the neighbourhood of the test points.
+    """
+    m = ref.shape[0]
+    if k >= m:
+        return np.arange(m, dtype=np.intp)
+    if query.shape[0] * m > _KDTREE_PAIRS:
+        try:
+            from scipy.spatial import cKDTree
+        except ImportError:  # pragma: no cover - SciPy is a hard dependency
+            pass
+        else:
+            _, idx = cKDTree(ref).query(query, k=k)
+            return np.unique(np.asarray(idx, dtype=np.intp))
+    picked: list[NDArray[np.intp]] = []
+    rows = max(1, int(_CHUNK_PAIRS // max(m, 1)))
+    for start in range(0, query.shape[0], rows):
+        block = query[start : start + rows]
+        diff = block[:, None, :] - ref[None, :, :]
+        d2 = np.einsum("ijk,ijk->ij", diff, diff)
+        picked.append(np.argpartition(d2, k - 1, axis=1)[:, :k].astype(np.intp))
+    return np.unique(np.concatenate(picked)) if picked else np.zeros(0, dtype=np.intp)
+
+
+def _unique_match(
+    query: NDArray[np.float64],
+    ref: NDArray[np.float64],
+    pos: NDArray[np.intp],
+    dist: NDArray[np.float64],
+) -> tuple[NDArray[np.intp], NDArray[np.float64]]:
+    """Turn a nearest-neighbour map into a minimum-total-distance matching."""
+    n, m = query.shape[0], ref.shape[0]
+    if n == 0:
+        return pos, dist
+    if np.unique(pos).size == pos.size:
+        # Every query row already holds its own minimum and no row collides,
+        # so this matching attains the lower bound: it is the optimal one.
+        return pos, dist
+    cols = _candidate_columns(query, ref, min(n, m))
+    if n * cols.size > _ASSIGN_ENTRY_LIMIT:
+        raise ValueError(
+            f"a one-to-one match of {n} test points against {m} FE nodes needs a "
+            f"{n} x {cols.size} cost matrix; restrict the model to the test region "
+            f"(e.g. an exterior node set) or use unique=False"
+        )
+    cost = _distance_block(query, ref[cols])
+    rows, taken = linear_sum_assignment(cost)
+    out_pos = np.full(n, -1, dtype=np.intp)
+    out_dist = dist.copy()
+    out_pos[rows] = cols[taken]
+    out_dist[rows] = cost[rows, taken]
+    return out_pos, out_dist
+
+
+def map_nearest_nodes(
+    xyz_test: Any,
+    xyz_fe: Any,
+    *,
+    tol: float | None = None,
+    unique: bool = False,
+) -> NearestNodeMap:
+    """Match a test point cloud onto the nodes of an analysis model.
+
+    Before any DOF can be aligned, each measurement point has to be told
+    which node of the mesh it sits on.  Test geometry is digitized, not
+    numbered like the model, so the correspondence is geometric: for every
+    row of ``xyz_test`` this returns the id of the closest FE node and how
+    far away it is.  The distance is the diagnostic — a sensor that lands
+    10 mm from the nearest node is either mis-digitized or measuring
+    something the model does not resolve, and correlating it silently would
+    blame the model for a bookkeeping error.
+
+    Parameters
+    ----------
+    xyz_test:
+        Measurement points: an ``(n, 3)`` (or planar ``(n, 2)``) array, a
+        ``{id: xyz}`` mapping, an ``(ids, xyz)`` pair, or any model-like
+        object carrying nodal coordinates.  The result follows this order.
+    xyz_fe:
+        The analysis side, in the same forms — typically an
+        :class:`~femtools.core.model.FEModel`, whose node ids are what comes
+        back (a solved result carries matrices and a DOF map, not geometry).
+        A bare coordinate array carries no ids of its own, so the returned
+        "ids" are then its row positions.
+    tol:
+        Largest accepted distance.  A test point whose nearest node lies
+        beyond it is reported as ``-1`` (its true distance is kept), instead
+        of being attached to a node it does not belong to.
+    unique:
+        Force a one-to-one match: no FE node is used by two test points.
+        The plain nearest-neighbour map is returned unchanged whenever it is
+        already injective (it is then optimal); otherwise the pairing that
+        minimizes the *total* distance is solved with the same rectangular
+        assignment used by ``pair_modes(method="hungarian")``.  With more
+        test points than nodes the surplus points come back unmatched.
+
+    Returns
+    -------
+    NearestNodeMap
+        The ``(ids, distance)`` pair, one entry per test point;
+        ``result.is_one_to_one``, ``result.max_distance`` and
+        ``result.table()`` summarize the fit.
+
+    Notes
+    -----
+    The search is exact (no bucketing, no rounding), computed in row chunks
+    for a small cloud and through a ``scipy.spatial.cKDTree`` once the
+    brute-force cost would grow past a few million point pairs; both paths
+    resolve an exact tie — a point equidistant from two nodes, common on a
+    symmetric mesh — to the lower node position, so the answer does not
+    depend on the size of the model.
+
+    Geometry that is not already in the model frame must be aligned first;
+    the two steps compose directly::
+
+        fit = align_geometry(test_xyz, fe_xyz)      # test frame -> FE frame
+        ids, dist = map_nearest_nodes(fit.apply(test_xyz), model)
+
+    and the ids then relabel a test DOF map onto the model::
+
+        lookup = dict(zip(test_ids, ids))
+        fe_map = DOFMap([lookup[n] for n in test_map.nodes],
+                        test_map.components, test_map.scale)
+    """
+    _, q = _cloud(xyz_test, "xyz_test")
+    fe_ids, r = _cloud(xyz_fe, "xyz_fe")
+    if r.shape[0] == 0:
+        raise ValueError("xyz_fe holds no points to match against")
+    if tol is not None:
+        tol = float(tol)
+        if not tol >= 0.0:
+            raise ValueError(f"tol must be non-negative, got {tol}")
+    ids = np.arange(r.shape[0], dtype=np.int64) if fe_ids is None else fe_ids.astype(np.int64)
+
+    pos, dist = _nearest(q, r)
+    if unique:
+        pos, dist = _unique_match(q, r, pos, dist)
+
+    matched = pos >= 0
+    if tol is not None:
+        matched &= dist <= tol
+    out = np.where(matched, ids[np.where(pos >= 0, pos, 0)], -1).astype(np.int64)
+    return NearestNodeMap(out, dist.astype(float, copy=False))

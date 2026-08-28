@@ -1,4 +1,4 @@
-"""Internal array helpers shared by the correlation and pretest packages.
+"""Internal array and point-cloud helpers shared by correlation and pretest.
 
 Kept private (no public re-export) so the frozen public contract stays small.
 """
@@ -19,6 +19,9 @@ __all__ = [
     "weighted",
     "column_norms_sq",
     "safe_divide",
+    "coordinate_table",
+    "xyz_array",
+    "node_xyz",
 ]
 
 #: Attributes searched when unwrapping a modal result object.
@@ -148,3 +151,63 @@ def safe_divide(num: NDArray[Any], den: NDArray[Any]) -> NDArray[Any]:
     good = den > 0.0
     np.divide(num, den, out=out, where=good)
     return out
+
+
+def coordinate_table(source: Any) -> tuple[NDArray[np.int64] | None, NDArray[np.float64]] | None:
+    """``(node_ids, xyz)`` recovered from a model-like object, if possible.
+
+    The ids are ``None`` for a bare coordinate array, which carries none.
+    """
+    if source is None:
+        return None
+    if isinstance(source, dict):
+        if not source:
+            return None
+        ids = np.fromiter((int(k) for k in source), dtype=np.int64, count=len(source))
+        xyz = np.array([np.asarray(v, dtype=float).reshape(-1)[:3] for v in source.values()])
+        return ids, xyz
+    if isinstance(source, tuple) and len(source) == 2 and np.ndim(source[1]) == 2:
+        pair_ids = np.asarray(source[0], dtype=np.int64).reshape(-1)
+        pair_xyz = xyz_array(source[1])
+        if pair_xyz is None:
+            return None
+        if pair_ids.size != pair_xyz.shape[0]:
+            raise ValueError(f"{pair_ids.size} node ids for {pair_xyz.shape[0]} coordinate rows")
+        return pair_ids, pair_xyz
+    if isinstance(source, (np.ndarray, list)):
+        bare = xyz_array(source)
+        return None if bare is None else (None, bare)
+    nodes = getattr(source, "nodes", None)
+    if isinstance(nodes, dict) and nodes:
+        ids = np.fromiter((int(k) for k in nodes), dtype=np.int64, count=len(nodes))
+        xyz = np.array([node_xyz(v) for v in nodes.values()])
+        return ids, xyz
+    for name in ("model", "assembly"):
+        nested = getattr(source, name, None)
+        if nested is not None and nested is not source:
+            table = coordinate_table(nested)
+            if table is not None:
+                return table
+    return None
+
+
+def xyz_array(source: Any) -> NDArray[np.float64] | None:
+    """``(n_node, 3)`` coordinates from an array-like, or ``None`` if it is not one."""
+    try:
+        arr = np.asarray(source, dtype=float)
+    except (TypeError, ValueError):
+        return None
+    if arr.ndim != 2 or arr.shape[1] not in (2, 3):
+        return None
+    if arr.shape[1] == 2:  # a planar test geometry
+        arr = np.column_stack((arr, np.zeros(arr.shape[0])))
+    return arr
+
+
+def node_xyz(node: Any) -> NDArray[np.float64]:
+    """Coordinates of one node object (or of a bare ``xyz`` sequence)."""
+    for name in ("xyz", "coords", "coordinates", "position"):
+        value = getattr(node, name, None)
+        if value is not None:
+            return np.asarray(value, dtype=float).reshape(-1)[:3]
+    return np.asarray(node, dtype=float).reshape(-1)[:3]

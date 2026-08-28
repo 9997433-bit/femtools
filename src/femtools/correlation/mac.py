@@ -27,6 +27,7 @@ from .orthogonality import cross_orthogonality
 __all__ = [
     "mac",
     "mac_value",
+    "mac_contribution",
     "mac_matrix",
     "macx",
     "nmd",
@@ -125,6 +126,121 @@ def mac_pairs(phi_a: ArrayLike, phi_b: ArrayLike, *, weights: Any = None) -> NDA
     num = np.real(cross * cross.conj())
     den = column_norms_sq(a, wa) * column_norms_sq(b, wb)
     return safe_divide(num, den)
+
+
+def _one_pair_columns(
+    a: NDArray[Any], b: NDArray[Any], index_a: int | None, index_b: int | None
+) -> tuple[NDArray[Any], NDArray[Any], bool]:
+    """Columns of the requested pair(s), plus whether a single pair was asked for."""
+    single = False
+    if index_a is not None:
+        a = a[:, [int(index_a)]]
+        single = True
+    if index_b is not None:
+        b = b[:, [int(index_b)]]
+        single = True
+    if a.shape[1] == 1 and b.shape[1] == 1:
+        return a, b, True
+    if single and (a.shape[1] != b.shape[1]):
+        # One index given: the other set must be a single mode to pair with.
+        raise ValueError(
+            f"index_a/index_b select {a.shape[1]} and {b.shape[1]} modes; "
+            "give both indices to pick one pair"
+        )
+    if a.shape[1] != b.shape[1]:
+        raise ValueError(
+            f"{a.shape[1]} vs {b.shape[1]} modes: pass index_a and index_b to pick "
+            "one pair, or matched mode sets of equal size"
+        )
+    return a, b, False
+
+
+def mac_contribution(
+    phi_a: ArrayLike,
+    phi_b: ArrayLike,
+    index_a: int | None = None,
+    index_b: int | None = None,
+    *,
+    weights: Any = None,
+    normalize: bool = False,
+) -> NDArray[np.float64]:
+    """Per-DOF decomposition of one MAC value: which DOFs make it, which break it.
+
+    A MAC of 0.62 says the two shapes disagree but not *where*.  The MAC is a
+    squared inner product, and an inner product is a sum over DOFs, so the
+    value splits exactly — no modelling choice, no re-normalization — into one
+    real number per DOF:
+
+    ``c[q] = Re( conj(a[q]) (W b)[q] * conj(a^H W b) ) / ((a^H W a) (b^H W b))``
+
+    with, for every mode pair,
+
+    ``sum_q c[q] = |a^H W b|^2 / ((a^H W a)(b^H W b)) = MAC(a, b)``
+
+    to round-off.  Reading it: a DOF with a large positive contribution is
+    where the two shapes agree and carry amplitude, and a **negative** one is
+    a DOF moving *against* the overall correlation — the local sign flip or
+    the mis-oriented sensor that is pulling the MAC down.  Near-zero entries
+    are DOFs with little amplitude in one of the two shapes, which a MAC
+    cannot see either way.  For real modes the expression is simply
+    ``a[q] b[q] (a^T b) / (||a||^2 ||b||^2)``.
+
+    Parameters
+    ----------
+    phi_a, phi_b:
+        The two mode shapes on a common DOF set, exactly as
+        :func:`mac_value` takes them: 1-D vectors, ``(n_dof, 1)`` columns, a
+        modal result, or full ``(n_dof, n_mode)`` sets with ``index_a`` /
+        ``index_b`` selecting the pair.
+    index_a, index_b:
+        Column of ``phi_a`` / ``phi_b`` forming the pair, i.e. the entry
+        ``mac_matrix(phi_a, phi_b)[index_a, index_b]`` to be explained.
+    weights:
+        MAC weighting as in :func:`mac_matrix` (e.g. a mass matrix).  Note
+        that a non-diagonal ``W`` couples DOFs, so a contribution is then the
+        share of row ``q`` of ``W``, not of DOF ``q`` alone.
+    normalize:
+        Divide by the MAC, so the contributions sum to 1 and read as the
+        fraction of the correlation each DOF supplies (0 for a null MAC).
+
+    Returns
+    -------
+    ndarray
+        ``(n_dof,)`` for one pair, ``(n_dof, n_pair)`` for matched mode sets,
+        whose column sums are :func:`mac_pairs`.  Real, and signed.
+
+    See Also
+    --------
+    comac : per-DOF correlation *across* several mode pairs, a ratio in
+        ``[0, 1]`` rather than an additive split of one MAC value.
+    ecomac : per-DOF shape difference of unity-scaled modes.
+
+    Notes
+    -----
+    ``sum_q |c[q]| >= MAC``, with equality only when every DOF term has the
+    same phase; the gap between the two is exactly the cancellation the MAC
+    suffers, which is why the ranking of ``|c|`` is a sharper localization
+    than the MAC deficit itself.
+    """
+    a = as_mode_matrix(phi_a, "phi_a")
+    b = as_mode_matrix(phi_b, "phi_b")
+    if a.shape[0] != b.shape[0]:
+        raise ValueError(
+            f"phi_a has {a.shape[0]} DOF but phi_b has {b.shape[0]}; align the DOF sets first"
+        )
+    a, b, single = _one_pair_columns(a, b, index_a, index_b)
+
+    wa = weighted(weights, a)
+    wb = weighted(weights, b)
+    cross = np.einsum("ij,ij->j", a.conj(), wb)
+    terms = np.real(a.conj() * wb * cross.conj())
+    den = column_norms_sq(a, wa) * column_norms_sq(b, wb)
+    out = safe_divide(terms, den)
+    if normalize:
+        # The column sum is the MAC itself, so this is a division by it; a
+        # null mode pair (MAC 0) keeps the all-zero column instead of NaN.
+        out = safe_divide(out, out.sum(axis=0))
+    return out[:, 0] if single else out
 
 
 def macx(
