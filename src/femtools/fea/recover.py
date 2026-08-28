@@ -86,10 +86,21 @@ needs no second pass over the elements.
 Two properties matter and both are checked in the test suite.  A constant
 stress state is reproduced exactly at every node, interior and boundary alike,
 because the fitted polynomial is then the constant itself.  And, unlike the
-average, a *linear* stress field is reproduced exactly as well: SPR moves the
-nodal value onto the trend of the patch instead of onto the mean of its
-neighbours, which is the whole point of it on a boundary node, where the
-average is systematically biased inwards.
+average, a *linear* stress field is reproduced exactly at every node whose
+patch can carry the full polynomial: SPR puts the nodal value on the trend of
+the patch instead of on the mean of its neighbours, and the mean of a linear
+field over a lopsided patch is not the value at the node.
+
+Which nodes those are is reported rather than assumed.  A node on the surface
+of a solid mesh sees only sampling points on one side of itself, and one that
+sits on an edge or a corner of the mesh sees very few; asking such a patch for
+a full linear extrapolation is how SPR is known to misbehave, and it is the
+case Zienkiewicz and Zhu handle by evaluating an *interior* patch at the
+boundary node instead.  femtools takes the other documented way out and lowers
+the order of the polynomial until the fit is no longer an extrapolation it
+cannot support (see :data:`SPR_MAX_AMPLIFICATION`), which in the limit is the
+arithmetic mean again.  :attr:`NodalStressResult.patch_terms` says how many
+terms each node actually got.
 
 The one deviation from the paper worth naming: femtools fits the same linear
 polynomial for every element type, ``TET10`` included, and samples it at the
@@ -535,9 +546,10 @@ def _tet10_recovery(ctx: ElementContext, disp: np.ndarray, _z: float) -> _Recove
     :func:`recover_spr` fits its patch polynomial through.
     """
     xyz = ctx.coords[:10]
-    grad, det = tet10_gradient(xyz, TET10_CENTROID)
-    if det == 0.0:
-        raise ValueError(f"element {ctx.element_id}: degenerate TET10 (zero Jacobian)")
+    try:
+        grad, _det = tet10_gradient(xyz, TET10_CENTROID)
+    except ValueError as exc:
+        raise ValueError(f"element {ctx.element_id}: {exc}") from None
     strain = _strain_matrix(grad) @ disp[:10, :3].ravel()
     stress = solid_D(ctx.mat) @ strain
     n, _dn = _tet10_shape(*TET10_CENTROID)

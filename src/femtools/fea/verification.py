@@ -145,6 +145,8 @@ __all__ = [
     "shell_drilling_orientation_gap",
     "stress_patch_error",
     "tet10_rigid_body_frequencies",
+    "tet_bending_ratio",
+    "tet_cantilever",
     "tet_patch_model",
     "timoshenko_tip_deflection",
 ]
@@ -1068,6 +1070,101 @@ def tet_patch_model(
 
     nodes = {nid: {"xyz": tuple(float(v) for v in point)} for nid, point in coords.items()}
     return _model(nodes, elements, 1.0e7, 0.3, 1.0), coords, boundary
+
+
+#: Six tetrahedra filling one hexahedron, all sharing its ``0-6`` diagonal
+#: (Kuhn's decomposition).  Applied with the same diagonal in every cell it is
+#: conforming: neighbouring cells split their shared face the same way.
+_HEX_TO_TETS: tuple[tuple[int, int, int, int], ...] = (
+    (0, 1, 2, 6),
+    (0, 2, 3, 6),
+    (0, 3, 7, 6),
+    (0, 7, 4, 6),
+    (0, 4, 5, 6),
+    (0, 5, 1, 6),
+)
+
+
+def tet_cantilever(
+    nx: int = 10,
+    ny: int = 1,
+    nz: int = 1,
+    *,
+    etype: str = "TET4",
+    **case: Any,
+) -> tuple[dict[str, Any], list[int], dict[tuple[int, int], float]]:
+    """:func:`hex_cantilever` with every brick split into six tetrahedra.
+
+    Same geometry, same clamp, same tip load, so the tip ratio is directly
+    comparable with the hexahedral one -- which is the point: a tetrahedral
+    mesh is what an automatic mesher produces, and the two tet types answer
+    very differently on it.  ``etype`` is ``"TET4"`` or ``"TET10"``; the
+    quadratic mesh adds one node at the middle of every edge, shared between
+    the elements that meet on it.
+    """
+    name = str(etype).strip().upper()
+    if name not in ("TET4", "TET10"):
+        raise ValueError(f"unknown tetrahedron type {etype!r}; expected TET4 or TET10")
+
+    bricks, _brick_tip, _brick_loads = hex_cantilever(nx, ny, nz, **case)
+    coords = {nid: np.asarray(node["xyz"], dtype=float) for nid, node in bricks["nodes"].items()}
+    midside: dict[frozenset[int], int] = {}
+    elements: dict[int, Any] = {}
+    eid = 1
+    for brick in bricks["elements"].values():
+        corners = tuple(brick["nodes"])
+        for tet in _HEX_TO_TETS:
+            conn = [corners[m] for m in tet]
+            if name == "TET10":
+                for a, b in TET10_EDGES:
+                    key = frozenset((conn[a], conn[b]))
+                    nid = midside.get(key)
+                    if nid is None:
+                        nid = midside[key] = len(coords) + 1
+                        coords[nid] = 0.5 * (coords[conn[a]] + coords[conn[b]])
+                    conn.append(nid)
+            elements[eid] = {"type": name, "property_id": 1, "nodes": tuple(conn)}
+            eid += 1
+
+    nodes = {nid: {"xyz": tuple(float(v) for v in point)} for nid, point in coords.items()}
+    model = {**bricks, "nodes": nodes, "elements": elements}
+    # The clamp and the tip load follow the geometry, so the midside nodes on
+    # the two end faces have to join them or the case is not the same case.
+    length = float(case.get("length", 10.0))
+    if bricks["spcs"]:
+        model["spcs"] = [
+            {"node_id": nid, "dofs": (0, 1, 2)}
+            for nid, point in coords.items()
+            if abs(point[0]) < 1.0e-12
+        ]
+    tip = [nid for nid, point in coords.items() if abs(point[0] - length) < 1.0e-12]
+    force = float(case.get("tip_force", 1.0))
+    return model, tip, {(nid, 2): force / len(tip) for nid in tip}
+
+
+def tet_bending_ratio(
+    etype: str = "TET10", *, nx: int = 10, ny: int = 1, nz: int = 1, **case: Any
+) -> float:
+    """Mean tip deflection of :func:`tet_cantilever` over the Timoshenko value.
+
+    The measurement the quadratic tetrahedron exists for.  On the ten-by-one
+    mesh the constant-strain tetrahedron reaches 0.219 of the reference -- a
+    tetrahedral mesh of ``TET4`` is not a bending model at all -- while the
+    same mesh read as ``TET10`` reaches 0.976, within a hair of the 0.985 the
+    incompatible-mode brick manages with an eighth of the elements.
+    """
+    model, tip_nodes, loads = tet_cantilever(nx, ny, nz, etype=etype, **case)
+    asm = assemble_km(model)
+    u = solve_static(model, loads, assembly=asm)
+    tip = float(np.mean([u[asm.dof_map.index(nid, 2)] for nid in tip_nodes]))
+    return tip / timoshenko_tip_deflection(
+        force=float(case.get("tip_force", 1.0)),
+        length=float(case.get("length", 10.0)),
+        width=float(case.get("width", 1.0)),
+        height=float(case.get("height", 1.0)),
+        E=float(case.get("E", 1.0e7)),
+        nu=float(case.get("nu", 0.3)),
+    )
 
 
 def tet10_rigid_body_frequencies(

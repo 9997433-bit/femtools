@@ -195,6 +195,8 @@ def tet10_gradient(xyz: np.ndarray, natural: Any = TET10_CENTROID) -> tuple[np.n
     _n, dn = _tet10_shape(r, s, t)
     jacobian = dn.T @ np.asarray(xyz, dtype=float)[:10]
     det = float(np.linalg.det(jacobian))
+    if det == 0.0:
+        raise ValueError("degenerate TET10 (the Jacobian is singular)")
     return np.linalg.solve(jacobian, dn.T).T, det
 
 
@@ -235,10 +237,13 @@ def tet10(ctx: ElementContext) -> ElementMatrices:
 
     pts, wts = tet_rule(2)
     n_gp = wts.size
-    grads = np.empty((n_gp, 10, 3))
+    naturals = np.empty((n_gp, 10, 3))
+    jacobians = np.empty((n_gp, 3, 3))
     dets = np.empty(n_gp)
     for g, point in enumerate(pts):
-        grads[g], dets[g] = tet10_gradient(xyz, point)
+        _n, naturals[g] = _tet10_shape(*point)
+        jacobians[g] = naturals[g].T @ xyz
+        dets[g] = np.linalg.det(jacobians[g])
 
     scales = wts * np.abs(dets)
     volume = float(scales.sum())
@@ -256,7 +261,7 @@ def tet10(ctx: ElementContext) -> ElementMatrices:
 
     k = np.zeros((30, 30))
     for g in range(n_gp):
-        B = _strain_matrix(grads[g])
+        B = _strain_matrix(np.linalg.solve(jacobians[g], naturals[g].T).T)
         k += scales[g] * (B.T @ D @ B)
     k = 0.5 * (k + k.T)
 
