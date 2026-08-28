@@ -11,6 +11,7 @@ import pytest
 
 from femtools.core.errors import ModelError
 from femtools.core.model import FEModel
+from femtools.fea import apply_mpc
 from femtools.io import bdf as bdf_module
 from femtools.io import cdb as cdb_module
 from femtools.io import project as project_module
@@ -237,6 +238,34 @@ def test_add_rbe3_rejects_components_outside_one_through_six(
         model.add_rbe3(10, dependent=1, independents=(2, 3), **kwargs)
 
     assert model.rbe3 == []
+
+
+def test_apply_mpc_composes_model_rbe2_and_rbe3_tables() -> None:
+    model = _rbe3_model()
+    model.add_rbe2(10, independent=1, dependents=(2,), components=(1, 2, 3))
+    model.add_rbe3(
+        11,
+        dependent=3,
+        independents=(1, 2),
+        components=(1, 2, 3),
+        weights=(1.0, 3.0),
+    )
+
+    transform = apply_mpc(model)
+    matrix = transform.G.toarray()
+
+    assert transform.n_dependent == 6
+    assert transform.dependent_nodes() == [2, 3]
+    assert transform.independent_nodes() == [1]
+    np.testing.assert_allclose(matrix @ matrix, matrix, rtol=0.0, atol=1.0e-15)
+
+    displacement = np.zeros(transform.n_dof)
+    displacement[transform.dof_map.node_dofs(1)] = (1.0, 2.0, 3.0, 0.2, -0.1, 0.3)
+    full = transform.to_full(displacement)
+    node_1 = full[transform.dof_map.node_dofs(1)[:3]]
+    node_2 = full[transform.dof_map.node_dofs(2)[:3]]
+    node_3 = full[transform.dof_map.node_dofs(3)[:3]]
+    np.testing.assert_allclose(node_3, 0.25 * node_1 + 0.75 * node_2)
 
 
 def test_project_roundtrip_preserves_model(
