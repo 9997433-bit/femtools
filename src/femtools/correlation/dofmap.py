@@ -25,11 +25,17 @@ measurement point together with its distance.  :func:`mapped_mode_matrix` then
 does the bookkeeping those ids exist for — it pulls the FE mode rows of the
 matched nodes, in the order of the measurement points, so the analysis shapes
 land on the test grid and can go straight into :func:`~femtools.correlation.mac_matrix`.
+:func:`mapped_mac` is those three steps in one call, keeping the node match
+alongside the MAC it produced::
+
+    result = mapped_mac(phi_test, test_xyz, modal, model, dofs=("x", "y", "z"))
+    print(result.table())          # MAC diagonal, and the distances behind it
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from inspect import isroutine
 from typing import Any, NamedTuple
 
@@ -38,9 +44,11 @@ from numpy.typing import ArrayLike, NDArray
 
 from ._assignment import linear_sum_assignment
 from ._linalg import as_mode_matrix, coordinate_table, mode_source, row_index
+from .mac import mac_matrix
 
 __all__ = [
     "DOFMap",
+    "MappedMACResult",
     "NearestNodeMap",
     "as_dofmap",
     "parse_component",
@@ -48,6 +56,7 @@ __all__ = [
     "parse_dof_label",
     "match_dofs",
     "map_nearest_nodes",
+    "mapped_mac",
     "mapped_mode_matrix",
     "align_modes",
     "restrict",
@@ -1048,6 +1057,78 @@ def _positional_rows(
     return rows.astype(np.intp)
 
 
+class _GatherPlan(NamedTuple):
+    """Everything the row gather needs, resolved once from the analysis side."""
+
+    phi: NDArray[Any]
+    dof_map: DOFMap | None
+    components: NDArray[np.int8]
+    signs: NDArray[np.float64]
+    dofs_per_node: int
+
+
+def _gather_plan(
+    modes: Any,
+    dof_map: Any,
+    dofs: Iterable[Any] | None,
+    dofs_per_node: int | None,
+) -> _GatherPlan:
+    """Resolve the mode matrix, its DOF ordering and the components to pull."""
+    phi = as_mode_matrix(modes, "modes")
+    if phi.shape[0] == 0:
+        raise ValueError("modes has no rows to gather from")
+    source = dof_map
+    if source is None and not isinstance(modes, (np.ndarray, list, tuple)):
+        source = getattr(modes, "dof_map", None)
+    if isroutine(source):  # ``FEModel.dof_map`` is a method, not an attribute
+        source = source()
+    if source is not None and dofs_per_node is not None:
+        raise ValueError(
+            "dofs_per_node describes the row layout used when no DOF map is given; "
+            "drop it, or select components with dofs= instead"
+        )
+    dmap = DOFMap.from_mapping(source) if source is not None else None
+    if dmap is not None and len(dmap) != phi.shape[0]:
+        raise ValueError(f"modes has {phi.shape[0]} rows but the DOF map has {len(dmap)} DOF")
+
+    per_node = 6 if dofs_per_node is None else int(dofs_per_node)
+    if dmap is None and not 1 <= per_node <= 6:
+        raise ValueError(f"dofs_per_node must be within 1..6, got {per_node}")
+    comps, signs = _mapped_components(dofs, dmap, per_node)
+    return _GatherPlan(phi, dmap, comps, signs, per_node)
+
+
+def _gather_mapped(plan: _GatherPlan, fe_ids: Any, missing: str) -> NDArray[Any]:
+    """Copy the rows of the matched nodes, in the order of the test points."""
+    phi, dmap, comps, signs = plan.phi, plan.dof_map, plan.components, plan.signs
+    ids = _node_array(getattr(fe_ids, "ids", fe_ids))
+    keep = ids >= 0
+    if missing == "raise" and not keep.all():
+        lost = np.flatnonzero(~keep)
+        raise ValueError(
+            f"{lost.size} of {ids.size} test points have no FE node (first at "
+            f"position {int(lost[0])}); raise tol, or pass missing='zero' / 'drop'"
+        )
+    kept = ids[keep]
+    n_point = kept.size if missing == "drop" else ids.size
+    if kept.size == 0:
+        return np.zeros((n_point * comps.size, phi.shape[1]), dtype=phi.dtype)
+
+    rows = (
+        _mapped_rows(dmap, kept, comps)
+        if dmap is not None
+        else _positional_rows(kept, comps, plan.dofs_per_node, phi.shape[0])
+    )
+    gathered = phi[rows, :]
+    if not np.all(signs == 1.0):
+        gathered = gathered * np.tile(signs, kept.size)[:, None]
+    if missing == "drop" or keep.all():
+        return gathered
+    out = np.zeros((ids.size * comps.size, phi.shape[1]), dtype=gathered.dtype)
+    out[np.repeat(keep, comps.size), :] = gathered
+    return out
+
+
 def mapped_mode_matrix(
     modes: Any,
     fe_ids: Any,
@@ -1117,52 +1198,293 @@ def mapped_mode_matrix(
     """
     if missing not in _MISSING_POLICIES:
         raise ValueError(f"unknown missing policy {missing!r}, expected one of {_MISSING_POLICIES}")
+    plan = _gather_plan(modes, dof_map, dofs, dofs_per_node)
+    return _gather_mapped(plan, fe_ids, missing)
 
-    phi = as_mode_matrix(modes, "modes")
-    if phi.shape[0] == 0:
-        raise ValueError("modes has no rows to gather from")
-    source = dof_map
-    if source is None and not isinstance(modes, (np.ndarray, list, tuple)):
-        source = getattr(modes, "dof_map", None)
-    if isroutine(source):  # ``FEModel.dof_map`` is a method, not an attribute
-        source = source()
-    if source is not None and dofs_per_node is not None:
-        raise ValueError(
-            "dofs_per_node describes the row layout used when no DOF map is given; "
-            "drop it, or select components with dofs= instead"
-        )
-    dmap = DOFMap.from_mapping(source) if source is not None else None
-    if dmap is not None and len(dmap) != phi.shape[0]:
-        raise ValueError(f"modes has {phi.shape[0]} rows but the DOF map has {len(dmap)} DOF")
 
-    per_node = 6 if dofs_per_node is None else int(dofs_per_node)
-    if dmap is None and not 1 <= per_node <= 6:
-        raise ValueError(f"dofs_per_node must be within 1..6, got {per_node}")
-    comps, signs = _mapped_components(dofs, dmap, per_node)
+# -- the whole test-to-model correlation in one call ----------------------
 
-    ids = _node_array(getattr(fe_ids, "ids", fe_ids))
-    keep = ids >= 0
-    if missing == "raise" and not keep.all():
-        lost = np.flatnonzero(~keep)
-        raise ValueError(
-            f"{lost.size} of {ids.size} test points have no FE node (first at "
-            f"position {int(lost[0])}); raise tol, or pass missing='zero' / 'drop'"
-        )
-    kept = ids[keep]
-    n_point = kept.size if missing == "drop" else ids.size
-    if kept.size == 0:
-        return np.zeros((n_point * comps.size, phi.shape[1]), dtype=phi.dtype)
 
-    rows = (
-        _mapped_rows(dmap, kept, comps)
-        if dmap is not None
-        else _positional_rows(kept, comps, per_node, phi.shape[0])
+def _component_labels(comps: NDArray[np.int8], signs: NDArray[np.float64]) -> tuple[str, ...]:
+    """``('X', 'Y', '-Z')`` for the components pulled at each node."""
+    return tuple(
+        ("-" if s < 0 else "") + COMPONENT_NAMES[c - 1]
+        for c, s in zip(comps.tolist(), signs.tolist(), strict=True)
     )
-    gathered = phi[rows, :]
-    if not np.all(signs == 1.0):
-        gathered = gathered * np.tile(signs, kept.size)[:, None]
-    if missing == "drop" or keep.all():
-        return gathered
-    out = np.zeros((ids.size * comps.size, phi.shape[1]), dtype=gathered.dtype)
-    out[np.repeat(keep, comps.size), :] = gathered
-    return out
+
+
+def _fe_geometry(xyz_fe: Any, modes: Any) -> Any:
+    """The analysis point cloud, falling back to one carried by ``modes``."""
+    if xyz_fe is not None:
+        return xyz_fe
+    if coordinate_table(modes) is not None:
+        return modes
+    raise ValueError(
+        f"xyz_fe is required: {type(modes).__name__} carries no nodal coordinates "
+        "(a solved result holds matrices and a DOF map, not geometry); pass the "
+        "FEModel, a {node: xyz} mapping or an (ids, xyz) pair"
+    )
+
+
+def _test_matrix(
+    phi_test: Any,
+    test_ids: NDArray[np.int64] | None,
+    test_map: Any,
+    comps: NDArray[np.int8],
+    keep: NDArray[np.bool_],
+    missing: str,
+) -> NDArray[Any]:
+    """Test mode shapes as ``(n_point * n_component, n_mode)`` on the test grid.
+
+    The rows are gathered by ``(node, component)`` when the test side carries
+    a DOF map *and* the test geometry carries node ids, and read positionally
+    — node-major, in the order of ``xyz_test`` — otherwise.
+    """
+    phi = as_mode_matrix(phi_test, "phi_test")
+    source = test_map
+    explicit = source is not None
+    if source is None and not isinstance(phi_test, (np.ndarray, list, tuple)):
+        source = getattr(phi_test, "dof_map", None)
+    if isroutine(source):
+        source = source()
+    if source is not None and test_ids is None:
+        if explicit:
+            raise ValueError(
+                "test_map orders phi_test by (node, component), but xyz_test is a bare "
+                "coordinate array carrying no node ids; give the test geometry as a "
+                "{node: xyz} mapping, an (ids, xyz) pair or a model"
+            )
+        source = None  # nothing to match the ids of: fall back to the row order
+
+    n_comp = int(comps.size)
+    if source is not None and test_ids is not None:
+        tmap = DOFMap.from_mapping(source)
+        if len(tmap) != phi.shape[0]:
+            raise ValueError(
+                f"phi_test has {phi.shape[0]} rows but its DOF map has {len(tmap)} DOF"
+            )
+        wanted = test_ids[keep] if missing == "drop" else test_ids
+        if wanted.size == 0:
+            return np.zeros((0, phi.shape[1]), dtype=phi.dtype)
+        return phi[_mapped_rows(tmap, wanted, comps), :]
+
+    n_point = int(keep.size)
+    n_kept = int(np.count_nonzero(keep))
+    if phi.shape[0] == n_point * n_comp:
+        if missing == "drop" and n_kept != n_point:
+            return phi[np.repeat(keep, n_comp), :]
+        return phi
+    if missing == "drop" and phi.shape[0] == n_kept * n_comp:
+        return phi  # already restricted to the matched points by the caller
+
+    names = ", ".join(COMPONENT_NAMES[c - 1] for c in comps.tolist())
+    hint = ""
+    if n_point and phi.shape[0] % n_point == 0 and 1 <= phi.shape[0] // n_point <= 6:
+        per = phi.shape[0] // n_point
+        suggest = '("x", "y", "z")' if per == 3 else f"a {per}-component list"
+        hint = f"; {per} rows per test point would fit, so pass dofs={suggest}"
+    raise ValueError(
+        f"phi_test has {phi.shape[0]} rows but the mapped analysis matrix has "
+        f"{n_point * n_comp}: {n_point} test points x {n_comp} components ({names}). "
+        f"phi_test must be node-major in the order of xyz_test{hint}"
+    )
+
+
+@dataclass
+class MappedMACResult:
+    """Result of :func:`mapped_mac`: the MAC plus the node match behind it.
+
+    ``np.asarray(result)`` and ``result[i, j]`` give the MAC matrix itself, so
+    the object can be used wherever :func:`~femtools.correlation.mac_matrix`
+    would be; the geometry figures stay reachable next to it because they are
+    what says whether the number means anything.
+    """
+
+    #: ``(n_mode_test, n_mode_fe)`` MAC of the test modes against the mapped ones.
+    mac: NDArray[np.float64]
+    #: Node match produced by :func:`map_nearest_nodes`, one entry per test point.
+    nodes: NearestNodeMap
+    #: Test mode shapes as correlated, ``(n_point * n_component, n_mode_test)``.
+    phi_test: NDArray[Any]
+    #: Analysis mode shapes gathered on the test grid, same row set.
+    phi_fe: NDArray[Any]
+    #: Components pulled at each node, in row order (``('X', 'Y', '-Z')``).
+    dofs: tuple[str, ...] = ()
+
+    def __array__(self, dtype: Any = None, copy: bool | None = None) -> NDArray[Any]:
+        arr = np.asarray(self.mac, dtype=dtype)
+        return arr.copy() if copy else arr
+
+    def __getitem__(self, item: Any) -> Any:
+        return self.mac[item]
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self.mac.shape
+
+    @property
+    def ids(self) -> NDArray[np.int64]:
+        """FE node id matched to each test point (``-1`` where none was)."""
+        return np.asarray(self.nodes.ids)
+
+    @property
+    def distance(self) -> NDArray[np.float64]:
+        """Distance from each test point to its FE node."""
+        return np.asarray(self.nodes.distance)
+
+    @property
+    def max_distance(self) -> float:
+        return self.nodes.max_distance
+
+    @property
+    def rms_distance(self) -> float:
+        return self.nodes.rms_distance
+
+    @property
+    def is_one_to_one(self) -> bool:
+        return self.nodes.is_one_to_one
+
+    @property
+    def n_matched(self) -> int:
+        return self.nodes.n_matched
+
+    @property
+    def diagonal(self) -> NDArray[np.float64]:
+        """``mac[i, i]`` — the paired-mode values the correlation is judged on."""
+        return np.diagonal(self.mac).copy()
+
+    @property
+    def min_diagonal(self) -> float:
+        """Worst paired value (0.0 when there is no pair)."""
+        diag = self.diagonal
+        return float(diag.min()) if diag.size else 0.0
+
+    @property
+    def n_dof(self) -> int:
+        """Rows correlated: test points times components."""
+        return int(self.phi_fe.shape[0])
+
+    def table(self) -> str:
+        """Plain-text listing: the MAC diagonal and the geometry it rests on."""
+        mac = np.asarray(self.mac, dtype=float)
+        head = f"{'mode':>5} {'MAC':>8} {'best':>5} {'MAC(best)':>10}"
+        lines = [head, "-" * len(head)]
+        for i in range(min(mac.shape)):
+            best = int(np.argmax(mac[i, :])) if mac.shape[1] else -1
+            lines.append(f"{i:>5} {mac[i, i]:>8.4f} {best:>5} {mac[i, best]:>10.4f}")
+        comps = ", ".join(self.dofs) if self.dofs else "-"
+        lines.append(
+            f"{self.ids.size} test points, {self.n_matched} matched on ({comps}), "
+            f"max {self.max_distance:.6g}, rms {self.rms_distance:.6g}"
+            + ("" if self.is_one_to_one else ", not one-to-one")
+        )
+        return "\n".join(lines)
+
+
+def mapped_mac(
+    phi_test: Any,
+    xyz_test: Any,
+    modes: Any,
+    xyz_fe: Any = None,
+    *,
+    test_map: Any = None,
+    tol: float | None = None,
+    unique: bool = False,
+    dof_map: Any = None,
+    dofs: Iterable[Any] | None = None,
+    dofs_per_node: int | None = None,
+    missing: str = "raise",
+    weights: Any = None,
+) -> MappedMACResult:
+    """MAC between a test mode set and an FE one, through the node match.
+
+    The three steps that correlate a digitized test against a mesh —
+    :func:`map_nearest_nodes` to find which FE node each measurement point
+    sits on, :func:`mapped_mode_matrix` to gather the analysis rows of those
+    nodes in the order of the test points, and
+    :func:`~femtools.correlation.mac_matrix` on the result — are one call::
+
+        result = mapped_mac(phi_test, test_xyz, modal, model, dofs=("x", "y", "z"))
+        print(result.table())
+        assert result.min_diagonal > 0.9
+
+    The intermediate objects are kept, not thrown away: ``result.mac`` is the
+    matrix, ``result.nodes`` is the :class:`NearestNodeMap` whose distances
+    say whether the match is trustworthy, and ``result.phi_fe`` is the mapped
+    analysis matrix.  ``np.asarray(result)`` is the MAC itself.
+
+    Nothing here is a new criterion; it is the bookkeeping of the three calls
+    above, done once and consistently.  Geometry that is not already in the
+    model frame still has to be aligned first — compose with
+    :func:`~femtools.correlation.align_geometry`::
+
+        fit = align_geometry(test_xyz, model)
+        result = mapped_mac(phi_test, fit.apply(test_xyz), modal, model, tol=0.01)
+
+    Parameters
+    ----------
+    phi_test:
+        Test mode shapes, ``(n_point * n_component, n_mode)`` node-major in
+        the order of ``xyz_test`` — all components of the first measurement
+        point, then of the second.  A modal result is unwrapped; when it
+        carries a DOF map and ``xyz_test`` carries node ids, the rows are
+        gathered by ``(node, component)`` instead of by position, so a test
+        model with its own node numbering needs no reordering.
+    xyz_test:
+        Measurement points: an ``(n, 3)`` (or planar ``(n, 2)``) array, a
+        ``{id: xyz}`` mapping, an ``(ids, xyz)`` pair or a model.  Everything
+        is reported in this order.
+    modes:
+        FE mode shapes ``(n_dof, n_mode)`` or a modal result carrying them
+        (and its own ``dof_map``).
+    xyz_fe:
+        The analysis geometry.  May be omitted only when ``modes`` itself
+        carries nodal coordinates; a solved result usually does not.
+    test_map:
+        DOF ordering of ``phi_test``, when it is neither positional nor
+        carried by the mode object.  Requires ``xyz_test`` to carry node ids.
+    tol, unique:
+        Passed to :func:`map_nearest_nodes`: largest accepted distance, and
+        whether to force a one-to-one match.
+    dof_map, dofs, dofs_per_node, missing:
+        Passed to :func:`mapped_mode_matrix`.  ``dofs`` fixes the components
+        pulled at each node **and** the rows expected of ``phi_test``; a
+        leading ``-`` (``dofs=("x", "y", "-z")``) flips the analysis row, as a
+        reversed sensor does, and is therefore applied to one side only.
+        ``missing='drop'`` drops the unmatched points from *both* matrices,
+        ``'zero'`` keeps their test rows against zeroed analysis rows — which
+        lowers the MAC honestly rather than hiding the gap.
+    weights:
+        MAC weighting operator on the mapped row set, as in
+        :func:`~femtools.correlation.mac_matrix`.
+
+    Returns
+    -------
+    MappedMACResult
+        ``result.mac`` is ``(n_mode_test, n_mode_fe)``; ``result.diagonal``,
+        ``result.min_diagonal`` and ``result.table()`` summarize it.
+
+    Notes
+    -----
+    Only rows are gathered — no interpolation, no scaling — so a model
+    correlated against a translated, renumbered copy of itself returns a unit
+    MAC diagonal to round-off.  A poor match is a geometry problem and shows
+    up in ``result.nodes``, never as a silently massaged MAC.
+    """
+    if missing not in _MISSING_POLICIES:
+        raise ValueError(f"unknown missing policy {missing!r}, expected one of {_MISSING_POLICIES}")
+
+    test_ids, q = _cloud(xyz_test, "xyz_test")
+    nodes = map_nearest_nodes(q, _fe_geometry(xyz_fe, modes), tol=tol, unique=unique)
+
+    plan = _gather_plan(modes, dof_map, dofs, dofs_per_node)
+    phi_fe = _gather_mapped(plan, nodes, missing)
+    phi_t = _test_matrix(phi_test, test_ids, test_map, plan.components, nodes.matched, missing)
+
+    return MappedMACResult(
+        mac=mac_matrix(phi_t, phi_fe, weights=weights),
+        nodes=nodes,
+        phi_test=phi_t,
+        phi_fe=phi_fe,
+        dofs=_component_labels(plan.components, plan.signs),
+    )

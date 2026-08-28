@@ -14,7 +14,8 @@ maps can be written down, and :func:`mac_contribution` splits a single MAC
 value back into one signed number per DOF once it comes out too low.  When the
 test side is a bare point cloud rather than a labelled DOF map,
 :func:`mapped_mode_matrix` replaces :func:`align_modes`: it gathers the FE mode
-rows of the matched nodes directly in the order of the measurement points.
+rows of the matched nodes directly in the order of the measurement points, and
+:func:`mapped_mac` runs that whole path — match, gather, MAC — in one call.
 
 A solved model can be used wherever mode shapes are expected: a
 :class:`~femtools.fea.eigen.ModalResult` supplies its ``modes``, its real
@@ -33,10 +34,12 @@ from .alignment import AlignmentResult, align_geometry, rotate_modes
 from .dofmap import (
     COMPONENT_NAMES,
     DOFMap,
+    MappedMACResult,
     NearestNodeMap,
     align_modes,
     as_dofmap,
     map_nearest_nodes,
+    mapped_mac,
     mapped_mode_matrix,
     match_dofs,
     parse_component,
@@ -74,6 +77,7 @@ __all__ = [
     "DOFMap",
     "ExpansionResult",
     "FMACResult",
+    "MappedMACResult",
     "ModePair",
     "NearestNodeMap",
     "PairingResult",
@@ -98,6 +102,7 @@ __all__ = [
     "mac_value",
     "macx",
     "map_nearest_nodes",
+    "mapped_mac",
     "mapped_mode_matrix",
     "match_dofs",
     "modal_scale_factor",
