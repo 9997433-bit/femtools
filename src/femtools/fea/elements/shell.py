@@ -38,7 +38,13 @@ from ..quadrature import gauss_2d, tri_rule
 from .base import ElementContext, ElementMatrices, register
 from .frames import shell_frame
 
-__all__ = ["tria3", "quad4", "dkt_bending_stiffness"]
+__all__ = [
+    "cst_strain_matrix",
+    "dkt_bending_stiffness",
+    "dkt_curvature_matrix",
+    "quad4",
+    "tria3",
+]
 
 _MEMBRANE_ONLY = {"membrane", "pmembrane", "plane_stress", "planestress", "cst", "pmemb"}
 _BENDING_ONLY = {"plate", "bending", "pplate", "kirchhoff", "mindlin"}
@@ -131,7 +137,13 @@ def _to_global(mat_local: np.ndarray, R: np.ndarray, n_nodes: int) -> np.ndarray
 # --------------------------------------------------------------------------
 
 
-def _cst_membrane(xy: np.ndarray, Dm: np.ndarray, t: float):
+def cst_strain_matrix(xy: np.ndarray) -> tuple[float, np.ndarray]:
+    """``(signed area, (3, 6) B)`` of the constant strain triangle.
+
+    Rows are ``[exx, eyy, gxy]`` in the element frame, columns the in-plane
+    DOFs ``[ux1, uy1, ux2, uy2, ux3, uy3]``.  The strain is constant over the
+    element, so this *is* the centroid value :mod:`femtools.fea.recover` needs.
+    """
     x, y = xy[:, 0], xy[:, 1]
     b = np.array([y[1] - y[2], y[2] - y[0], y[0] - y[1]])
     c = np.array([x[2] - x[1], x[0] - x[2], x[1] - x[0]])
@@ -146,16 +158,16 @@ def _cst_membrane(xy: np.ndarray, Dm: np.ndarray, t: float):
         B[2, 2 * i] = c[i]
         B[2, 2 * i + 1] = b[i]
     B /= area2
+    return area, B
+
+
+def _cst_membrane(xy: np.ndarray, Dm: np.ndarray, t: float):
+    area, B = cst_strain_matrix(xy)
     return area, t * area * (B.T @ Dm @ B)
 
 
-def dkt_bending_stiffness(xy: np.ndarray, Db: np.ndarray) -> np.ndarray:
-    """Batoz DKT plate bending stiffness.
-
-    DOF order ``[w1, rx1, ry1, w2, rx2, ry2, w3, rx3, ry3]`` with the
-    kinematics ``u = z*ry``, ``v = -z*rx`` (rotation vector convention), i.e.
-    the same convention as the Mindlin quad below.
-    """
+def _dkt_geometry(xy: np.ndarray) -> tuple[float, float, float, float, float, tuple[float, ...]]:
+    """Side geometry and Batoz's ``P, q, t, r`` coefficients for one triangle."""
     x, y = xy[:, 0], xy[:, 1]
     x23, y23 = x[1] - x[2], y[1] - y[2]
     x31, y31 = x[2] - x[0], y[2] - y[0]
@@ -171,63 +183,97 @@ def dkt_bending_stiffness(xy: np.ndarray, Db: np.ndarray) -> np.ndarray:
     q = [3.0 * xs[i] * ys[i] / ll[i] for i in range(3)]
     tt = [-6.0 * ys[i] / ll[i] for i in range(3)]
     r = [3.0 * ys[i] ** 2 / ll[i] for i in range(3)]
-    P4, P5, P6 = P
-    q4, q5, q6 = q
-    t4, t5, t6 = tt
-    r4, r5, r6 = r
+    return area2, x31, y31, x12, y12, (*P, *q, *tt, *r)
 
+
+def dkt_curvature_matrix(xy: np.ndarray, xi: float, eta: float) -> np.ndarray:
+    """``(3, 9)`` curvature-displacement matrix of the DKT triangle.
+
+    Rows are ``[kappa_xx, kappa_yy, kappa_xy]`` in the element frame, columns
+    the plate DOFs ``[w1, rx1, ry1, ...]``.  Bending moments are ``Db @ kappa``
+    and the in-plane strain a distance ``z`` off the mid-surface is
+    ``z * kappa`` -- which is what
+    :func:`femtools.fea.recover.recover_stress` evaluates at the centroid.
+    """
+    return _dkt_b(*_dkt_geometry(xy), xi, eta)
+
+
+def _dkt_b(
+    area2: float,
+    x31: float,
+    y31: float,
+    x12: float,
+    y12: float,
+    coefficients: tuple[float, ...],
+    xi: float,
+    eta: float,
+) -> np.ndarray:
+    P4, P5, P6, q4, q5, q6, t4, t5, t6, r4, r5, r6 = coefficients
+    hx_xi = np.array([
+        P6 * (1.0 - 2.0 * xi) + (P5 - P6) * eta,
+        q6 * (1.0 - 2.0 * xi) - (q5 + q6) * eta,
+        -4.0 + 6.0 * (xi + eta) + r6 * (1.0 - 2.0 * xi) - eta * (r5 + r6),
+        -P6 * (1.0 - 2.0 * xi) + eta * (P4 + P6),
+        q6 * (1.0 - 2.0 * xi) - eta * (q6 - q4),
+        -2.0 + 6.0 * xi + r6 * (1.0 - 2.0 * xi) + eta * (r4 - r6),
+        -eta * (P5 + P4),
+        eta * (q4 - q5),
+        -eta * (r5 - r4),
+    ])
+    hy_xi = np.array([
+        t6 * (1.0 - 2.0 * xi) + (t5 - t6) * eta,
+        1.0 + r6 * (1.0 - 2.0 * xi) - (r5 + r6) * eta,
+        -q6 * (1.0 - 2.0 * xi) + eta * (q5 + q6),
+        -t6 * (1.0 - 2.0 * xi) + eta * (t4 + t6),
+        -1.0 + r6 * (1.0 - 2.0 * xi) + eta * (r4 - r6),
+        -q6 * (1.0 - 2.0 * xi) - eta * (q4 - q6),
+        -eta * (t4 + t5),
+        eta * (r4 - r5),
+        -eta * (q4 - q5),
+    ])
+    hx_eta = np.array([
+        -P5 * (1.0 - 2.0 * eta) - (P6 - P5) * xi,
+        q5 * (1.0 - 2.0 * eta) - (q5 + q6) * xi,
+        -4.0 + 6.0 * (xi + eta) + r5 * (1.0 - 2.0 * eta) - xi * (r5 + r6),
+        xi * (P4 + P6),
+        xi * (q4 - q6),
+        -xi * (r6 - r4),
+        P5 * (1.0 - 2.0 * eta) - xi * (P4 + P5),
+        q5 * (1.0 - 2.0 * eta) + xi * (q4 - q5),
+        -2.0 + 6.0 * eta + r5 * (1.0 - 2.0 * eta) + xi * (r4 - r5),
+    ])
+    hy_eta = np.array([
+        -t5 * (1.0 - 2.0 * eta) - (t6 - t5) * xi,
+        1.0 + r5 * (1.0 - 2.0 * eta) - (r5 + r6) * xi,
+        -q5 * (1.0 - 2.0 * eta) + xi * (q5 + q6),
+        xi * (t4 + t6),
+        xi * (r4 - r6),
+        -xi * (q4 - q6),
+        t5 * (1.0 - 2.0 * eta) - xi * (t4 + t5),
+        -1.0 + r5 * (1.0 - 2.0 * eta) + xi * (r4 - r5),
+        -q5 * (1.0 - 2.0 * eta) - xi * (q4 - q5),
+    ])
+    B = np.vstack([
+        y31 * hx_xi + y12 * hx_eta,
+        -x31 * hy_xi - x12 * hy_eta,
+        -x31 * hx_xi - x12 * hx_eta + y31 * hy_xi + y12 * hy_eta,
+    ]) / area2
+    return B
+
+
+def dkt_bending_stiffness(xy: np.ndarray, Db: np.ndarray) -> np.ndarray:
+    """Batoz DKT plate bending stiffness.
+
+    DOF order ``[w1, rx1, ry1, w2, rx2, ry2, w3, rx3, ry3]`` with the
+    kinematics ``u = z*ry``, ``v = -z*rx`` (rotation vector convention), i.e.
+    the same convention as the Mindlin quad below.
+    """
+    geometry = _dkt_geometry(xy)
+    area2 = geometry[0]
     pts, wts = tri_rule(2)
     K = np.zeros((9, 9))
     for (xi, eta), w in zip(pts, wts, strict=True):
-        hx_xi = np.array([
-            P6 * (1.0 - 2.0 * xi) + (P5 - P6) * eta,
-            q6 * (1.0 - 2.0 * xi) - (q5 + q6) * eta,
-            -4.0 + 6.0 * (xi + eta) + r6 * (1.0 - 2.0 * xi) - eta * (r5 + r6),
-            -P6 * (1.0 - 2.0 * xi) + eta * (P4 + P6),
-            q6 * (1.0 - 2.0 * xi) - eta * (q6 - q4),
-            -2.0 + 6.0 * xi + r6 * (1.0 - 2.0 * xi) + eta * (r4 - r6),
-            -eta * (P5 + P4),
-            eta * (q4 - q5),
-            -eta * (r5 - r4),
-        ])
-        hy_xi = np.array([
-            t6 * (1.0 - 2.0 * xi) + (t5 - t6) * eta,
-            1.0 + r6 * (1.0 - 2.0 * xi) - (r5 + r6) * eta,
-            -q6 * (1.0 - 2.0 * xi) + eta * (q5 + q6),
-            -t6 * (1.0 - 2.0 * xi) + eta * (t4 + t6),
-            -1.0 + r6 * (1.0 - 2.0 * xi) + eta * (r4 - r6),
-            -q6 * (1.0 - 2.0 * xi) - eta * (q4 - q6),
-            -eta * (t4 + t5),
-            eta * (r4 - r5),
-            -eta * (q4 - q5),
-        ])
-        hx_eta = np.array([
-            -P5 * (1.0 - 2.0 * eta) - (P6 - P5) * xi,
-            q5 * (1.0 - 2.0 * eta) - (q5 + q6) * xi,
-            -4.0 + 6.0 * (xi + eta) + r5 * (1.0 - 2.0 * eta) - xi * (r5 + r6),
-            xi * (P4 + P6),
-            xi * (q4 - q6),
-            -xi * (r6 - r4),
-            P5 * (1.0 - 2.0 * eta) - xi * (P4 + P5),
-            q5 * (1.0 - 2.0 * eta) + xi * (q4 - q5),
-            -2.0 + 6.0 * eta + r5 * (1.0 - 2.0 * eta) + xi * (r4 - r5),
-        ])
-        hy_eta = np.array([
-            -t5 * (1.0 - 2.0 * eta) - (t6 - t5) * xi,
-            1.0 + r5 * (1.0 - 2.0 * eta) - (r5 + r6) * xi,
-            -q5 * (1.0 - 2.0 * eta) + xi * (q5 + q6),
-            xi * (t4 + t6),
-            xi * (r4 - r6),
-            -xi * (q4 - q6),
-            t5 * (1.0 - 2.0 * eta) - xi * (t4 + t5),
-            -1.0 + r5 * (1.0 - 2.0 * eta) + xi * (r4 - r5),
-            -q5 * (1.0 - 2.0 * eta) - xi * (q4 - q5),
-        ])
-        B = np.vstack([
-            y31 * hx_xi + y12 * hx_eta,
-            -x31 * hy_xi - x12 * hy_eta,
-            -x31 * hx_xi - x12 * hx_eta + y31 * hy_xi + y12 * hy_eta,
-        ]) / area2
+        B = _dkt_b(*geometry, xi, eta)
         K += (w * abs(area2)) * (B.T @ Db @ B)
     return K
 

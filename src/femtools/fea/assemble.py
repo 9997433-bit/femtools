@@ -12,6 +12,7 @@ import scipy.sparse as sp
 
 from .dofmap import DofMap
 from .elements import ModelIndex, element_matrices, element_spec
+from .mpc import ConstraintTransform, resolve_mpc
 from .nodal_frames import NodalFrames, shell_nodal_frames
 from .protocols import get_any, iter_records, spc_entries
 
@@ -23,9 +24,22 @@ class AssemblyResult:
     """Assembled system matrices and the DOF partition used to solve them.
 
     ``free_dof`` are the equations actually solved: everything that is not
-    single-point constrained, not empty (no stiffness *and* no mass) and not a
-    purely fictitious drilling rotation.  ``unconstrained_dof`` keeps the plain
-    "not SPC'd" set for callers that need it.
+    single-point constrained, not empty (no stiffness *and* no mass), not a
+    purely fictitious drilling rotation and not eliminated by a multipoint
+    constraint.  ``unconstrained_dof`` keeps the plain "not SPC'd" set for
+    callers that need it.
+
+    Multipoint constraints
+    ----------------------
+
+    When the model carries rigid bodies (``model.rbe2``) the matrices are the
+    *constrained* ones, ``G^T A G`` for the transform in :attr:`mpc`
+    (:mod:`femtools.fea.mpc`).  The DOF numbering is untouched: the dependent
+    DOFs keep their equation numbers, their rows and columns are empty and they
+    are listed in :attr:`mpc_dof` rather than being solved.  Their motion is
+    filled back in by :meth:`recover_dependent`, which :meth:`expand` and
+    :func:`~femtools.fea.static.solve_static` already apply, so a displacement
+    field or a mode shape always describes the whole structure.
 
     Analysis frame
     --------------
@@ -56,6 +70,8 @@ class AssemblyResult:
     element_ids: list[Any] = field(default_factory=list)
     skipped_elements: dict[Any, str] = field(default_factory=dict)
     frames: NodalFrames | None = None
+    mpc: ConstraintTransform | None = None
+    mpc_dof: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=int))
 
     # -- convenience --------------------------------------------------
     @property
@@ -97,17 +113,40 @@ class AssemblyResult:
         return self.reduce(self.C)
 
     def expand(self, u_free: np.ndarray, *, include_spc: bool = True) -> np.ndarray:
-        """Scatter a free-set vector (or set of columns) into full DOF space."""
+        """Scatter a free-set vector (or set of columns) into full DOF space.
+
+        DOFs eliminated by a multipoint constraint are filled from the ones
+        that drive them, so a mode shape covers the rigid parts of the model as
+        well.  That costs nothing in consistency: the transform is idempotent,
+        so ``phi^T M phi`` against the constrained mass matrix is the same
+        before and after (see :mod:`femtools.fea.mpc`).
+        """
         u_free = np.asarray(u_free)
         if u_free.ndim == 1:
             out = np.zeros(self.n_dof, dtype=u_free.dtype)
             out[self.free_dof] = u_free
             if include_spc and self.spc_dof.size:
                 out[self.spc_dof] = self.spc_values[self.spc_dof].astype(out.dtype, copy=False)
-            return out
+            return self.recover_dependent(out)
         out = np.zeros((self.n_dof, u_free.shape[1]), dtype=u_free.dtype)
         out[self.free_dof, :] = u_free
-        return out
+        return self.recover_dependent(out)
+
+    def recover_dependent(self, vector: np.ndarray) -> np.ndarray:
+        """Fill the DOFs eliminated by a multipoint constraint (``G @ u``).
+
+        A no-op without rigid bodies, and idempotent with them, so it is safe
+        to apply to a field that already carries the dependent motion.
+        """
+        if self.mpc is None or self.mpc.is_identity:
+            return vector
+        return self.mpc.to_full(vector)
+
+    def constrain_load(self, load: np.ndarray) -> np.ndarray:
+        """Move a load vector onto the independent DOFs (``G^T @ f``)."""
+        if self.mpc is None or self.mpc.is_identity:
+            return load
+        return self.mpc.to_independent(load)
 
     def restrict(self, u_full: np.ndarray) -> np.ndarray:
         u_full = np.asarray(u_full)
@@ -144,8 +183,8 @@ class AssemblyResult:
         return (
             f"AssemblyResult(n_dof={self.n_dof}, free={self.n_free}, "
             f"spc={self.spc_dof.size}, empty={self.null_dof.size}, "
-            f"drilling={self.drilling_dof.size}, framed_nodes={framed}, "
-            f"elements={len(self.element_ids)})"
+            f"drilling={self.drilling_dof.size}, mpc={self.mpc_dof.size}, "
+            f"framed_nodes={framed}, elements={len(self.element_ids)})"
         )
 
 
@@ -246,6 +285,7 @@ def assemble_km(
     suppress_drilling: bool = True,
     nodal_frames: bool = True,
     lumped_mass: bool = False,
+    mpc: Any = None,
     drill_factor: float = 1.0e-3,
     rayleigh: tuple[float, float] | None = None,
     element_filter: Callable[[Any, Any], bool] | Iterable[Any] | None = None,
@@ -277,6 +317,15 @@ def assemble_km(
         turning this off only changes an oblique model.
     lumped_mass
         Use diagonal element mass matrices instead of consistent ones.
+    mpc
+        Multipoint constraints.  ``None`` (default) applies the model's own
+        rigid bodies (``model.rbe2``, see
+        :meth:`femtools.core.model.FEModel.add_rbe2`); ``False`` ignores them;
+        a :class:`~femtools.fea.mpc.ConstraintTransform` from
+        :func:`~femtools.fea.mpc.apply_rbe2` is used as given, and explicit
+        ``RBE2`` records replace the model's table.  The matrices come back
+        constrained (``G^T A G``) with the dependent DOFs emptied and reported
+        in ``mpc_dof``.
     rayleigh
         ``(alpha, beta)`` for ``C += alpha*M + beta*K`` on top of the assembled
         ``DAMPER`` elements.
@@ -378,10 +427,28 @@ def assemble_km(
             spc_mask[spc_index] = True
             spc_values[spc_index] = value
 
+    # -- multipoint constraints ------------------------------------------
+    constraints = resolve_mpc(model, mpc, dof_map=dof_map, index=index)
+    mpc_mask = np.zeros(n, dtype=bool)
+    if not constraints.is_identity:
+        mpc_mask[constraints.dependent] = True
+        clash = np.flatnonzero(mpc_mask & spc_mask)
+        if clash.size:
+            dof = int(clash[0])
+            raise ValueError(
+                f"node {dof_map.dof_node(dof)!r} component {dof % dofs_per_node + 1} is "
+                f"both single point constrained and dependent on rigid body "
+                f"{constraints.sources.get(dof)!r}; a DOF can be eliminated only once "
+                "(constrain the independent node instead)"
+            )
+
     # -- per-node rotational frames --------------------------------------
     # A rotational SPC is written in the basic frame and only remains a single
     # DOF constraint there, so those nodes keep the basic triad; everything
-    # else follows its averaged shell normal.
+    # else follows its averaged shell normal.  A node tied by a rigid body is
+    # left alone for the same reason: the constraint is written in the basic
+    # frame, and mixing the three rotations of such a node would blur the line
+    # between the DOFs it eliminates and the ones it drives.
     frames = NodalFrames(dof_map=dof_map)
     if nodal_frames and dofs_per_node >= 6:
         constrained_rotations = {
@@ -389,12 +456,19 @@ def assemble_km(
             for d in np.flatnonzero(spc_mask)
             if int(d) % dofs_per_node >= 3
         }
+        constrained_rotations.update(constraints.nodes())
         frames = shell_nodal_frames(model, dof_map, index=index, skip=constrained_rotations)
     if not frames.is_identity:
         K = frames.congruence(K)
         M = frames.congruence(M)
         C = frames.congruence(C)
         K_drill = frames.congruence(K_drill)
+
+    if not constraints.is_identity:
+        K = constraints.congruence(K)
+        M = constraints.congruence(M)
+        C = constraints.congruence(C)
+        K_drill = constraints.congruence(K_drill)
 
     k_rows = _row_norms(K)
     m_rows = _row_norms(M)
@@ -410,16 +484,16 @@ def assemble_km(
             & (m_rows <= 1.0e-12 * m_scale)
             & (c_rows <= 1.0e-12 * c_scale if c_scale > 0 else np.ones(n, dtype=bool))
         )
-        null_mask &= ~spc_mask
+        null_mask &= ~spc_mask & ~mpc_mask
 
     drill_mask = np.zeros(n, dtype=bool)
     if suppress_drilling and K_drill.nnz:
         drill_diag = np.abs(K_drill.diagonal())
         real_rows = _row_norms((K - K_drill).tocsr())
         drill_mask = (drill_diag > 0.0) & (real_rows <= 1.0e-10 * k_scale)
-        drill_mask &= ~spc_mask & ~null_mask
+        drill_mask &= ~spc_mask & ~null_mask & ~mpc_mask
 
-    free_mask = ~(spc_mask | null_mask | drill_mask)
+    free_mask = ~(spc_mask | null_mask | drill_mask | mpc_mask)
     if (
         suppress_drilling
         and K_drill.nnz
@@ -450,4 +524,6 @@ def assemble_km(
         element_ids=element_ids,
         skipped_elements=skipped,
         frames=frames,
+        mpc=None if constraints.is_identity else constraints,
+        mpc_dof=np.flatnonzero(mpc_mask),
     )
