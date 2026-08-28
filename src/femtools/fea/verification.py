@@ -62,6 +62,21 @@ global plane and once tilted onto an oblique normal, and reports that the two
 now agree in every respect -- six rigid body modes, the same solved set and the
 same elastic frequencies.  Holding that for the tilted plate is what the
 per-node rotational frames of :mod:`femtools.fea.nodal_frames` are for.
+
+Stress recovery and rigid bodies
+--------------------------------
+
+``stress_patch_error`` is the constant-strain patch test of
+:mod:`femtools.fea.recover`, run for each of the six structural element types
+on a deliberately irregular mesh: the boundary is driven with an exact linear
+field, the enclosed node is left free and the recovered centroid stress of
+every element is compared with the analytic constant state.
+
+``rbe2_rigid_pair`` and ``rbe2_offset_moment`` are the two statements a rigid
+body element has to satisfy (:mod:`femtools.fea.mpc`): welding two nodes leaves
+a free-free structure with exactly six rigid body modes and the analytic rigid
+body mass matrix, and a load on a rigid offset arrives at the independent node
+as a force *and* the moment of the offset.
 """
 
 from __future__ import annotations
@@ -76,7 +91,7 @@ from .assemble import assemble_km
 from .eigen import mass_normalize, solve_modes
 from .elements import ModelIndex, element_matrices, element_spec
 from .elements.solid import _hex_shape, _strain_matrix
-from .materials import MaterialData, solid_D
+from .materials import MaterialData, plane_stress_D, solid_D
 from .protocols import get_any, iter_records
 from .quadrature import gauss_3d
 from .reduction import guyan, irs, serep
@@ -84,6 +99,8 @@ from .static import solve_static
 
 __all__ = [
     "DISTORTIONS",
+    "PATCH_GRADIENT",
+    "PATCH_TYPES",
     "beam_cantilever",
     "complete_spectrum_quality",
     "guyan_condensation_error",
@@ -93,10 +110,13 @@ __all__ = [
     "hex8_patch_test_error",
     "hex8_rigid_body_frequencies",
     "hex_cantilever",
+    "rbe2_offset_moment",
+    "rbe2_rigid_pair",
     "reduction_frequency_errors",
     "serep_slave_recovery",
     "shell_plate",
     "shell_drilling_orientation_gap",
+    "stress_patch_error",
     "timoshenko_tip_deflection",
 ]
 
@@ -246,17 +266,15 @@ def hex8_bending_ratio(
     return tip / reference
 
 
-def hex8_patch_test_error(
-    formulation: str | None = None,
-    *,
-    distortion: float = 0.3,
-    seed: int = 7,
-) -> float:
-    """Relative error of the enclosed node in a constant-stress patch test.
+def _distorted_hex_patch(
+    distortion: float, seed: int
+) -> tuple[dict[tuple[int, int, int], np.ndarray], dict[tuple[int, int, int], int], dict, dict]:
+    """The 2x2x2 HEX8 patch block: ``(coords, ids, nodes, elements)``.
 
-    A 2x2x2 element block is distorted on every interior plane, the 26 outer
-    nodes are driven with an exact linear displacement field and the single
-    enclosed node must land on the same field.
+    Every interior plane is displaced at random; the outer surfaces stay planar
+    so that an enforced linear field on them remains a pure constant-stress
+    state.  Shared by :func:`hex8_patch_test_error` and
+    :func:`stress_patch_error`.
     """
     rng = np.random.default_rng(seed)
     coords: dict[tuple[int, int, int], np.ndarray] = {}
@@ -267,8 +285,6 @@ def hex8_patch_test_error(
         for j in range(3):
             for k in range(3):
                 point = np.array([float(i), float(j), float(k)])
-                # Only interior planes move: the outer surfaces stay planar so
-                # the enforced field remains a pure constant-stress state.
                 free = np.array([0 < i < 2, 0 < j < 2, 0 < k < 2], dtype=float)
                 point = point + distortion * free * rng.uniform(-1.0, 1.0, 3)
                 coords[(i, j, k)] = point
@@ -296,7 +312,22 @@ def hex8_patch_test_error(
                     ),
                 }
                 eid += 1
+    return coords, ids, nodes, elements
 
+
+def hex8_patch_test_error(
+    formulation: str | None = None,
+    *,
+    distortion: float = 0.3,
+    seed: int = 7,
+) -> float:
+    """Relative error of the enclosed node in a constant-stress patch test.
+
+    A 2x2x2 element block is distorted on every interior plane, the 26 outer
+    nodes are driven with an exact linear displacement field and the single
+    enclosed node must land on the same field.
+    """
+    coords, ids, nodes, elements = _distorted_hex_patch(distortion, seed)
     model = _model(nodes, elements, 1.0e7, 0.3, 1.0)
     gradient = np.array(
         [[1.0e-4, 2.0e-5, 3.0e-5], [5.0e-6, -2.0e-4, 1.0e-5], [1.0e-5, 3.0e-5, 1.5e-4]]
@@ -866,3 +897,371 @@ def hex8_jacobian_spread(model: Any) -> float:
         if dets.min() > 0.0:
             worst = max(worst, float(dets.max() / dets.min()))
     return worst
+
+
+# ---------------------------------------------------------------------------
+# stress recovery
+# ---------------------------------------------------------------------------
+
+#: Element types :func:`stress_patch_error` covers, in the order documented.
+PATCH_TYPES: tuple[str, ...] = ("BAR2", "BEAM2", "TRIA3", "QUAD4", "TET4", "HEX8")
+
+#: Displacement gradient of the solid and shell patch tests.  Deliberately
+#: unsymmetric, so a recovery that dropped the rotational part of the gradient
+#: would show up rather than cancel.
+PATCH_GRADIENT = np.array(
+    [[1.0e-4, 2.0e-5, 3.0e-5], [5.0e-6, -2.0e-4, 1.0e-5], [1.0e-5, 3.0e-5, 1.5e-4]]
+)
+
+#: Section and material of the line-element patch cases.
+_PATCH_LINE = {"E": 2.1e11, "nu": 0.3, "rho": 7800.0, "A": 3.0e-4, "I": 2.0e-8, "J": 4.0e-8}
+
+
+def _line_patch_model(etype: str) -> tuple[dict[str, Any], np.ndarray, np.ndarray, list[int]]:
+    """Three unequal ``BAR2``/``BEAM2`` elements on one oblique line.
+
+    Returns the model, the unit axis, the node positions along it and the two
+    end node ids.  Unequal spacing is the point: a recovery that assumed a
+    uniform mesh would be caught by it.
+    """
+    axis = np.array([2.0, -1.0, 0.5])
+    axis = axis / np.linalg.norm(axis)
+    stations = np.array([0.0, 0.37, 0.71, 1.0]) * 1.5
+    nodes = {i + 1: {"xyz": tuple(axis * s)} for i, s in enumerate(stations)}
+    elements = {
+        i + 1: {"type": etype, "property_id": 1, "nodes": (i + 1, i + 2)} for i in range(3)
+    }
+    d = _PATCH_LINE
+    prop: dict[str, Any] = {"type": "bar", "material_id": 1, "A": d["A"]}
+    if etype == "BEAM2":
+        prop.update({"type": "beam", "Iy": d["I"], "Iz": d["I"], "J": d["J"]})
+    model = {
+        "nodes": nodes,
+        "elements": elements,
+        "materials": {1: {"E": d["E"], "nu": d["nu"], "rho": d["rho"]}},
+        "properties": {1: prop},
+        "spcs": [],
+    }
+    return model, axis, stations, [1, len(stations)]
+
+
+def _shell_patch_model(etype: str, distortion: float) -> tuple[dict[str, Any], dict, list[int]]:
+    """3x3 node membrane patch in the global x-y plane with a moved interior node."""
+    ids: dict[tuple[int, int], int] = {}
+    coords: dict[int, np.ndarray] = {}
+    nodes: dict[int, Any] = {}
+    counter = 1
+    for i in range(3):
+        for j in range(3):
+            point = np.array([float(i), float(j), 0.0])
+            if i == 1 and j == 1:
+                point = point + distortion * np.array([0.31, -0.24, 0.0])
+            ids[(i, j)] = counter
+            coords[counter] = point
+            nodes[counter] = {"xyz": tuple(point)}
+            counter += 1
+
+    elements: dict[int, Any] = {}
+    eid = 1
+    for i in range(2):
+        for j in range(2):
+            n1, n2, n3, n4 = ids[(i, j)], ids[(i + 1, j)], ids[(i + 1, j + 1)], ids[(i, j + 1)]
+            if etype == "TRIA3":
+                for conn in ((n1, n2, n3), (n1, n3, n4)):
+                    elements[eid] = {"type": "TRIA3", "property_id": 1, "nodes": conn}
+                    eid += 1
+            else:
+                elements[eid] = {"type": "QUAD4", "property_id": 1, "nodes": (n1, n2, n3, n4)}
+                eid += 1
+
+    model = {
+        "nodes": nodes,
+        "elements": elements,
+        "materials": {1: {"E": 70.0e9, "nu": 0.3, "rho": 2700.0}},
+        "properties": {1: {"type": "shell", "material_id": 1, "t": 0.02}},
+        "spcs": [],
+    }
+    boundary = [nid for key, nid in ids.items() if key != (1, 1)]
+    return model, coords, boundary
+
+
+def _tet_patch_model(distortion: float) -> tuple[dict[str, Any], dict, list[int]]:
+    """Four ``TET4`` elements filling one outer tetrahedron around a free node."""
+    outer = np.array([[0.0, 0.0, 0.0], [1.3, 0.0, 0.0], [0.2, 1.1, 0.0], [0.4, 0.3, 1.2]])
+    interior = outer.mean(axis=0) + distortion * np.array([0.11, -0.09, 0.07])
+    points = np.vstack([outer, interior])
+    nodes = {i + 1: {"xyz": tuple(p)} for i, p in enumerate(points)}
+    coords = {i + 1: p for i, p in enumerate(points)}
+    faces = ((1, 2, 3), (1, 2, 4), (1, 3, 4), (2, 3, 4))
+    elements = {
+        eid + 1: {"type": "TET4", "property_id": 1, "nodes": (*face, 5)}
+        for eid, face in enumerate(faces)
+    }
+    model = _model(nodes, elements, 1.0e7, 0.3, 1.0)
+    return model, coords, [1, 2, 3, 4]
+
+
+def stress_patch_error(etype: str = "HEX8", **case: Any) -> dict[str, float]:
+    """Constant-strain patch test of :func:`femtools.fea.recover.recover_stress`.
+
+    A small distorted mesh of *etype* is driven on its boundary with an exact
+    linear displacement field, the enclosed node (or nodes) are left free, and
+    the recovered centroid stress of **every** element is compared with the
+    analytic constant state:
+
+    * solids get the full linear field ``u = PATCH_GRADIENT @ x``;
+    * shells get its in-plane part, which is a plane-stress membrane state;
+    * line elements get uniform axial extension along their own axis, the only
+      constant-strain state a rod or a beam has.
+
+    Comparison is made in the basic frame, so it also checks the element frames
+    the recovery reports.  Returns the worst relative error over all elements
+    of ``stress`` and ``strain`` plus ``displacement``, the classical patch
+    test measure on the free node.
+    """
+    from .recover import recover_stress  # local: verification is imported on demand
+
+    name = str(etype).strip().upper()
+    if name not in PATCH_TYPES:
+        raise ValueError(f"unknown patch type {etype!r}; expected one of {PATCH_TYPES}")
+    distortion = float(case.get("distortion", 0.3))
+    seed = int(case.get("seed", 7))
+
+    if name in ("BAR2", "BEAM2"):
+        model, axis, stations, ends = _line_patch_model(name)
+        strain = 1.5e-4
+        enforced = {
+            (nid, comp): float(strain * stations[nid - 1] * axis[comp])
+            for nid in ends
+            for comp in range(3)
+        }
+        spcs = [
+            {"node_id": nid, "dofs": tuple(range(6 if name == "BEAM2" else 3))} for nid in ends
+        ]
+        if name == "BEAM2":
+            enforced.update({(nid, comp): 0.0 for nid in ends for comp in (3, 4, 5)})
+        else:
+            # A chain of pin-jointed rods is a mechanism transverse to its own
+            # axis, so the interior nodes are held there (at the exact value)
+            # and only their axial motion is solved for -- the 1D patch test.
+            for nid in (2, 3):
+                spcs.append({"node_id": nid, "dofs": (1, 2)})
+                exact = strain * stations[nid - 1] * axis
+                enforced.update({(nid, comp): float(exact[comp]) for comp in (1, 2)})
+        model["spcs"] = spcs
+        exact_stress = _PATCH_LINE["E"] * strain * np.outer(axis, axis)
+        exact_strain = strain * np.outer(axis, axis) - _PATCH_LINE["nu"] * strain * (
+            np.eye(3) - np.outer(axis, axis)
+        )
+        free_check: dict[int, np.ndarray] = {
+            nid: strain * stations[nid - 1] * axis for nid in (2, 3)
+        }
+    elif name in ("TRIA3", "QUAD4"):
+        model, coords, boundary = _shell_patch_model(name, distortion)
+        gradient = PATCH_GRADIENT.copy()
+        gradient[2, :] = 0.0
+        gradient[:, 2] = 0.0
+        enforced = {}
+        for nid in boundary:
+            exact = gradient @ coords[nid]
+            enforced.update({(nid, comp): float(exact[comp]) for comp in range(3)})
+            enforced.update({(nid, comp): 0.0 for comp in (3, 4, 5)})
+        model["spcs"] = [{"node_id": nid, "dofs": (0, 1, 2, 3, 4, 5)} for nid in boundary]
+        strain_tensor = 0.5 * (gradient + gradient.T)
+        Dm = plane_stress_D(MaterialData(E=70.0e9, nu=0.3, G=70.0e9 / 2.6))
+        plane = Dm @ np.array(
+            [strain_tensor[0, 0], strain_tensor[1, 1], 2.0 * strain_tensor[0, 1]]
+        )
+        exact_stress = np.array(
+            [[plane[0], plane[2], 0.0], [plane[2], plane[1], 0.0], [0.0, 0.0, 0.0]]
+        )
+        exact_strain = strain_tensor.copy()
+        exact_strain[2, 2] = -0.3 * (plane[0] + plane[1]) / 70.0e9
+        free = [nid for nid in coords if nid not in boundary]
+        free_check = {nid: gradient @ coords[nid] for nid in free}
+    else:
+        if name == "TET4":
+            model, coords, boundary = _tet_patch_model(distortion)
+        else:
+            hex_coords, ids, nodes, elements = _distorted_hex_patch(distortion, seed)
+            model = _model(nodes, elements, 1.0e7, 0.3, 1.0)
+            coords = {ids[key]: point for key, point in hex_coords.items()}
+            boundary = [nid for key, nid in ids.items() if key != (1, 1, 1)]
+        gradient = PATCH_GRADIENT
+        enforced = {}
+        for nid in boundary:
+            exact = gradient @ coords[nid]
+            enforced.update({(nid, comp): float(exact[comp]) for comp in range(3)})
+        model["spcs"] = [{"node_id": nid, "dofs": (0, 1, 2)} for nid in boundary]
+        strain_tensor = 0.5 * (gradient + gradient.T)
+        voigt = np.array(
+            [
+                strain_tensor[0, 0],
+                strain_tensor[1, 1],
+                strain_tensor[2, 2],
+                2.0 * strain_tensor[0, 1],
+                2.0 * strain_tensor[1, 2],
+                2.0 * strain_tensor[0, 2],
+            ]
+        )
+        s = solid_D(MaterialData(E=1.0e7, nu=0.3, G=1.0e7 / 2.6)) @ voigt
+        exact_stress = np.array(
+            [[s[0], s[3], s[5]], [s[3], s[1], s[4]], [s[5], s[4], s[2]]]
+        )
+        exact_strain = strain_tensor
+        free_check = {nid: gradient @ coords[nid] for nid in coords if nid not in boundary}
+
+    asm = assemble_km(model)
+    u = np.asarray(solve_static(model, {}, assembly=asm, enforced=enforced))
+    result = recover_stress(model, u, assembly=asm)
+
+    def _voigt_of(tensor: np.ndarray, *, engineering: bool) -> np.ndarray:
+        factor = 2.0 if engineering else 1.0
+        return np.array(
+            [
+                tensor[0, 0],
+                tensor[1, 1],
+                tensor[2, 2],
+                factor * tensor[0, 1],
+                factor * tensor[1, 2],
+                factor * tensor[0, 2],
+            ]
+        )
+
+    want_stress = _voigt_of(exact_stress, engineering=False)
+    want_strain = _voigt_of(exact_strain, engineering=True)
+    scale_stress = float(np.max(np.abs(want_stress)))
+    scale_strain = float(np.max(np.abs(want_strain)))
+    stress_error = float(np.max(np.abs(result.stress_basic - want_stress))) / scale_stress
+    strain_error = float(np.max(np.abs(result.strain_basic - want_strain))) / scale_strain
+
+    displacement_error = 0.0
+    for nid, exact in free_check.items():
+        got = u[asm.dof_map.node_dofs(nid)][:3]
+        displacement_error = max(
+            displacement_error,
+            float(np.max(np.abs(got - exact)) / max(np.max(np.abs(exact)), 1.0e-300)),
+        )
+    return {
+        "stress": stress_error,
+        "strain": strain_error,
+        "displacement": displacement_error,
+        "elements": float(len(result)),
+    }
+
+
+# ---------------------------------------------------------------------------
+# RBE2 rigid bodies
+# ---------------------------------------------------------------------------
+
+
+def rbe2_rigid_pair(
+    offset: Any = (1.0, 0.5, -0.3),
+    *,
+    masses: tuple[float, float] = (2.0, 3.0),
+    inertias: tuple[float, float] = (0.5, 0.2),
+) -> dict[str, float]:
+    """Two concentrated masses welded by one ``RBE2``, free-free.
+
+    The classical check that a rigid body element is a *kinematic* statement
+    and not a stiff spring: eliminating the dependent node leaves the six DOFs
+    of the independent one, they carry no stiffness, and the reduced mass is
+    exactly the rigid body mass matrix of the pair about the independent node,
+
+    ``[[m I, -m2 skew(r)], [m2 skew(r)^T, I1 + I2 - m2 skew(r) skew(r)]]``.
+
+    Reports the number of zero frequencies, the size of the solved set and the
+    worst deviation of the reduced mass from that analytic matrix.
+    """
+    r = np.asarray(offset, dtype=float).reshape(3)
+    m1, m2 = float(masses[0]), float(masses[1])
+    i1, i2 = float(inertias[0]), float(inertias[1])
+    model = {
+        "nodes": {1: {"xyz": (0.0, 0.0, 0.0)}, 2: {"xyz": tuple(r)}},
+        "elements": {
+            1: {"type": "MASS", "nodes": (1,), "m": m1, "I11": i1, "I22": i1, "I33": i1},
+            2: {"type": "MASS", "nodes": (2,), "m": m2, "I11": i2, "I22": i2, "I33": i2},
+        },
+        "materials": {},
+        "properties": {},
+        "spcs": [],
+        "rbe2": [{"id": 1, "independent": 1, "dependents": (2,), "components": (1, 2, 3, 4, 5, 6)}],
+    }
+    asm = assemble_km(model)
+    frequencies = solve_modes(model, n_modes=6, assembly=asm).freq_hz
+
+    skew = np.array([[0.0, -r[2], r[1]], [r[2], 0.0, -r[0]], [-r[1], r[0], 0.0]])
+    expected = np.zeros((6, 6))
+    expected[:3, :3] = (m1 + m2) * np.eye(3)
+    expected[:3, 3:] = -m2 * skew
+    expected[3:, :3] = -m2 * skew.T
+    expected[3:, 3:] = (i1 + i2) * np.eye(3) - m2 * (skew @ skew)
+    got = asm.Mff.toarray()
+    return {
+        "zero_modes": float(np.count_nonzero(np.asarray(frequencies) < 1.0e-6)),
+        "free_dof": float(asm.n_free),
+        "dependent_dof": float(asm.mpc_dof.size),
+        "stiffness_norm": float(abs(asm.Kff).max()) if asm.Kff.nnz else 0.0,
+        "mass_error": float(np.max(np.abs(got - expected)) / np.max(np.abs(expected))),
+    }
+
+
+def rbe2_offset_moment(
+    n_elements: int = 8, *, arm: float = 0.25, force: float = 120.0
+) -> dict[str, float]:
+    """A rigid arm on the tip of a cantilever must deliver a moment.
+
+    A ``BEAM2`` cantilever gets one extra node a distance ``arm`` above its tip
+    and an ``RBE2`` welding it to the tip.  An axial force on that node is the
+    textbook offset load: at the tip it becomes the same force *plus* the
+    moment ``arm * force``.  The case is measured three ways -- against a model
+    where that force and moment are applied directly, against the analytic
+    Euler-Bernoulli cantilever, and against the rigid kinematics themselves
+    (``u_arm == u_tip + theta_tip x r``).
+    """
+    d = BEAM_CANTILEVER
+    length, arm = float(d["L"]), float(arm)
+    base = beam_cantilever(n_elements)
+    tip = n_elements + 1
+
+    direct = {**base, "nodes": dict(base["nodes"])}
+    rigid = {
+        **base,
+        "nodes": {**base["nodes"], tip + 1: {"xyz": (length, 0.0, arm)}},
+        "rbe2": [{"id": 1, "independent": tip, "dependents": (tip + 1,)}],
+    }
+
+    asm_rigid = assemble_km(rigid)
+    u_rigid = np.asarray(solve_static(rigid, {(tip + 1, 0): force}, assembly=asm_rigid))
+    u_direct = np.asarray(
+        solve_static(direct, {(tip, 0): force, (tip, 4): arm * force})
+    )
+
+    dofs = asm_rigid.dof_map
+    beam_dofs = np.concatenate([dofs.node_dofs(nid) for nid in range(1, tip + 1)])
+    gap = float(np.max(np.abs(u_rigid[beam_dofs] - u_direct[: beam_dofs.size])))
+    scale = float(np.max(np.abs(u_direct)))
+
+    tip_u = u_rigid[dofs.node_dofs(tip)]
+    arm_u = u_rigid[dofs.node_dofs(tip + 1)]
+    lever = np.array([0.0, 0.0, arm])
+    kinematics = float(
+        np.max(np.abs(arm_u[:3] - (tip_u[:3] + np.cross(tip_u[3:], lever))))
+        + np.max(np.abs(arm_u[3:] - tip_u[3:]))
+    )
+
+    ei = d["E"] * d["Iy"]
+    moment = arm * force
+    return {
+        "tip_axial": float(tip_u[0]),
+        "analytic_axial": force * length / (d["E"] * d["A"]),
+        "tip_deflection": float(tip_u[2]),
+        "analytic_deflection": -moment * length**2 / (2.0 * ei),
+        # The kernel's beam convention is ry = -dw/dx, so a tip moment that
+        # deflects the beam down rotates the tip section positively.
+        "tip_rotation": float(tip_u[4]),
+        "analytic_rotation": moment * length / ei,
+        "direct_gap": gap / scale,
+        "rigid_kinematics": kinematics / max(float(np.max(np.abs(arm_u))), 1.0e-300),
+        "moment": moment,
+    }

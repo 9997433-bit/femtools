@@ -54,6 +54,22 @@ def _reject_framed_rotation(assembly: AssemblyResult, node_id: Any, index: int) 
     )
 
 
+def _reject_dependent(assembly: AssemblyResult, node_id: Any, index: int) -> None:
+    """Refuse an enforced value on a DOF a rigid body already eliminated.
+
+    Such a DOF has no equation of its own -- it follows its independent node --
+    so writing a value into it would be quietly ignored rather than enforced.
+    """
+    if assembly.mpc is None or index not in set(assembly.mpc_dof.tolist()):
+        return
+    comp = index % assembly.dofs_per_node + 1
+    raise ValueError(
+        f"node {node_id!r} component {comp} is dependent on rigid body "
+        f"{assembly.mpc.sources.get(index)!r}, so it has no equation to enforce a "
+        "displacement in; drive the independent node instead"
+    )
+
+
 def _factorized_solve(A: sp.csr_matrix, b: np.ndarray) -> np.ndarray:
     if A.shape[0] == 0:
         return np.zeros_like(b)
@@ -81,6 +97,10 @@ def solve_static(
     :class:`~femtools.fea.assemble.AssemblyResult`).  ``assembly.to_basic(u)``
     rotates it back when those rotations are wanted globally.
 
+    Rigid bodies (``model.rbe2``) are honoured through the assembly: loads land
+    on the independent nodes as force *and* moment, and the returned field
+    carries the motion of the dependent nodes (see :mod:`femtools.fea.mpc`).
+
     Parameters
     ----------
     model
@@ -105,7 +125,10 @@ def solve_static(
     # Applied loads are given in the basic frame; the equations are written in
     # the analysis frame.  The map is orthogonal, so forces use the same one as
     # displacements.
-    f = asm.from_basic(build_load_vector(loads, dof_map, model=model))
+    # A load on a DOF a rigid body eliminated is carried to the independent
+    # node -- with the moment of its offset -- by the same transform that built
+    # the constrained stiffness.
+    f = asm.constrain_load(asm.from_basic(build_load_vector(loads, dof_map, model=model)))
 
     u_prescribed = asm.spc_values.copy()
     held = np.zeros(asm.n_dof, dtype=bool)
@@ -114,6 +137,7 @@ def solve_static(
             node_id, comp = key if isinstance(key, tuple) else (key, 0)
             index = dof_map.index(node_id, comp)
             _reject_framed_rotation(asm, node_id, index)
+            _reject_dependent(asm, node_id, index)
             u_prescribed[index] = float(value)
             held[index] = True
 
@@ -147,6 +171,10 @@ def solve_static(
     else:
         u[solve_dof] = u_solved
         u[fixed] = u_prescribed[fixed]
+
+    # Rigid bodies: fill the motion of the DOFs that were eliminated, so the
+    # answer describes the whole structure and not only its independent nodes.
+    u = asm.recover_dependent(u)
 
     if not (return_reactions or full_result):
         return u
