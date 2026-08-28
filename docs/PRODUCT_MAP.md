@@ -11,7 +11,12 @@ capability rows, so R1/R2 remain the merged-capability tags. Round 6 merged the 
 R5+ APIs frozen in `.agent_workspace/ROUND6_BRIEF.md` / `REMAINING.md`; those rows are
 tagged **R6**. The transitional **R6-wip** tag is retired. Round 7 (Cycle C's first round)
 merged the APIs of `.agent_workspace/REMAINING.md` (Rounds 7–9 edition); those rows are
-tagged **R7**. The transitional **R7-wip** tag is retired.
+tagged **R7**. The transitional **R7-wip** tag is retired. Round 8 (Cycle C's second
+round) is in progress: its API is frozen in `.agent_workspace/REMAINING.md` (Round 8
+section) / `ROUND8_BRIEF.md`, but no Round-8 kernel imports from this tree yet — the
+merged `core.model.RBE3` data container is the sole exception — so the new rows carry
+the transitional **R8-wip** tag and are retagged **R8** on merge, following the
+R4-wip → R4 / R7-wip → R7 precedent.
 
 | Status | Meaning |
 |---|---|
@@ -20,6 +25,7 @@ tagged **R7**. The transitional **R7-wip** tag is retired.
 | **R4** | Merged in Round 4 (API frozen in `.agent_workspace/REMAINING.md`); importable from the integration branch, covered by tests, and a **stable** lazy export at the `femtools` top level (`src/femtools/__init__.py`) since Round 5 |
 | **R6** | Merged in Round 6 (the remaining-cycle's last round; API frozen in `.agent_workspace/ROUND6_BRIEF.md`); importable from the integration branch, covered by tests, and a stable lazy export at the `femtools` top level |
 | **R7** | Merged in Round 7 (Cycle C's first round; API frozen in the Cycle-C `.agent_workspace/REMAINING.md`); importable from the integration branch, covered by tests, and a stable lazy export at the `femtools` top level |
+| **R8-wip** | Round-8 name frozen in `.agent_workspace/REMAINING.md` (Round 8 section); the symbol does **not** import from this branch yet and no top-level export exists (exception: the merged `RBE3` data container, already a stable export). Retagged **R8** when the module merges |
 | **R5+** | Direction fixed, API not frozen in this cycle |
 | **N/A** | Out of scope (hardware, licensing, closed binary dumps) with substitute noted |
 
@@ -44,6 +50,7 @@ remain listed there.
 | GUI shell | `gui` web shell (`gui.server` on stdlib http, FastAPI optional); model upload / preloaded examples via `/api/load` landed R2 | R1 |
 | Mesh/geometry visualization | `viz.plots` (matplotlib default; optional `backend="plotly"` if plotly is installed); optional pyvista `plot_mesh3d` is the Round-7 row below | R1 |
 | Interactive 3-D mesh view (optional pyvista) | `viz.plot_mesh3d` — behind `import pyvista` (the `viz` extra of `pyproject.toml`); matplotlib stays the default backend and importing `femtools.viz` never requires pyvista | R7 |
+| Stress-field visualization (plot + CLI/script/GUI surface) | `viz.plots.plot_stress` — color the mesh by `StressResult` von Mises (or a named component); matplotlib default, pyvista only via the existing `plot_mesh3d` path (`import femtools.viz` still never requires pyvista). Lands together with the CLI `plot-stress` command (lazy-fails like `recover-stress` when kernels are missing), the script `RECOVER STRESS` / `ADD RBE2` / `ADD RBE3` verbs, and a GUI stress-table endpoint over `recover_stress` | R8-wip |
 | Mesh generation / import CAD | not planned — import meshes via UNV/BDF | N/A |
 
 ## 2. FEMtools Dynamics
@@ -66,10 +73,13 @@ remain listed there.
 | Complex modes (general viscous damping) | `fea.eigen.solve_complex_modes` → `ComplexModalResult` (state-space / quadratic eigenvalue) | R4 |
 | Random/PSD response | `dynamics.random.psd_response` → `PSDResult` (modal PSD; rms and 1σ) | R4 |
 | Modal strain / kinetic energy diagnostics | `dynamics.energy.modal_strain_energy` / `modal_kinetic_energy` — per-mode (optional per-element) MSE/MKE from assembled K, M and mass-normalized Φ | R6 |
-| Stress/strain recovery | `fea.recover.recover_stress` / `recover_strain` → `StressResult` — element-centroid (averaged-Gauss) stress/strain for BAR2, BEAM2, QUAD4, TRIA3, HEX8, TET4 from a displacement solution; linear elastic only, constant-strain patch test to 1e-12 (`docs/SOTA.md` §11) | R7 |
-| Rigid constraints (RBE2 / MPC reduction) | data container is merged: `core.model.RBE2` / `FEModel.add_rbe2` (stable top-level `RBE2` export, shared with the BDF `RBE2` card); the Round-7 work is the constraint transform `fea.mpc.apply_rbe2` / `ConstraintTransform` and `assemble_km` honoring `model.rbe2` (or an explicit `mpc=`) by null-space reduction `u = T q` (`docs/ARCHITECTURE.md` §5, `docs/SOTA.md` §11) | R7 |
+| Stress/strain recovery | `fea.recover.recover_stress` / `recover_strain` → `StressResult` — element-centroid (averaged-Gauss) stress/strain for BAR2, BEAM2, QUAD4, TRIA3, HEX8, TET4 from a displacement solution; linear elastic only, constant-strain patch test to 1e-12 (`docs/SOTA.md` §11); nodal averaging is the Round-8 row below | R7 |
+| Rigid constraints (RBE2 / MPC reduction) | data container is merged: `core.model.RBE2` / `FEModel.add_rbe2` (stable top-level `RBE2` export, shared with the BDF `RBE2` card); the Round-7 work is the constraint transform `fea.mpc.apply_rbe2` / `ConstraintTransform` and `assemble_km` honoring `model.rbe2` (or an explicit `mpc=`) by null-space reduction `u = T q` (`docs/ARCHITECTURE.md` §5, `docs/SOTA.md` §11); interpolation (RBE3) constraints are the Round-8 row below | R7 |
 | Base-acceleration random response | `dynamics.random.psd_response(..., base_accel=)` — enforced base-acceleration PSD input, SDOF RMS checked against the closed form / Miles equation (the force-PSD path of the R4 row above is unchanged) | R7 |
 | CMS superelement persistence | `dynamics.superelement.dump_cms` / `load_cms` — npz dump/load of Craig–Bampton (and Rubin, where the result carries K, M, T) reduced matrices and boundary ids; K/M bit-identical after a load round trip | R7 |
+| Interpolation constraints (RBE3 / weighted-average MPC) | data container is merged: `core.model.RBE3` / `FEModel.add_rbe3` (stable top-level `RBE3` export, shared with the BDF `RBE3` card); the Round-8 work is `fea.mpc.apply_rbe3` — the dependent node's listed components follow the **weighted average** of the independents (equal weights by default, or `RBE3.weights`); *not* the RBE2 rigid weld, no penalty springs — composed with `apply_rbe2` into one `ConstraintTransform`, `assemble_km` honoring `model.rbe3` alongside `model.rbe2` (`mpc=False` still disables all MPCs). Gates: a mass on an RBE3 dependent node of a free–free independent triangle keeps exactly 6 rigid-body modes; a dependent-node force distributes to the independents by virtual work `Gᵀ f` (`docs/SOTA.md` §12) | R8-wip |
+| Nodal stress averaging | `fea.recover.average_nodal` — average the element-centroid `StressResult` onto incident nodes (1/n_adj); a constant-stress patch stays exact at every node; deliberately **not** Zienkiewicz–Zhu SPR (`docs/SOTA.md` §12) | R8-wip |
+| FRF result persistence | `dynamics.frf.dump_frf` / `load_frf` — npz dump/load of `FRFResult`, analogous to the R7 `dump_cms`; `H` and `freq_hz` bit-identical after a load round trip; `modal_frf` numerics unchanged | R8-wip |
 
 ## 3. FEMtools Pretest & Correlation
 
@@ -82,7 +92,7 @@ remain listed there.
 | Candidate DOF selection (translational partition of free DOFs) | `pretest.candidates.translational_dofs`, `candidate_dofs` | R2 |
 | Exciter placement (driving-point residues) | `pretest.exciter.driving_point_residues`, `select_exciters` | R4 |
 | Test geometry definition & FE↔test node mapping | test geometry as `FEModel`; typed DOF mapping `correlation.dofmap.DOFMap` (label parsing, 0/1-based recognition, fea kernel maps) R2; rigid-Procrustes geometry alignment `correlation.alignment.align_geometry` R4; the public nearest-node function this table claimed since R1 is the Round-7 row below | R1 |
-| Nearest-node geometry mapping | `correlation.dofmap.map_nearest_nodes` — test grid xyz `(n, 3)` vs model / FE xyz → `(fe_ids, distances)` (k-d tree; `docs/SOTA.md` §1) | R7 |
+| Nearest-node geometry mapping | `correlation.dofmap.map_nearest_nodes` — test grid xyz `(n, 3)` vs model / FE xyz → `(fe_ids, distances)` (k-d tree; `docs/SOTA.md` §1); the mapped mode-matrix consumer is the Round-8 row below | R7 |
 | MAC / CoMAC / POC | `correlation.mac.mac_matrix`, `comac`, `poc` | R1 |
 | Mode pairing | `correlation.pairing.pair_modes` (MAC-weighted assignment) | R1 |
 | Mass-weighted cross-orthogonality | `correlation.orthogonality.cross_orthogonality` | R1 |
@@ -93,6 +103,7 @@ remain listed there.
 | NMD / extended MAC for complex modes | `correlation.mac.nmd` (Allemang normalized modal difference), `correlation.mac.macx` (extended MAC using both φ and conj(φ)); `mac_matrix`/`fmac` numerics on real modes unchanged | R6 |
 | Correlation report generation | `viz.report.mac_report_html` / `mac_report_text` / `save_mac_report` + `cli` `report-mac` | R4 |
 | Per-DOF MAC contribution diagnostics | `correlation.mac.mac_contribution` — DOF-wise contribution to a single MAC pair (same inputs as `mac_value`); the real-mode `mac_matrix` numerics are unchanged | R7 |
+| Mapped-shape mode matrix (FE rows at test grid) | `correlation.dofmap.mapped_mode_matrix` — pull FE mode-shape rows at the node ids returned by `map_nearest_nodes`, so FE↔test MAC runs on geometry-mapped DOFs instead of positional assumptions; gate: two translated copies of the same cube give a mapped-MAC diagonal of 1; `mac_matrix` real-mode numerics and `map_nearest_nodes` distances unchanged | R8-wip |
 
 ## 4. FEMtools Model Updating
 
@@ -109,6 +120,7 @@ remain listed there.
 | Robust / uncertainty-quantified updating | `updating.uq.parameter_covariance` / `monte_carlo_update` → `UQResult` — first-order Cov(θ) from residual covariance and the sensitivity matrix (Friswell–Mottershead), seeded Monte Carlo | R6 |
 | Automated parameter selection (subset selection) | `updating.selection.select_parameters` (EFS / column subset selection) | R4 |
 | Static-displacement responses | `updating.responses.static_displacement_response` — `solve_static` displacements as `update_model` residuals (the 10% E-recovery invariant of the modal path is unchanged) | R7 |
+| Static-deflection updating convenience | `updating.updater.update_from_static` — one-call wrapper of `static_displacement_response` + `update_model`: recover a 10% E error from a static tip deflection to the same order as the modal path; an optional stress residual over `recover_stress` may land with it (constant-stress patch → parameter recovered) | R8-wip |
 
 ## 5. FEMtools Optimization
 
@@ -154,7 +166,8 @@ remain listed there.
 |---|---|---|
 | Universal file (UNV) datasets 15/2411 (nodes), 2412 (elements), 82 (trace lines), 55 (shapes), 58 (FRFs/functions), 151/164 (header/units) | `io.unv.read_unv`, `write_unv` — materials/properties carried since R2 via private dataset 30000 (JSON; third-party readers skip it, SOTA.md §10) | R1 |
 | Nastran BDF subset (GRID, C\*, MAT1, PSHELL/PBAR/P\*, SPC, FORCE) | `io.bdf.read_bdf`, `write_bdf` — TET10/HEX20 midside nodes dropped with aggregated warnings (SOTA.md §10) | R1 |
-| BDF `INCLUDE` statements + `RBE2` cards | `io.bdf.read_bdf` — follows `INCLUDE` (relative paths, depth ≤ 8, cycle-safe) and parses `RBE2` into `FEModel.add_rbe2` (`RBE3` optional); public card layouts only | R7 |
+| BDF `INCLUDE` statements + `RBE2` cards | `io.bdf.read_bdf` — follows `INCLUDE` (relative paths, depth ≤ 8, cycle-safe) and parses `RBE2` into `FEModel.add_rbe2` (the `RBE3` card is the Round-8 row below); public card layouts only | R7 |
+| BDF `RBE3` card read/write | `io.bdf.read_bdf` parses `RBE3` into `FEModel.add_rbe3` (public card layout: refgrid / refc / wt, c, g lists); `write_bdf` emits it; unknown/unsupported fields collapse into one aggregated `UserWarning`; no copyrighted decks | R8-wip |
 | Native project file | `io.project` (`.ftproj`) | R1 |
 | Solver driver protocol (third-party results import) | `drivers.base.SolverDriver` (runtime-checkable PEP 544 Protocol — structural typing, no registration; `docs/ARCHITECTURE.md` §10) | R4 |
 | Nastran punch results (`.pch` text: eigenvalues, mode shapes) | `io.pch.read_pch`, `write_pch` | R4 |
@@ -162,7 +175,9 @@ remain listed there.
 | ANSYS CDB mesh export | `io.cdb.write_cdb` — NBLOCK/EBLOCK subset writer; gate: the Round-6 HEX8/QUAD4/BEAM2 acceptance decks round-trip through `assemble_km` | R7 |
 | LS-DYNA K export | `io.kfile.write_k` — text-subset writer paired with the R6 `read_k` (same round-trip gate as `write_cdb`) | R7 |
 | Concrete Nastran text driver (SOL 103 → punch) | `drivers.nastran.NastranPunchDriver` — implements the `SolverDriver` protocol over `write_bdf` (+ SOL 103 case control requesting punch output) and `read_pch`; `is_available()` probes for a local executable, `run()` raises `SolverError` when it is absent; tests never require a Nastran install, and OP2 stays N/A below | R7 |
-| Nastran OP2 / ANSYS RST / Abaqus ODB binary results | closed binary dumps — substitutes: the `.pch`/CDB text readers above plus the `SolverDriver` plug-in protocol | N/A |
+| Concrete ANSYS text driver (CDB in, text results) | `drivers.ansys.AnsysCdbDriver` — `SolverDriver` over the public text translators: `write_input` = `write_cdb`; `is_available()` via `shutil.which` (`ansys`/`mapdl` aliases), never raises; `run()` raises `SolverError` on missing executable / nonzero exit / timeout; `read_modal` uses the existing `.pch`/`.unv` **text** readers only — a `.rst` path raises `SolverError` naming RST as N/A; tests never require an ANSYS install (stub shell executables, like the Round-7 Nastran tests) | R8-wip |
+| Concrete Abaqus text driver (INP in, text results) | `drivers.abaqus.AbaqusInpDriver` — same conventions over `write_inp`: `is_available()` probe, `SolverError` on missing/failed/timed-out runs, `read_modal` from `.unv`/`.pch` text only; ODB stays N/A below; tests never require an Abaqus install | R8-wip |
+| Nastran OP2 / ANSYS RST / Abaqus ODB binary results | closed binary dumps — substitutes: the `.pch`/CDB text readers above plus the `SolverDriver` plug-in protocol (and, once merged, the Round-8 ANSYS/Abaqus text drivers above) | N/A |
 | Abaqus INP / LS-DYNA K (text subsets) | `io.inp.read_inp` / `write_inp`, `io.kfile.read_k` — public card layouts only, mapped into `FEModel`; no OP2/RST/ODB binaries (those stay N/A above) | R6 |
 
 ## Cross-cutting quality gates (all rounds)
@@ -170,13 +185,18 @@ remain listed there.
 * Typed public API (`py.typed` marker ships in the wheel since R2), pydantic-validated core.
 * Frozen contract (`docs/CONTRACT_API.md`), the frozen Round-4 API
   (`.agent_workspace/REMAINING.md`), and the `femtools.core.errors` exception hierarchy
-  re-exported lazily from `femtools` (`src/femtools/__init__.py`, 128 stable names +
+  re-exported lazily from `femtools` (`src/femtools/__init__.py`, 129 stable names +
   15 subpackages), so `import femtools` is cheap and cycle-free — no numpy/scipy/pydantic
   at import time. Round-4 names were promoted to stable exports in Round 5; Round 6 added
   the remaining R5+ names (`read_inp`, `shape_optimize`, `ssi_data`, `nmd`, …) the same way.
   Round 7 added the Cycle-C frozen names (`recover_stress`, `apply_rbe2`, `write_cdb`,
   `write_k`, `NastranPunchDriver`, `dump_cms`, `map_nearest_nodes`, `topometry_optimize`,
-  `static_displacement_response`, …) after those modules merged.
+  `static_displacement_response`, …) after those modules merged. Of the Round-8 names only
+  the merged `RBE3` data container is exported so far; the rest (`apply_rbe3`,
+  `average_nodal`, `AnsysCdbDriver`, `AbaqusInpDriver`, `dump_frf`, `load_frf`,
+  `mapped_mode_matrix`, `plot_stress`, `update_from_static`) are promoted the same way
+  once their modules merge — CI resolves every `__all__` entry, so an unmerged name in
+  the export table would fail the build.
 * Golden analytical acceptance tests with the tolerance table of `docs/CONTRACT_API.md`.
 * ruff + strict pytest (an empty collection fails CI since Round 2) on Python 3.11,
   plus a non-blocking mypy step (`.github/workflows/ci.yml`).

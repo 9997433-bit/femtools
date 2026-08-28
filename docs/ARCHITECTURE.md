@@ -36,7 +36,8 @@ Layer 0  core         FE/test relational database: nodes, elements, materials, p
 Layer 1  io           UNV, Nastran BDF, project persistence (.ftproj), driver plug-ins
 Layer 2  fea          element library, DOF management, sparse K/M/C assembly, static solver,
                       eigensolver (ARPACK), complex modes, reduction (Guyan/IRS/SEREP),
-                      stress recovery + RBE2 constraint transform (Round 7, in progress)
+                      stress recovery + RBE2 constraint transform (Round 7); RBE3
+                      interpolation transform + nodal stress averaging (Round 8, in progress)
 Layer 3  dynamics     modal & direct FRF, harmonic response, time integration,
                       Craig–Bampton CMS, modal-based assembly, residual vectors
 Layer 4  correlation  MAC/CoMAC/POC, cross-orthogonality, FRF correlation, mode pairing
@@ -99,6 +100,7 @@ external post-processors can map results back to the source model.
 | `properties` | property id | `Property(type, material_id, A/I/t/k/...)` | `material_id` exists |
 | `spcs` | — | `(node_id, mask: 6×bool)` | node id exists |
 | `rbe2` | — | `RBE2(independent, dependents, components 1..6)` | unique id; node ids exist; independent ∉ dependents |
+| `rbe3` | — | `RBE3(dependent, independents, components 1..6, weights)` | unique id; node ids exist; dependent ∉ independents; weights positive, one per independent |
 | `sets` | name | `NodeSet` / `ElementSet` | member ids exist |
 | `coord_systems` | cs id | `CoordSys(type, origin, rotation)` | — |
 | `units` | — | `UnitSystem` (SI internal; converters at I/O boundary) | — |
@@ -139,11 +141,18 @@ code never branches on data origin.
 * **Constraint elimination.** SPCs are applied by row/column elimination (slicing the CSR
   matrix to the active set), not by penalty terms, so eigenvalues are not polluted by penalty
   artifacts. MPCs/RBEs are applied by null-space transformation `u = T q` with
-  `K_r = Tᵀ K T` (and `M_r = Tᵀ M T`), keeping symmetry. Round 7 freezes this as
+  `K_r = Tᵀ K T` (and `M_r = Tᵀ M T`), keeping symmetry. Round 7 merged this as
   `fea.mpc.apply_rbe2` / `ConstraintTransform`, consuming the merged `FEModel.rbe2` table
   (`core.model.RBE2`, shared with the BDF `RBE2` card): the dependent node follows the
   independent one by the small-rotation rigid-body relation, and `assemble_km` honors
-  `model.rbe2` (or an explicit `mpc=` transform). References: `docs/SOTA.md` §11.
+  `model.rbe2` (or an explicit `mpc=` transform). Round 8 (in progress, PRODUCT_MAP
+  R8-wip) adds the interpolation variant `fea.mpc.apply_rbe3` over the merged
+  `FEModel.rbe3` table: the dependent node's listed components follow the *weighted
+  average* of the independents (equal weights by default, or `RBE3.weights`) — an
+  interpolation constraint, not the RBE2 rigid weld, with no penalty springs.
+  `assemble_km` composes `model.rbe3` with `model.rbe2` into a single
+  `ConstraintTransform`; `mpc=False` still disables all MPCs, and existing RBE2 results
+  stay bit-identical when `model.rbe3` is empty. References: `docs/SOTA.md` §11–§12.
 
 ## 6. Sparse assembly
 
@@ -192,8 +201,13 @@ ever formed by the framework (dense paths are allowed inside tests and for n < ~
   solution at the element centroid (or averaged Gauss points) through the same element
   kernels the assembler uses, returning a `StressResult`. Recovery is an fea-layer
   capability: it consumes `StaticResult` / `ModalResult` displacement fields and never
-  re-solves. Linear elasticity only, no nodal smoothing.
-  References: `docs/SOTA.md` §11 (Cook et al.; Bathe; Barlow points).
+  re-solves. Linear elasticity only; Round 7 does no nodal smoothing. Round 8
+  (in progress, PRODUCT_MAP R8-wip) adds `fea.recover.average_nodal`: the centroid
+  `StressResult` averaged onto incident nodes with `1/n_adj` weights — plain nodal
+  averaging, deliberately not Zienkiewicz–Zhu SPR — exact at every node on a
+  constant-stress patch.
+  References: `docs/SOTA.md` §11 (Cook et al.; Bathe; Barlow points), §12 (averaging
+  vs. SPR).
 
 ## 8. Result objects
 
@@ -208,6 +222,11 @@ All result objects are immutable after construction, carry provenance metadata
 | `FRFResult` | `dynamics.frf`, `io.unv` (dataset 58) | `H: complex128 (n_out, n_in, n_freq)`, `freq_hz`, input/output DOF descriptors, `kind ∈ {receptance, mobility, accelerance}` | frequency vector strictly increasing; unit-consistent with `kind` |
 | `StaticResult` | `fea.static` | `u (n_active,)`, reaction forces at SPC DOFs | equilibrium residual reported |
 | `UpdateResult` | `updating.updater` | parameter history, residual history, weighted covariance, convergence flag | monotone weighted residual or flagged non-convergence |
+
+The `.npz` serialization promise is realized per result type as rounds land: Round 7
+shipped `dynamics.superelement.dump_cms` / `load_cms` for CMS reduced models; Round 8
+(in progress, PRODUCT_MAP R8-wip) adds `dynamics.frf.dump_frf` / `load_frf` for
+`FRFResult`, with `H` and `freq_hz` bit-identical after a load round trip.
 
 Shape/DOF compatibility between two results (e.g. FE vs. test in MAC) is established through
 DOF descriptors `(node_id, local_dof)`, never through positional assumption; `pair_modes` and
@@ -279,13 +298,23 @@ Policy:
    codebase. Adapters are built on the text translators of `femtools.io`, which since
    Round 4 include Nastran punch (`.pch`) results (`read_pch`/`write_pch`) and the
    ANSYS CDB NBLOCK/EBLOCK mesh subset (`read_cdb`) alongside the Round-1 BDF/UNV
-   read/write. Round 6 added Abaqus INP (`io.inp.read_inp`/`write_inp`) and LS-DYNA K
+   read/write.    Round 6 added Abaqus INP (`io.inp.read_inp`/`write_inp`) and LS-DYNA K
    (`io.kfile.read_k`) text-subset translators over publicly documented card layouts;
    Round 7 added the matching writers (`io.cdb.write_cdb`, `io.kfile.write_k`) and
    BDF `INCLUDE`/`RBE2` reading.
+   Round 8 (in progress, `docs/PRODUCT_MAP.md` R8-wip) extends the same pattern with two
+   more optional **text** drivers: `drivers.ansys.AnsysCdbDriver` (`write_input` =
+   `write_cdb`; `is_available()` probes `shutil.which` for `ansys`/`mapdl`-style
+   aliases and never raises; `run()` raises `SolverError` on a missing executable,
+   nonzero exit, or timeout; `read_modal` consumes the existing `.pch`/`.unv` text
+   readers only — a `.rst` path raises `SolverError` naming RST as N/A) and
+   `drivers.abaqus.AbaqusInpDriver` (`write_input` = `write_inp`, same availability and
+   `SolverError` conventions, ODB is N/A, results from `.unv`/`.pch` text only). Tests
+   never require an ANSYS or Abaqus install — they stub shell executables exactly like
+   the Round-7 Nastran driver tests.
    Closed binary result dumps (Nastran OP2, ANSYS rst, Abaqus odb) remain out
-   of scope (N/A) — Round 7 changes nothing there: still no OP2. The protocol stays the
-   extension point for third-party binary drivers.
+   of scope (N/A) — Rounds 7–8 change nothing there: still no OP2, no RST, no ODB. The
+   protocol stays the extension point for third-party binary drivers.
    Only a driver may depend on vendor
    formats; results always land as `ModalResult`/`FRFResult`, and a failed external
    run raises `SolverError`.

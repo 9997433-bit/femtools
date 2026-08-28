@@ -256,8 +256,8 @@ implementations; `docs/ACCEPTANCE.md` (owned by R1-F3) elaborates the golden cas
 
 Known distances between the merged code and the state of the art it targets. Status tags in
 `docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4/R6/R7 is merged and tested but may still carry
-one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+
-and N/A rows of the product map,
+one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+,
+R8-wip, and N/A rows of the product map,
 not repeated here.
 
 ### Closed in Round 2
@@ -325,7 +325,8 @@ References are textbooks and journal/conference papers only.
   a linear displacement patch is represented exactly by these formulations, so the
   tolerance is roundoff-only per §9.1. Nodal extrapolation / smoothed recovery
   (Zienkiewicz–Zhu superconvergent patch recovery) is the known upgrade for nodal stress
-  fields and is out of this round's scope.
+  fields and stayed out of Round 7's scope; Round 8 adds plain nodal *averaging* — see
+  §12, which also states why that is deliberately not SPR.
 * **RBE2 rigid constraints by master–slave elimination (`fea.mpc.apply_rbe2` /
   `ConstraintTransform`; the data container `core.model.RBE2` / `FEModel.add_rbe2` is
   already merged).** Multipoint constraints imposed by the transformation (master–slave /
@@ -340,6 +341,73 @@ References are textbooks and journal/conference papers only.
   keeps exactly 6 rigid-body modes, and a rigid offset beam transmits the moment. The
   `RBE2` *card* layout is read from publicly documented card descriptions, like every other
   BDF card femtools parses; no commercial-manual text is used.
+
+## 12. Round 8 targets (in progress) — interpolation constraints, nodal averaging, text drivers
+
+Round 8 (Cycle C's second round) freezes the APIs of `.agent_workspace/REMAINING.md`
+(Round 8 section). At the time of writing none of these kernels imports from this branch —
+every row is tagged **R8-wip** in `docs/PRODUCT_MAP.md` (only the `core.model.RBE3` data
+container is merged). References are public textbooks and journal papers only.
+
+* **RBE3 interpolation constraint (`fea.mpc.apply_rbe3` → the shared
+  `ConstraintTransform`; container `core.model.RBE3` / `FEModel.add_rbe3` already
+  merged).** The constraint *imposition* machinery is the same master–slave /
+  transformation (null-space) method already referenced for RBE2 in §11 — eliminate the
+  dependent DOFs through `u = T q`, reduce `K_r = Tᵀ K T`, `M_r = Tᵀ M T`, keep symmetry,
+  and avoid the eigenvalue pollution of penalty approaches: Cook, R.D., Malkus, D.S.,
+  Plesha, M.E., Witt, R.J., *Concepts and Applications of Finite Element Analysis*,
+  4th ed., Wiley, 2002 (constraint and transformation chapters); Zienkiewicz, O.C.,
+  Taylor, R.L., Zhu, J.Z., *The Finite Element Method: Its Basis and Fundamentals*,
+  6th ed., Elsevier Butterworth-Heinemann, 2005 (multipoint constraints by
+  transformation / master–slave elimination, vs. penalty and Lagrange-multiplier
+  alternatives). What differs from RBE2 is the constraint *content*: the dependent
+  (reference) node's listed components follow the **weighted average** of the
+  independent nodes' displacements, `u_d = Σᵢ wᵢ u_i / Σᵢ wᵢ` (equal weights by
+  default, or `RBE3.weights`) — an interpolation constraint, **not** the RBE2 rigid-weld
+  kinematics `u_d = u_i + θ_i × (x_d − x_i)` of §11, and with no penalty springs. Because
+  the elimination is virtual-work consistent, the force conjugate to the eliminated DOFs
+  redistributes as `f_q = Gᵀ f` (Cook et al., work-equivalent load transformation): a
+  force applied at the dependent node is spread over the independents in proportion to
+  the weights — equal weights give equal translational force shares — and the constraint
+  adds no artificial stiffness paths between the independents, so a free–free assembly
+  keeps exactly 6 rigid-body modes (the Round-8 acceptance gate). `assemble_km` composes
+  `model.rbe3` with `model.rbe2` into one transform; `mpc=False` still disables all MPCs.
+  The `RBE3` *card* layout (refgrid / refc / wt, c, g lists) is read from publicly
+  documented card descriptions, like every other BDF card femtools parses.
+* **Nodal stress averaging (`fea.recover.average_nodal`).** Unweighted direct averaging
+  of the element-centroid stresses of §11 onto incident nodes (each node receives the
+  mean of its `n_adj` adjacent element values, weight `1/n_adj`) — the classical
+  baseline for smoothing the inter-element-discontinuous stress field; smoothing of
+  discontinuous FE functions goes back to Hinton, E., Campbell, J.S., *Local and Global
+  Smoothing of Discontinuous Finite Element Functions Using a Least Squares Method*,
+  IJNME, 8(3), 1974, pp. 461–480, with textbook treatment of nodal averaging in
+  Cook et al. (2002) and Zienkiewicz–Taylor–Zhu (cited above). Acceptance keeps the
+  patch-test discipline of §9.1/§11: on a constant-stress patch every element carries
+  the same centroid value, so the average is exact at every node to roundoff. This is
+  deliberately **not** Zienkiewicz–Zhu superconvergent patch recovery —
+  Zienkiewicz, O.C., Zhu, J.Z., *A Simple Error Estimator and Adaptive Procedure for
+  Practical Engineering Analysis*, IJNME, 24(2), 1987, pp. 337–357 (the ZZ error
+  estimator built on a recovered field), and *The Superconvergent Patch Recovery and A
+  Posteriori Error Estimates. Part 1: The Recovery Technique*, IJNME, 33(7), 1992,
+  pp. 1331–1364 — which fits local polynomial patches to values sampled at the
+  superconvergent (Barlow, §11) points and is the known higher-accuracy upgrade for
+  nodal fields and error estimation; SPR remains out of scope.
+* **ANSYS / Abaqus optional text drivers (`drivers.ansys.AnsysCdbDriver`,
+  `drivers.abaqus.AbaqusInpDriver`).** No new numerical algorithm — concrete adapters on
+  the PEP 544 `SolverDriver` protocol (`docs/ARCHITECTURE.md` §10), built exclusively on
+  the public **text** translators: `write_cdb` / `write_inp` for input, the existing
+  `.pch`/`.unv` text readers for modal results. Binary results stay N/A: a `.rst` or
+  `.odb` path raises `SolverError` naming the format, exactly as OP2 is handled for
+  Nastran; no proprietary binary parser exists in the codebase and tests never require
+  a vendor install.
+* **Remaining Round-8 names introduce no new algorithms.** `dynamics.frf.dump_frf` /
+  `load_frf` are npz persistence for `FRFResult` (bit-identical `H`/`freq_hz` round trip,
+  analogous to the R7 `dump_cms`); `correlation.dofmap.mapped_mode_matrix` is row
+  selection of FE mode shapes at the `map_nearest_nodes` ids of §1;
+  `viz.plots.plot_stress` is presentation of §11 recovered stresses;
+  `updating.updater.update_from_static` composes the §3 sensitivity updating with the
+  R7 static-displacement responses. Each is covered by the references already cited for
+  the machinery it wraps.
 
 ## Non-infringement note
 
