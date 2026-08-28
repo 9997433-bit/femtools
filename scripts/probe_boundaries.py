@@ -1021,6 +1021,281 @@ def probe_mapped_mode_matrix() -> dict[str, Any]:
     }
 
 
+def probe_apply_mpc() -> dict[str, Any]:
+    from femtools.core.model import FEModel
+    from femtools.fea.mpc import apply_mpc
+
+    model = FEModel(name="composed-mpc-boundary-probe")
+    for node_id, xyz in enumerate(
+        ((0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (0.0, 2.0, 0.0), (1.0, 1.0, 0.0)),
+        start=1,
+    ):
+        model.add_node(node_id, xyz)
+    model.add_rbe2(id=1, independent=1, dependents=(2,), components=(1,))
+    model.add_rbe3(
+        id=2,
+        dependent=4,
+        independents=(2, 3),
+        components=(1,),
+        independent_components=(1,),
+        weights=(1.0, 3.0),
+    )
+
+    transform = apply_mpc(model)
+    dofs = model.dof_map()
+    displacement = np.zeros(model.ndof)
+    displacement[dofs[(1, 0)]] = 2.0
+    displacement[dofs[(3, 0)]] = 10.0
+    constrained = np.asarray(transform.to_full(displacement), dtype=float)
+    expected = np.array([2.0, 8.0])
+    actual = constrained[[dofs[(2, 0)], dofs[(4, 0)]]]
+    error = float(np.max(np.abs(actual - expected)))
+    if transform.n_dependent != 2 or error > 1.0e-14:
+        raise AssertionError(
+            f"composed RBE2/RBE3 motion is {actual.tolist()}, expected {expected.tolist()}"
+        )
+    if not apply_mpc(model, rbe2=(), rbe3=()).is_identity:
+        raise AssertionError("apply_mpc with both MPC tables disabled is not an identity")
+    return {
+        "dependent_dofs": transform.n_dependent,
+        "dependent_motion": actual.tolist(),
+        "max_motion_error": error,
+    }
+
+
+def probe_static_stress_response() -> dict[str, Any]:
+    from femtools.updating.responses import static_stress_response
+    from femtools.updating.updater import update_from_static
+
+    true_modulus = 210.0e9
+    parameters = [
+        {
+            "type": "material",
+            "id": 1,
+            "name": "E",
+            "lower": 0.5,
+            "upper": 1.5,
+        }
+    ]
+    enforced = {(2, 0): 1.0e-3}
+
+    truth = _bar_model("static-stress-response-boundary-probe")
+    truth.add_spc(node_id=2, mask=(False, True, True, True, True, True))
+    measured = np.asarray(
+        static_stress_response(
+            truth,
+            parameters,
+            component="xx",
+            solver_kwargs={"enforced": enforced},
+        )(np.array([1.0])),
+        dtype=float,
+    ).reshape(-1)
+    expected_stress = true_modulus * enforced[(2, 0)]
+    stress_error = abs(float(measured[0]) - expected_stress) / expected_stress
+    if measured.shape != (1,) or stress_error > 1.0e-10:
+        raise AssertionError(
+            f"displacement-driven BAR2 stress error is {stress_error:.3e}"
+        )
+
+    wrong = _bar_model("static-stress-update-boundary-probe")
+    wrong.add_spc(node_id=2, mask=(False, True, True, True, True, True))
+    wrong.materials[1].E = 1.1 * true_modulus
+    response = static_stress_response(
+        wrong,
+        parameters,
+        component="xx",
+        solver_kwargs={"enforced": enforced},
+    )
+    result = update_from_static(
+        wrong,
+        measured,
+        parameters,
+        response=response,
+        tol=1.0e-12,
+    )
+    recovered = float(np.asarray(result.x, dtype=float).reshape(-1)[0])
+    expected_multiplier = 1.0 / 1.1
+    recovery_error = abs(recovered - expected_multiplier) / expected_multiplier
+    if recovery_error > 1.0e-9:
+        raise AssertionError(
+            f"stress-residual Young's-modulus recovery error is {recovery_error:.3e}"
+        )
+    return {
+        "stress_pa": float(measured[0]),
+        "stress_relative_error": stress_error,
+        "recovered_multiplier": recovered,
+        "recovery_relative_error": recovery_error,
+    }
+
+
+def probe_dump_psd() -> dict[str, Any]:
+    from femtools.dynamics.random import PSDResult, dump_psd, load_psd
+
+    frequency = np.array([0.0, 2.5, 17.0, 64.0])
+    spectra = np.arange(1.0, 9.0).reshape(2, 4) * 1.0e-6
+    rms = np.sqrt(
+        np.asarray(
+            (getattr(np, "trapezoid", None) or np.trapz)(
+                spectra,
+                x=frequency,
+                axis=-1,
+            )
+        )
+    )
+    source = PSDResult(
+        psd=spectra,
+        freq_hz=frequency,
+        rms=rms,
+        outputs=np.array([2, 7]),
+        inputs=np.array([1]),
+        response="accelerance",
+        meta={"probe": "boundary"},
+    )
+    with TemporaryDirectory(prefix="femtools-psd-dump-probe-") as tmp:
+        requested = Path(tmp) / "response"
+        returned = dump_psd(source, requested)
+        archive = Path(returned) if returned is not None else requested.with_suffix(".npz")
+        loaded = load_psd(archive)
+        size = archive.stat().st_size
+
+    spectra_equal = bool(np.array_equal(np.asarray(loaded.psd), spectra))
+    frequency_equal = bool(np.array_equal(np.asarray(loaded.freq_hz), frequency))
+    if not spectra_equal or not frequency_equal:
+        raise AssertionError(
+            "PSD npz is not bit-identical "
+            f"(psd={spectra_equal}, freq_hz={frequency_equal})"
+        )
+    return {
+        "shape": list(np.asarray(loaded.psd).shape),
+        "bytes": size,
+        "psd_bit_identical": spectra_equal,
+        "frequency_bit_identical": frequency_equal,
+    }
+
+
+def probe_mapped_mac() -> dict[str, Any]:
+    from femtools.correlation.dofmap import mapped_mac
+
+    model = _solid_cube_model("mapped-mac-boundary-probe")
+    xyz = np.vstack([model.nodes[node_id].xyz for node_id in model.node_ids()])
+    translated = xyz + np.array([0.125, -0.25, 0.0625])
+    test_modes = np.column_stack(
+        (
+            np.linspace(1.0, 2.0, len(xyz)),
+            np.array([1.0, -1.0] * (len(xyz) // 2)),
+        )
+    )
+    fe_modes = np.zeros((model.ndof, test_modes.shape[1]))
+    dof_map = model.dof_map()
+    for row, node_id in enumerate(model.node_ids()):
+        fe_modes[dof_map[(node_id, 0)], :] = test_modes[row]
+
+    result = mapped_mac(
+        test_modes,
+        translated,
+        fe_modes,
+        model,
+        dof_map=dof_map,
+        dofs=("x",),
+    )
+    matrix = np.asarray(getattr(result, "mac", result), dtype=float)
+    expected_shape = (test_modes.shape[1], test_modes.shape[1])
+    diagonal_error = float(np.max(np.abs(np.diag(matrix) - 1.0)))
+    if matrix.shape != expected_shape or diagonal_error > 1.0e-12:
+        raise AssertionError(
+            f"translated-block mapped MAC has shape {matrix.shape} and "
+            f"diagonal error {diagonal_error:.3e}"
+        )
+    return {
+        "shape": list(matrix.shape),
+        "max_diagonal_error": diagonal_error,
+    }
+
+
+def probe_nastran_static() -> dict[str, Any]:
+    from inspect import signature
+
+    from femtools.drivers.nastran import NastranPunchDriver
+
+    driver = NastranPunchDriver(executable="__femtools_boundary_probe_missing_nastran__")
+    read_static = getattr(driver, "read_static", None)
+    if not callable(read_static):
+        raise ImportError("NastranPunchDriver.read_static is not available")
+
+    write_static = getattr(driver, "write_static_input", None)
+    if not callable(write_static):
+        write_static = getattr(driver, "write_static", None)
+    supports_sol = "sol" in signature(driver.write_input).parameters
+    if not callable(write_static) and not supports_sol:
+        raise ImportError(
+            "NastranPunchDriver has neither a static writer nor write_input(..., sol=101)"
+        )
+
+    punch_text = """\
+$TITLE = FEMTOOLS STATIC BOUNDARY PROBE
+$SUBTITLE = SOL 101
+$LABEL =
+$DISPLACEMENTS
+$REAL OUTPUT
+$SUBCASE ID = 1
+       1       G      1.000000E-04      2.000000E-04      3.000000E-04
+-CONT-               4.000000E-04      5.000000E-04      6.000000E-04
+       2       G     -1.500000E-03      2.500000E-03     -3.500000E-03
+-CONT-               4.500000E-03     -5.500000E-03      6.500000E-03
+"""
+    with TemporaryDirectory(prefix="femtools-nastran-static-probe-") as tmp:
+        directory = Path(tmp)
+        if callable(write_static):
+            deck = Path(write_static(_bar_model("nastran-static-probe"), directory))
+        else:
+            deck = Path(
+                driver.write_input(_bar_model("nastran-static-probe"), directory, sol=101)
+            )
+        text = deck.read_text(encoding="utf-8").upper()
+        if "SOL 101" not in text or "DISPLACEMENT(PUNCH)" not in text:
+            raise AssertionError("Nastran static deck lacks SOL 101 punch requests")
+
+        punch = directory / "static.pch"
+        punch.write_text(punch_text, encoding="utf-8")
+        loaded = read_static(punch)
+
+    values = getattr(loaded, "u", getattr(loaded, "displacements", None))
+    if values is None:
+        raise AssertionError("Nastran static result has neither u nor displacements")
+    displacement = np.asarray(values, dtype=float).reshape(-1)
+    expected = np.array(
+        [
+            1.0e-4,
+            2.0e-4,
+            3.0e-4,
+            4.0e-4,
+            5.0e-4,
+            6.0e-4,
+            -1.5e-3,
+            2.5e-3,
+            -3.5e-3,
+            4.5e-3,
+            -5.5e-3,
+            6.5e-3,
+        ]
+    )
+    error = (
+        float(np.max(np.abs(displacement - expected)))
+        if displacement.shape == expected.shape
+        else float("inf")
+    )
+    if error > 1.0e-15:
+        raise AssertionError(
+            f"Nastran static punch displacement shape/error is "
+            f"{displacement.shape}/{error:.3e}"
+        )
+    return {
+        "deck_suffix": deck.suffix,
+        "displacement_dofs": int(displacement.size),
+        "max_displacement_error": error,
+    }
+
+
 PROBES: tuple[tuple[str, Callable[[], dict[str, Any]]], ...] = (
     ("core_model", probe_core_model),
     ("mac", probe_mac),
@@ -1049,6 +1324,11 @@ PROBES: tuple[tuple[str, Callable[[], dict[str, Any]]], ...] = (
     ("plot_stress", probe_plot_stress),
     ("update_from_static", probe_update_from_static),
     ("mapped_mode_matrix", probe_mapped_mode_matrix),
+    ("apply_mpc", probe_apply_mpc),
+    ("static_stress_response", probe_static_stress_response),
+    ("dump_psd", probe_dump_psd),
+    ("mapped_mac", probe_mapped_mac),
+    ("nastran_static", probe_nastran_static),
 )
 
 
