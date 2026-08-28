@@ -455,6 +455,114 @@ def probe_recover_stress() -> dict[str, Any]:
     }
 
 
+def probe_apply_rbe3() -> dict[str, Any]:
+    from femtools.core.model import FEModel
+    from femtools.fea.mpc import apply_rbe3
+
+    model = FEModel(name="rbe3-boundary-probe")
+    for node_id, xyz in enumerate(
+        ((0.0, 0.0, 0.0), (2.0, 0.0, 0.0), (0.0, 3.0, 0.0), (0.5, 0.5, 0.0)),
+        start=1,
+    ):
+        model.add_node(node_id, xyz)
+    weights = np.array([1.0, 2.0, 3.0])
+    model.add_rbe3(
+        id=1,
+        dependent=4,
+        independents=(1, 2, 3),
+        components=(1,),
+        independent_components=(1,),
+        weights=weights,
+    )
+
+    transform = apply_rbe3(model)
+    dofs = model.dof_map()
+    independent_values = np.array([1.0, 4.0, -2.0])
+    displacement = np.zeros(model.ndof)
+    for node_id, value in zip((1, 2, 3), independent_values, strict=True):
+        displacement[dofs[(node_id, 0)]] = value
+    displacement[dofs[(4, 0)]] = 99.0
+    constrained = np.asarray(transform.to_full(displacement), dtype=float)
+
+    normalized = weights / weights.sum()
+    expected_motion = float(normalized @ independent_values)
+    motion_error = abs(float(constrained[dofs[(4, 0)]]) - expected_motion)
+    if motion_error > 1.0e-14:
+        raise AssertionError(f"RBE3 weighted-average motion error is {motion_error:.3e}")
+
+    dependent_force = np.zeros(model.ndof)
+    dependent_force[dofs[(4, 0)]] = 1.0
+    distributed = np.asarray(transform.to_independent(dependent_force), dtype=float)
+    shares = np.array([distributed[dofs[(node_id, 0)]] for node_id in (1, 2, 3)])
+    load_error = float(np.max(np.abs(shares - normalized)))
+    if load_error > 1.0e-14 or distributed[dofs[(4, 0)]] != 0.0:
+        raise AssertionError(f"RBE3 virtual-work load distribution error is {load_error:.3e}")
+    return {
+        "weighted_motion": float(constrained[dofs[(4, 0)]]),
+        "force_shares": shares.tolist(),
+        "motion_error": motion_error,
+        "load_error": load_error,
+    }
+
+
+def _nodal_stress_rows(result: Any) -> tuple[list[Any], np.ndarray]:
+    values = result
+    for name in ("stress", "stresses", "values", "data"):
+        if hasattr(result, name):
+            values = getattr(result, name)
+            break
+    if isinstance(values, Mapping):
+        node_ids = sorted(values)
+        rows = np.asarray([values[node_id] for node_id in node_ids], dtype=float)
+        return node_ids, np.atleast_2d(rows)
+
+    node_ids = None
+    for name in ("node_ids", "point_ids", "ids", "element_ids"):
+        if hasattr(result, name):
+            node_ids = list(getattr(result, name))
+            break
+    if node_ids is None:
+        raise AssertionError("nodal stress result has no node identifiers")
+    rows = np.asarray(values, dtype=float)
+    if rows.ndim != 2 or rows.shape[0] != len(node_ids):
+        raise AssertionError(
+            f"nodal stress values have shape {rows.shape} for {len(node_ids)} node ids"
+        )
+    return node_ids, rows
+
+
+def probe_average_nodal() -> dict[str, Any]:
+    from femtools.fea.recover import average_nodal, recover_stress
+
+    model = _bar_model("nodal-average-boundary-probe")
+    model.add_node(id=3, xyz=(2.0, 0.0, 0.0))
+    model.add_element(id=2, type="BAR2", nodes=(2, 3), property_id=1)
+    strain = 1.0e-3
+    displacement = np.zeros(model.ndof)
+    dofs = model.dof_map()
+    displacement[dofs[(2, 0)]] = strain
+    displacement[dofs[(3, 0)]] = 2.0 * strain
+
+    centroid = recover_stress(model, displacement)
+    nodal = average_nodal(centroid, model)
+    node_ids, stresses = _nodal_stress_rows(nodal)
+    expected_ids = [1, 2, 3]
+    if node_ids != expected_ids:
+        raise AssertionError(
+            f"nodal averaging returned node ids {node_ids}, expected {expected_ids}"
+        )
+    expected = np.zeros((3, 6))
+    expected[:, 0] = 210.0e6
+    error = float(np.max(np.abs(stresses - expected)))
+    if stresses.shape != expected.shape or error > 1.0e-6:
+        raise AssertionError(f"constant-stress nodal averaging error is {error:.3e} Pa")
+    return {
+        "node_ids": node_ids,
+        "shape": list(stresses.shape),
+        "max_patch_error_pa": error,
+    }
+
+
 def _probe_hex8_writer(
     writer: Callable[[Any, Path], Any],
     reader: Callable[[Path], Any],
@@ -660,6 +768,259 @@ def probe_nastran_punch_driver() -> dict[str, Any]:
     }
 
 
+def _probe_text_solver_driver(
+    driver: Any,
+    *,
+    deck_suffix: str,
+    deck_markers: tuple[str, ...],
+    binary_suffix: str,
+) -> dict[str, Any]:
+    from femtools.core.errors import SolverError
+    from femtools.core.results import ModalResult
+    from femtools.drivers.base import SolverDriver
+    from femtools.io.pch import write_pch
+
+    if not isinstance(driver, SolverDriver):
+        raise AssertionError(f"{type(driver).__name__} does not satisfy SolverDriver")
+    if driver.is_available():
+        raise AssertionError(f"unexpected executable found for {driver.executable!r}")
+
+    with TemporaryDirectory(prefix=f"femtools-{driver.name}-probe-") as tmp:
+        directory = Path(tmp)
+        deck = Path(driver.write_input(_bar_model(f"{driver.name}-probe"), directory))
+        if deck.suffix.lower() != deck_suffix:
+            raise AssertionError(f"{type(driver).__name__} wrote {deck.suffix}, not {deck_suffix}")
+        text = deck.read_text(encoding="utf-8").upper()
+        missing = [marker for marker in deck_markers if marker not in text]
+        if missing:
+            raise AssertionError(f"{deck_suffix} driver deck is missing records {missing}")
+        try:
+            driver.run(deck, timeout=1.0)
+        except SolverError:
+            pass
+        else:
+            raise AssertionError(f"missing {driver.name} executable did not raise SolverError")
+
+        frequency_hz = 3.0
+        eigenvalue = (2.0 * np.pi * frequency_hz) ** 2
+        modal = ModalResult(
+            freq_hz=np.array([frequency_hz]),
+            eigenvalues=np.array([eigenvalue]),
+            modes=np.array([[1.0], [0.0], [0.0], [0.0], [0.0], [0.0]]),
+            generalized_mass=np.ones(1),
+            dof_index=tuple((1, dof) for dof in range(6)),
+        )
+        punch = directory / "mode.pch"
+        write_pch(punch, modal)
+        loaded = driver.read_modal(punch)
+        loaded_frequency = np.asarray(loaded.freq_hz, dtype=float).reshape(-1)
+        frequency_error = float(np.max(np.abs(loaded_frequency - frequency_hz)))
+        if loaded_frequency.shape != (1,) or frequency_error > 1.0e-8:
+            raise AssertionError(
+                f"{type(driver).__name__} text-modal frequency error is {frequency_error:.3e}"
+            )
+
+        binary = directory / f"mode{binary_suffix}"
+        binary.write_bytes(b"femtools boundary probe")
+        try:
+            driver.read_modal(binary)
+        except SolverError as exc:
+            if binary_suffix[1:].upper() not in str(exc).upper():
+                raise AssertionError(
+                    f"{type(driver).__name__} binary rejection did not name "
+                    f"{binary_suffix.upper()}"
+                ) from exc
+        else:
+            raise AssertionError(
+                f"{type(driver).__name__} accepted unsupported {binary_suffix.upper()} results"
+            )
+
+    return {
+        "name": driver.name,
+        "deck_suffix": deck_suffix,
+        "text_frequency_error": frequency_error,
+        "binary_rejected": binary_suffix[1:].upper(),
+        "missing_executable_raises": "SolverError",
+    }
+
+
+def probe_ansys_cdb_driver() -> dict[str, Any]:
+    from femtools.drivers.ansys import AnsysCdbDriver
+
+    return _probe_text_solver_driver(
+        AnsysCdbDriver(executable="__femtools_boundary_probe_missing_ansys__"),
+        deck_suffix=".cdb",
+        deck_markers=("NBLOCK", "EBLOCK"),
+        binary_suffix=".rst",
+    )
+
+
+def probe_abaqus_inp_driver() -> dict[str, Any]:
+    from femtools.drivers.abaqus import AbaqusInpDriver
+
+    return _probe_text_solver_driver(
+        AbaqusInpDriver(executable="__femtools_boundary_probe_missing_abaqus__"),
+        deck_suffix=".inp",
+        deck_markers=("*NODE", "*ELEMENT"),
+        binary_suffix=".odb",
+    )
+
+
+def probe_dump_frf() -> dict[str, Any]:
+    from femtools.dynamics.frf import FRFResult
+
+    try:
+        from femtools.dynamics.frf import dump_frf, load_frf
+    except ImportError:
+        from femtools.dynamics.superelement import dump_frf, load_frf
+
+    frequency = np.array([0.0, 1.25, 9.5, 80.0])
+    real = np.arange(24, dtype=float).reshape(2, 3, 4)
+    response = FRFResult(
+        H=real + 1j * (real[::-1] + 0.5),
+        freq_hz=frequency,
+        outputs=np.array([2, 7]),
+        inputs=np.array([1, 4, 9]),
+        response="mobility",
+        method="boundary-probe",
+    )
+    with TemporaryDirectory(prefix="femtools-frf-dump-probe-") as tmp:
+        requested = Path(tmp) / "response"
+        returned = dump_frf(response, requested)
+        archive = Path(returned) if returned is not None else requested.with_suffix(".npz")
+        loaded = load_frf(archive)
+        size = archive.stat().st_size
+
+    loaded_response = getattr(loaded, "H", getattr(loaded, "h_complex", None))
+    if loaded_response is None:
+        raise AssertionError("loaded FRF has neither H nor h_complex data")
+    h_equal = bool(np.array_equal(np.asarray(loaded_response), response.H))
+    frequency_equal = bool(np.array_equal(np.asarray(loaded.freq_hz), frequency))
+    if not h_equal or not frequency_equal:
+        raise AssertionError(
+            f"FRF npz is not bit-identical (H={h_equal}, freq_hz={frequency_equal})"
+        )
+    return {
+        "shape": list(np.asarray(loaded_response).shape),
+        "bytes": size,
+        "H_bit_identical": h_equal,
+        "frequency_bit_identical": frequency_equal,
+    }
+
+
+def probe_plot_stress() -> dict[str, Any]:
+    from femtools.fea.recover import recover_stress
+    from femtools.viz.plots import plot_stress
+
+    model = _solid_cube_model("plot-stress-boundary-probe")
+    displacement = np.zeros(model.ndof)
+    dofs = model.dof_map()
+    for node_id, node in model.nodes.items():
+        displacement[dofs[(node_id, 0)]] = 1.0e-4 * float(node.xyz[0])
+    stress = recover_stress(model, displacement)
+
+    with TemporaryDirectory(prefix="femtools-plot-stress-probe-") as tmp:
+        image = Path(tmp) / "stress.png"
+        figure = plot_stress(model, stress, outfile=image)
+        size = image.stat().st_size
+        axes = list(getattr(figure, "axes", ()))
+        color_values = [
+            np.asarray(collection.get_array())
+            for axis in axes
+            for collection in axis.collections
+            if collection.get_array() is not None
+        ]
+        figure.clear()
+
+    if size <= 0 or not axes:
+        raise AssertionError("plot_stress did not return a non-empty matplotlib figure")
+    if not color_values or not all(np.all(np.isfinite(values)) for values in color_values):
+        raise AssertionError("plot_stress produced no finite stress color data")
+    return {
+        "image_bytes": size,
+        "axes": len(axes),
+        "colored_artists": len(color_values),
+        "max_von_mises": float(np.max(stress.von_mises)),
+    }
+
+
+def probe_update_from_static() -> dict[str, Any]:
+    from femtools.updating.updater import update_from_static
+
+    true_modulus = 210.0e9
+    model = _bar_model("static-update-boundary-probe")
+    model.materials[1].E = 1.1 * true_modulus
+    model.add_spc(node_id=2, mask=(False, True, True, True, True, True))
+    model.add_load(node_id=2, force=(1.0, 0.0, 0.0))
+    measured = np.array([1.0 / (true_modulus * model.properties[1].A)])
+    parameters = [
+        {
+            "type": "material",
+            "id": 1,
+            "name": "E",
+            "lower": 0.5,
+            "upper": 1.5,
+        }
+    ]
+    result = update_from_static(
+        model,
+        measured,
+        parameters=parameters,
+        dofs=[(2, "ux")],
+        bounds=(0.5, 1.5),
+        tol=1.0e-12,
+    )
+    values = np.asarray(getattr(result, "x", getattr(result, "values", result)), dtype=float)
+    expected = 1.0 / 1.1
+    relative_error = abs(float(values[0]) - expected) / expected
+    if values.shape != (1,) or relative_error > 1.0e-8:
+        raise AssertionError(f"static Young's-modulus recovery error is {relative_error:.3e}")
+    return {
+        "recovered_multiplier": float(values[0]),
+        "expected_multiplier": expected,
+        "relative_error": relative_error,
+    }
+
+
+def probe_mapped_mode_matrix() -> dict[str, Any]:
+    from femtools.correlation.dofmap import map_nearest_nodes, mapped_mode_matrix
+    from femtools.correlation.mac import mac_matrix
+
+    model = _solid_cube_model("mapped-mode-boundary-probe")
+    xyz = np.vstack([model.nodes[node_id].xyz for node_id in model.node_ids()])
+    translated = xyz + np.array([0.125, -0.25, 0.0625])
+    fe_ids, _distances = map_nearest_nodes(translated, model)
+    fe_ids = np.asarray(fe_ids, dtype=int)
+    nodal_modes = np.column_stack(
+        (
+            np.linspace(1.0, 2.0, len(fe_ids)),
+            np.array([1.0, -1.0] * (len(fe_ids) // 2)),
+        )
+    )
+    modes = np.zeros((model.ndof, nodal_modes.shape[1]))
+    dof_map = model.dof_map()
+    for row, node_id in enumerate(model.node_ids()):
+        modes[dof_map[(node_id, 0)], :] = nodal_modes[row]
+    mapped = np.asarray(
+        mapped_mode_matrix(modes, fe_ids, dof_map=dof_map, dofs=("x",))
+    )
+    expected = nodal_modes[fe_ids - 1]
+    if mapped.shape != expected.shape or not np.array_equal(mapped, expected):
+        raise AssertionError(
+            f"mapped mode matrix has shape {mapped.shape}; expected translated-cube "
+            f"selection {expected.shape}"
+        )
+    mac = np.asarray(mac_matrix(mapped, expected), dtype=float)
+    diagonal_error = float(np.max(np.abs(np.diag(mac) - 1.0)))
+    if diagonal_error > 1.0e-12:
+        raise AssertionError(f"mapped-mode MAC diagonal error is {diagonal_error:.3e}")
+    return {
+        "shape": list(mapped.shape),
+        "node_ids": fe_ids.tolist(),
+        "max_mac_diagonal_error": diagonal_error,
+    }
+
+
 PROBES: tuple[tuple[str, Callable[[], dict[str, Any]]], ...] = (
     ("core_model", probe_core_model),
     ("mac", probe_mac),
@@ -675,11 +1036,19 @@ PROBES: tuple[tuple[str, Callable[[], dict[str, Any]]], ...] = (
     ("parameter_covariance", probe_parameter_covariance),
     ("modal_strain_energy", probe_modal_strain_energy),
     ("recover_stress", probe_recover_stress),
+    ("apply_rbe3", probe_apply_rbe3),
+    ("average_nodal", probe_average_nodal),
     ("write_cdb", probe_write_cdb),
     ("write_k", probe_write_k),
     ("map_nearest_nodes", probe_map_nearest_nodes),
     ("topometry_optimize", probe_topometry_optimize),
     ("nastran_punch_driver", probe_nastran_punch_driver),
+    ("ansys_cdb_driver", probe_ansys_cdb_driver),
+    ("abaqus_inp_driver", probe_abaqus_inp_driver),
+    ("dump_frf", probe_dump_frf),
+    ("plot_stress", probe_plot_stress),
+    ("update_from_static", probe_update_from_static),
+    ("mapped_mode_matrix", probe_mapped_mode_matrix),
 )
 
 
