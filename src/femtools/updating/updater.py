@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from typing import Any
 
 import numpy as np
@@ -37,10 +37,15 @@ from .parameters import (
     snapshot_baseline,
     unwrap_model,
 )
-from .responses import ResponseSpec, modal_response_function
+from .responses import (
+    ResponseSpec,
+    _resolve_response_dofs,
+    modal_response_function,
+    static_displacement_response,
+)
 from .sensitivity import SensitivityResult, sensitivity_matrix
 
-__all__ = ["UpdateResult", "update_model", "UpdateOptions"]
+__all__ = ["UpdateResult", "update_model", "UpdateOptions", "update_from_static"]
 
 
 @dataclass
@@ -737,6 +742,191 @@ def update_model(
         result.history[-1].setdefault("target_names", target_names)
     if weight_kind:
         result.history[0].setdefault("weights", weight_kind)
+    return result
+
+
+# ----------------------------------------------------------------------
+# Static updating
+# ----------------------------------------------------------------------
+
+#: ``measured`` keys naming the measured displacement vector itself.
+_STATIC_VALUE_KEYS = (
+    "u", "displacement", "displacements", "deflection", "deflections",
+    "values", "targets", "measured",
+)
+#: ``measured`` keys naming the DOFs those values were taken at.
+_STATIC_DOF_KEYS = ("dofs", "dof", "channels", "sensors", "locations")
+
+#: Defaults :func:`update_from_static` applies on top of :class:`UpdateOptions`.
+#: A static residual is smooth and cheap, so the loop is run to round-off
+#: instead of stopping at the 1e-6 parameter change that suits a modal one.
+_STATIC_OPTION_DEFAULTS: dict[str, Any] = {
+    "tol": 1.0e-14,
+    "residual_tol": 0.0,
+    "max_iter": 60,
+}
+
+
+def _default_modulus_parameter() -> ParameterSet:
+    """The one parameter a static test is nearly always run to pin down."""
+    return ParameterSet(
+        [Parameter(name="E", kind="E", value=1.0, relative=True, lower=0.1, upper=10.0)]
+    )
+
+
+def _static_targets(measured: Any, dofs: Any) -> tuple[np.ndarray, Any]:
+    """Split a ``measured=`` argument into ``(target vector, measurement DOFs)``."""
+    if not isinstance(measured, Mapping):
+        return np.atleast_1d(np.asarray(measured, dtype=float)).ravel(), dofs
+
+    named = {str(k).strip().lower(): k for k in measured if isinstance(k, str)}
+    value_key = next((named[n] for n in _STATIC_VALUE_KEYS if n in named), None)
+    if value_key is not None:
+        dof_key = next((named[n] for n in _STATIC_DOF_KEYS if n in named), None)
+        extra = set(measured) - {value_key} - ({dof_key} if dof_key else set())
+        if extra:
+            raise ValueError(
+                f"unexpected keys in `measured`: {sorted(map(str, extra))}; expected "
+                f"one of {list(_STATIC_VALUE_KEYS)} plus one of {list(_STATIC_DOF_KEYS)}"
+            )
+        values = np.atleast_1d(np.asarray(measured[value_key], dtype=float)).ravel()
+        if dof_key is not None:
+            if dofs is not None:
+                raise ValueError("pass the measurement DOFs either in `measured` or as `dofs`")
+            return values, measured[dof_key]
+        return values, dofs
+
+    # ``{(node, component): value}`` or ``{node: {component: value}}``.
+    pairs: list[Any] = []
+    values_list: list[float] = []
+    for key, value in measured.items():
+        if isinstance(value, Mapping):
+            for comp, v in value.items():
+                pairs.append((key, comp))
+                values_list.append(float(v))
+        elif isinstance(key, tuple) and len(key) == 2:
+            pairs.append(key)
+            values_list.append(float(value))
+        else:
+            raise ValueError(
+                f"cannot interpret measured entry {key!r}: {value!r}; expected "
+                "{(node_id, component): value} or {node_id: {component: value}}"
+            )
+    if dofs is not None:
+        raise ValueError("`measured` already names its DOFs, so `dofs` is contradictory")
+    return np.asarray(values_list, dtype=float), pairs
+
+
+def update_from_static(
+    model: Any,
+    measured: Any,
+    parameters: Any = None,
+    dofs: Any = None,
+    *,
+    loads: Any = None,
+    solver: Callable[..., Any] | None = None,
+    solver_kwargs: dict[str, Any] | None = None,
+    scale: Any = None,
+    response: Callable[[np.ndarray], np.ndarray] | None = None,
+    **kwargs: Any,
+) -> UpdateResult:
+    """Update ``model`` against a **static** test (Friswell & Mottershead, ch. 3).
+
+    The static sibling of the modal :func:`update_model` call: it builds the
+    displacement response with :func:`static_displacement_response` and hands it
+    to the same damped Gauss--Newton loop, so a proof load with a handful of
+    dial gauges updates a model exactly like a modal survey does.  A 10 % wrong
+    Young's modulus comes back from a single measured tip deflection to the same
+    order as the modal path.
+
+    Parameters
+    ----------
+    model:
+        :class:`femtools.core.model.FEModel` (or a project wrapper).  It is
+        deep-copied for every evaluation and never mutated; the updated copy
+        comes back as :attr:`UpdateResult.model`.
+    measured:
+        The measured deflections.  Either a plain vector paired with ``dofs``,
+        or a self-describing mapping::
+
+            {(tip, "uz"): -1.234e-3, (mid, "uz"): -4.5e-4}
+            {tip: {"uz": -1.234e-3}}
+            {"u": [-1.234e-3, -4.5e-4], "dofs": [(tip, "uz"), (mid, "uz")]}
+
+    parameters:
+        Parameter specification -- see :func:`femtools.updating.as_parameters`.
+        ``None`` (default) updates one relative Young's modulus multiplier over
+        every material, starting at 1.0 within ``(0.1, 10)``.
+    dofs:
+        Measurement DOFs, in any spelling
+        :func:`static_displacement_response` accepts.  ``None`` measures
+        wherever the load is applied, i.e. the drive points of the test.
+    loads, solver, solver_kwargs, scale:
+        Passed straight to :func:`static_displacement_response`.
+    response:
+        Custom response callable to use instead of the displacement one — e.g.
+        the output of :func:`femtools.updating.static_stress_response`, which
+        makes this a stress/strain-gauge update.  ``dofs``, ``loads``,
+        ``solver`` and ``scale`` are then ignored.
+    **kwargs:
+        Everything :func:`update_model` accepts (``weights``, ``bounds``,
+        ``p0``, ``method``, ``max_iter``, ``tol``, ...).
+
+    Returns
+    -------
+    UpdateResult
+        With :attr:`UpdateResult.model` set to the updated model copy.
+
+    Examples
+    --------
+    ::
+
+        from femtools.updating.updater import update_from_static
+
+        result = update_from_static(model, {(tip, "uz"): u_measured})
+        assert abs(result["E"] - 1.0 / 1.1) < 1.0e-9
+    """
+    fea_model = unwrap_model(model)
+    pset = _default_modulus_parameter() if parameters is None else as_parameters(parameters)
+
+    targets, measured_dofs = _static_targets(measured, dofs)
+    if targets.size == 0:
+        raise ValueError("`measured` is empty; a static update needs at least one deflection")
+
+    if response is None:
+        n_dofs = len(_resolve_response_dofs(fea_model, measured_dofs, loads))
+        if n_dofs != targets.size:
+            raise ValueError(
+                f"{targets.size} measured values were given but {n_dofs} measurement "
+                "DOFs were resolved"
+            )
+        fun = static_displacement_response(
+            fea_model,
+            pset,
+            measured_dofs,
+            loads=loads,
+            solver=solver,
+            solver_kwargs=solver_kwargs,
+            scale=scale,
+        )
+    else:
+        fun = response
+
+    opts = kwargs.pop("options", None)
+    if opts is None:
+        names = {f.name for f in fields(UpdateOptions)}
+        chosen = {name: kwargs.pop(name) for name in list(kwargs) if name in names}
+        opts = UpdateOptions(**{**_STATIC_OPTION_DEFAULTS, **chosen})
+
+    result = update_model(
+        fea_model, pset, targets, response=fun, options=opts, **kwargs
+    )
+    # `update_model` only writes the model back when it drove the FEA itself;
+    # here the response callable did, so the updated copy is built here.
+    result.model = apply_parameters(
+        fea_model, pset, result.x, copy_model=True,
+        baseline=snapshot_baseline(fea_model, pset),
+    )
     return result
 
 
