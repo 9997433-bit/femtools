@@ -257,7 +257,8 @@ implementations; `docs/ACCEPTANCE.md` (owned by R1-F3) elaborates the golden cas
 Known distances between the merged code and the state of the art it targets. Status tags in
 `docs/PRODUCT_MAP.md` point here; a row tagged R1/R2/R4/R6/R7/R8 is merged and tested but may still carry
 one of these caveats. Capabilities that are absent (rather than imperfect) are the R5+
-and N/A rows of the product map, not repeated here.
+and N/A rows of the product map, not repeated here; the in-flight (not merged) Round-9
+rows are tagged R9-wip there and covered in §13.
 
 ### Closed in Round 2
 
@@ -406,6 +407,55 @@ are public textbooks and journal papers only.
   `updating.updater.update_from_static` composes the §3 sensitivity updating with the
   R7 static-displacement responses. Each is covered by the references already cited for
   the machinery it wraps.
+
+## 13. Round 9 (in flight — PRODUCT_MAP tag R9-wip): close-out promotions, persistence, mapped MAC, SOL 101 text punch
+
+Round 9 (Cycle C's third and closing round) is in progress on this tree; its rows are
+tagged **R9-wip** in `docs/PRODUCT_MAP.md` and are *not merged* until parent glue
+retags them. **No new numerical algorithm enters the codebase in this round** — every
+Round-9 name is a contract promotion, a composition, or a persistence/presentation
+layer over machinery already referenced in §1–§12, so no new citations are required.
+
+* **`fea.mpc.apply_mpc` (contract promotion).** The public composer of `model.rbe2` +
+  `model.rbe3` into the single `ConstraintTransform` that `assemble_km` already
+  applies. The constraint *content* is exactly §11 (RBE2 small-rotation rigid weld)
+  and §12 (RBE3 weighted average); the *imposition* is the same master–slave /
+  null-space transformation of Cook et al. (2002) and Zienkiewicz–Taylor–Zhu (2005),
+  both cited above. Round 9 freezes the import and pins composition gates (empty
+  tables → identity/no-op; single-table calls bit-identical to `apply_rbe2` /
+  `apply_rbe3`; mixed RBE2-off-RBE3 chains keep exactly 6 free–free rigid-body modes;
+  overlapping dependent DOFs raise). No kinematic or numerical change.
+* **`updating.responses.static_stress_response` (contract promotion).** The recovered
+  stresses of §11 (`fea.recover.recover_stress`) plugged into the §3 sensitivity
+  updating as residuals — the Friswell–Mottershead machinery is unchanged. The
+  recovery gate is *displacement-driven* (enforced displacement rather than dead
+  load): on a statically determinate member a dead-load stress σ = F/A is independent
+  of E and carries no parameter information, so only the displacement-driven residual
+  can identify the modulus.
+* **`correlation.dofmap.mapped_mac` (convenience wrap — explicitly *not* a new
+  correlation metric).** One call composing `map_nearest_nodes` (§1, k-d tree
+  nearest-neighbor mapping) + `mapped_mode_matrix` (§12, row selection) + `mac_matrix`
+  (§1, Allemang 1982). The MAC formula and the nearest-node distances are exactly
+  those of the functions it wraps; the gate (two translated copies of the same block →
+  mapped-MAC diagonal of 1) is the R8 `mapped_mode_matrix` gate re-run through the
+  one-call surface.
+* **`dynamics.random.dump_psd` / `load_psd` (persistence, no algorithm).** npz
+  dump/load of `PSDResult`, directly analogous to the R8 `dump_frf` and the R7
+  `dump_cms` (§12): the stored spectra and `freq_hz` are bit-identical after a load
+  round trip, and the `psd_response` numerics (§5 synthesis; Miles / base-acceleration
+  checks of the R7 row) are untouched.
+* **Nastran SOL 101 static punch — still text, still no binaries.** The
+  `NastranPunchDriver` (PRODUCT_MAP R7; `docs/ARCHITECTURE.md` §10) gains a static
+  path: a public SOL 101 case control requesting `DISPLACEMENT(PUNCH)=ALL` on the
+  write side, and a punch `$DISPLACEMENTS` **text** parser feeding the driver's
+  `read_static` on the read side. Everything remains text punch, exactly like the R7
+  SOL 103 modal path; tests stub the executable. **Still no OP2, no RST, no ODB** —
+  the closed binary dumps stay N/A (§10 and the product map), and Round 9 does not
+  reopen them.
+* **CLI / script / GUI polish (presentation only).** The `dump-frf` / `load-frf` /
+  `update-static` commands, the `UPDATE STATIC` script verb, and the GUI stress table
+  over the existing `/api/stress` endpoint are surfaces over already-cited machinery;
+  no algorithmic content, and `import femtools.viz` still never requires pyvista.
 
 ## Non-infringement note
 

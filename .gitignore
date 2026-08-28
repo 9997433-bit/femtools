@@ -11,4 +11,7 @@ dist/
 build/
 *.npz
 *.ftproj
+# plot artifacts written into the CWD by examples/ and CLI plot commands
+# (e.g. examples/frf_synthesis.py -> frf_synthesis.png)
+*.png
 .DS_Store

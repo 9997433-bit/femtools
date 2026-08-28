@@ -14,7 +14,12 @@ merged the APIs of `.agent_workspace/REMAINING.md` (Rounds 7–9 edition); those
 tagged **R7**. The transitional **R7-wip** tag is retired. Round 8 (Cycle C's second
 round) merged the APIs of `.agent_workspace/REMAINING.md` (Round 8 section) /
 `ROUND8_BRIEF.md`; those rows are tagged **R8**. The transitional **R8-wip** tag is
-retired, following the R4-wip → R4 / R7-wip → R7 precedent.
+retired, following the R4-wip → R4 / R7-wip → R7 precedent. Round 9 (Cycle C's third
+and closing round) is **in flight on this tree**: its API is frozen in
+`.agent_workspace/REMAINING.md` (Round 9 section) / `ROUND9_BRIEF.md`, and its rows
+below are tagged **R9-wip** — frozen and under construction, **not merged** — until
+parent glue confirms the merge, promotes the frozen names to top-level exports, and
+retags R9-wip → R9 (the same transition every earlier `-wip` tag followed).
 
 | Status | Meaning |
 |---|---|
@@ -24,6 +29,7 @@ retired, following the R4-wip → R4 / R7-wip → R7 precedent.
 | **R6** | Merged in Round 6 (the remaining-cycle's last round; API frozen in `.agent_workspace/ROUND6_BRIEF.md`); importable from the integration branch, covered by tests, and a stable lazy export at the `femtools` top level |
 | **R7** | Merged in Round 7 (Cycle C's first round; API frozen in the Cycle-C `.agent_workspace/REMAINING.md`); importable from the integration branch, covered by tests, and a stable lazy export at the `femtools` top level |
 | **R8** | Merged in Round 8 (Cycle C's second round; API frozen in the Cycle-C `.agent_workspace/REMAINING.md`); importable from the integration branch, covered by tests, and a stable lazy export at the `femtools` top level |
+| **R9-wip** | Round 9 (Cycle C's close-out) in progress on this tree: API frozen in the Cycle-C `.agent_workspace/REMAINING.md` (Round 9 section), but **not merged yet** — no merged-tag claim and **no top-level export** (parent glue promotes the names and retags to **R9** after merge) |
 | **R5+** | Direction fixed, API not frozen in this cycle |
 | **N/A** | Out of scope (hardware, licensing, closed binary dumps) with substitute noted |
 
@@ -49,6 +55,8 @@ remain listed there.
 | Mesh/geometry visualization | `viz.plots` (matplotlib default; optional `backend="plotly"` if plotly is installed); optional pyvista `plot_mesh3d` is the Round-7 row below | R1 |
 | Interactive 3-D mesh view (optional pyvista) | `viz.plot_mesh3d` — behind `import pyvista` (the `viz` extra of `pyproject.toml`); matplotlib stays the default backend and importing `femtools.viz` never requires pyvista | R7 |
 | Stress-field visualization (plot + CLI/script/GUI surface) | `viz.plots.plot_stress` — color the mesh by `StressResult` von Mises (or a named component); matplotlib default, pyvista only via the existing `plot_mesh3d` path (`import femtools.viz` still never requires pyvista). Lands together with the CLI `plot-stress` command (lazy-fails like `recover-stress` when kernels are missing), the script `RECOVER STRESS` / `ADD RBE2` / `ADD RBE3` verbs, and a GUI stress-table endpoint over `recover_stress` | R8 |
+| CLI FRF persistence + static-updating commands | `cli` `dump-frf` / `load-frf` (over the R8 `dump_frf`/`load_frf`, lazy-failing like `recover-stress` when the kernel is missing) and `update-static` (wrapping the R8 `update_from_static`); the script `UPDATE STATIC` verb alongside — existing `SOLVE STATIC` / `SET` / `RECOVER STRESS` / `ADD RBE2` / `ADD RBE3` unchanged | R9-wip |
+| GUI stress table | the GUI HTML page (`gui.page`) **displays** the existing `GET /api/stress` endpoint (von Mises / component table over `recover_stress`) after a static solve; 400 handling for missing prerequisites kept; `import femtools.viz` still never requires pyvista | R9-wip |
 | Mesh generation / import CAD | not planned — import meshes via UNV/BDF | N/A |
 
 ## 2. FEMtools Dynamics
@@ -78,6 +86,8 @@ remain listed there.
 | Interpolation constraints (RBE3 / weighted-average MPC) | data container is merged: `core.model.RBE3` / `FEModel.add_rbe3` (stable top-level `RBE3` export, shared with the BDF `RBE3` card); the Round-8 work is `fea.mpc.apply_rbe3` — the dependent node's listed components follow the **weighted average** of the independents (equal weights by default, or `RBE3.weights`); *not* the RBE2 rigid weld, no penalty springs — composed with `apply_rbe2` into one `ConstraintTransform`, `assemble_km` honoring `model.rbe3` alongside `model.rbe2` (`mpc=False` still disables all MPCs). Gates: a mass on an RBE3 dependent node of a free–free independent triangle keeps exactly 6 rigid-body modes; a dependent-node force distributes to the independents by virtual work `Gᵀ f` (`docs/SOTA.md` §12) | R8 |
 | Nodal stress averaging | `fea.recover.average_nodal` — average the element-centroid `StressResult` onto incident nodes (1/n_adj); a constant-stress patch stays exact at every node; deliberately **not** Zienkiewicz–Zhu SPR (`docs/SOTA.md` §12) | R8 |
 | FRF result persistence | `dynamics.frf.dump_frf` / `load_frf` — npz dump/load of `FRFResult`, analogous to the R7 `dump_cms`; `H` and `freq_hz` bit-identical after a load round trip; `modal_frf` numerics unchanged | R8 |
+| MPC composition (public contract) | `fea.mpc.apply_mpc` — the public composer of `model.rbe2` + `model.rbe3` into one `ConstraintTransform` (the function `assemble_km` already routes through); `apply_rbe2` / `apply_rbe3` stay thin wrappers, RBE2 kinematics and RBE3 weighted-average content unchanged, `mpc=False` still disables all MPCs. The symbol already imports on this tree — Round 9 freezes the contract and pins the composition gates (empty tables → identity/no-op, single-table calls bit-identical to `apply_rbe2` / `apply_rbe3`, an RBE2 hanging off an RBE3 reference keeps exactly 6 free–free rigid-body modes, overlapping dependent DOFs raise) | R9-wip |
+| PSD result persistence | `dynamics.random.dump_psd` / `load_psd` — npz dump/load of `PSDResult`, analogous to the R8 `dump_frf` and the R7 `dump_cms`; stored spectra and `freq_hz` bit-identical after a load round trip; `psd_response` / Miles / base-acceleration numerics unchanged | R9-wip |
 
 ## 3. FEMtools Pretest & Correlation
 
@@ -102,6 +112,7 @@ remain listed there.
 | Correlation report generation | `viz.report.mac_report_html` / `mac_report_text` / `save_mac_report` + `cli` `report-mac` | R4 |
 | Per-DOF MAC contribution diagnostics | `correlation.mac.mac_contribution` — DOF-wise contribution to a single MAC pair (same inputs as `mac_value`); the real-mode `mac_matrix` numerics are unchanged | R7 |
 | Mapped-shape mode matrix (FE rows at test grid) | `correlation.dofmap.mapped_mode_matrix` — pull FE mode-shape rows at the node ids returned by `map_nearest_nodes`, so FE↔test MAC runs on geometry-mapped DOFs instead of positional assumptions; gate: two translated copies of the same cube give a mapped-MAC diagonal of 1; `mac_matrix` real-mode numerics and `map_nearest_nodes` distances unchanged | R8 |
+| Mapped-MAC convenience | `correlation.dofmap.mapped_mac` — one-call wrap of `map_nearest_nodes` (R7) + `mapped_mode_matrix` (R8) + `mac_matrix` (R1); a convenience composition, **not** a new MAC formula. Gate: two translated copies of the same block give a mapped-MAC diagonal of 1; `mac_matrix` real-mode numerics and `map_nearest_nodes` distances unchanged | R9-wip |
 
 ## 4. FEMtools Model Updating
 
@@ -119,6 +130,7 @@ remain listed there.
 | Automated parameter selection (subset selection) | `updating.selection.select_parameters` (EFS / column subset selection) | R4 |
 | Static-displacement responses | `updating.responses.static_displacement_response` — `solve_static` displacements as `update_model` residuals (the 10% E-recovery invariant of the modal path is unchanged) | R7 |
 | Static-deflection updating convenience | `updating.updater.update_from_static` — one-call wrapper of `static_displacement_response` + `update_model`: recover a 10% E error from a static tip deflection to the same order as the modal path; an optional stress residual over `recover_stress` may land with it (constant-stress patch → parameter recovered) | R8 |
+| Static-stress responses | `updating.responses.static_stress_response` — the R7 `recover_stress` as an `update_model` residual. The recovery gate is **displacement-driven** (enforced tip displacement or equivalent), because a statically determinate dead-load stress σ = F/A is independent of E and carries no parameter information; 10% E recovered from a stress residual, with the R8 `update_from_static` displacement path and the modal 10%-E golden unchanged. The symbol already imports on this tree — Round 9 freezes the contract and pins the gates | R9-wip |
 
 ## 5. FEMtools Optimization
 
@@ -175,6 +187,7 @@ remain listed there.
 | Concrete Nastran text driver (SOL 103 → punch) | `drivers.nastran.NastranPunchDriver` — implements the `SolverDriver` protocol over `write_bdf` (+ SOL 103 case control requesting punch output) and `read_pch`; `is_available()` probes for a local executable, `run()` raises `SolverError` when it is absent; tests never require a Nastran install, and OP2 stays N/A below | R7 |
 | Concrete ANSYS text driver (CDB in, text results) | `drivers.ansys.AnsysCdbDriver` — `SolverDriver` over the public text translators: `write_input` = `write_cdb`; `is_available()` via `shutil.which` (`ansys`/`mapdl` aliases), never raises; `run()` raises `SolverError` on missing executable / nonzero exit / timeout; `read_modal` uses the existing `.pch`/`.unv` **text** readers only — a `.rst` path raises `SolverError` naming RST as N/A; tests never require an ANSYS install (stub shell executables, like the Round-7 Nastran tests) | R8 |
 | Concrete Abaqus text driver (INP in, text results) | `drivers.abaqus.AbaqusInpDriver` — same conventions over `write_inp`: `is_available()` probe, `SolverError` on missing/failed/timed-out runs, `read_modal` from `.unv`/`.pch` text only; ODB stays N/A below; tests never require an Abaqus install | R8 |
+| Nastran SOL 101 static punch (text) | `drivers.nastran.NastranPunchDriver` static path — `write_input(..., sol=101)` (or an equivalent explicit static method) emits a public SOL 101 case control requesting `DISPLACEMENT(PUNCH)=ALL`, and a driver `read_static` parses punch `$DISPLACEMENTS` **text** into a static result (`io.pch` sibling reader). The SOL 103 modal default and the R7 tests are unchanged; missing executable / nonzero exit / timeout still raise `SolverError`; tests stub the executable, never a Nastran install. Text punch only — OP2 stays N/A below | R9-wip |
 | Nastran OP2 / ANSYS RST / Abaqus ODB binary results | closed binary dumps — substitutes: the `.pch`/CDB text readers above plus the `SolverDriver` plug-in protocol (and the Round-8 ANSYS/Abaqus text drivers above) | N/A |
 | Abaqus INP / LS-DYNA K (text subsets) | `io.inp.read_inp` / `write_inp`, `io.kfile.read_k` — public card layouts only, mapped into `FEModel`; no OP2/RST/ODB binaries (those stay N/A above) | R6 |
 
@@ -193,7 +206,11 @@ remain listed there.
   `apply_rbe3`, `average_nodal`, `AnsysCdbDriver`, `AbaqusInpDriver`, `dump_frf` /
   `load_frf`, `mapped_mode_matrix`, `plot_stress`, and `update_from_static` (the
   `RBE3` data container was already a stable export). CI resolves every `__all__`
-  entry.
+  entry — which is why the Round-9 frozen names (`apply_mpc`,
+  `static_stress_response`, `mapped_mac`, `dump_psd` / `load_psd`) are **not**
+  top-level exports yet: parent glue promotes them only after the R9-wip rows merge,
+  so `__all__` never carries a name that does not import (SOL 101 is a driver
+  method, not a new top-level name).
 * Golden analytical acceptance tests with the tolerance table of `docs/CONTRACT_API.md`.
 * ruff + strict pytest (an empty collection fails CI since Round 2) on Python 3.11,
   plus a non-blocking mypy step (`.github/workflows/ci.yml`).

@@ -152,7 +152,12 @@ code never branches on data origin.
   interpolation constraint, not the RBE2 rigid weld, with no penalty springs.
   `assemble_km` composes `model.rbe3` with `model.rbe2` into a single
   `ConstraintTransform`; `mpc=False` still disables all MPCs, and existing RBE2 results
-  stay bit-identical when `model.rbe3` is empty. References: `docs/SOTA.md` §11–§12.
+  stay bit-identical when `model.rbe3` is empty. Round 9 (in flight — PRODUCT_MAP
+  R9-wip) freezes the composer itself as public contract: `fea.mpc.apply_mpc`, the
+  function `assemble_km` already routes through, with `apply_rbe2` / `apply_rbe3`
+  staying thin wrappers, no change to RBE2 kinematics or RBE3 weighted-average
+  content, and `mpc=False` still disabling all MPCs.
+  References: `docs/SOTA.md` §11–§13.
 
 ## 6. Sparse assembly
 
@@ -226,7 +231,10 @@ All result objects are immutable after construction, carry provenance metadata
 The `.npz` serialization promise is realized per result type as rounds land: Round 7
 shipped `dynamics.superelement.dump_cms` / `load_cms` for CMS reduced models; Round 8
 (PRODUCT_MAP R8) adds `dynamics.frf.dump_frf` / `load_frf` for
-`FRFResult`, with `H` and `freq_hz` bit-identical after a load round trip.
+`FRFResult`, with `H` and `freq_hz` bit-identical after a load round trip. Round 9
+(in flight — PRODUCT_MAP R9-wip) extends the same pattern to
+`dynamics.random.dump_psd` / `load_psd` for `PSDResult`, with the stored spectra and
+`freq_hz` bit-identical after load and `psd_response` numerics untouched.
 
 Shape/DOF compatibility between two results (e.g. FE vs. test in MAC) is established through
 DOF descriptors `(node_id, local_dof)`, never through positional assumption; `pair_modes` and
@@ -312,8 +320,16 @@ Policy:
    `SolverError` conventions, ODB is N/A, results from `.unv`/`.pch` text only). Tests
    never require an ANSYS or Abaqus install — they stub shell executables exactly like
    the Round-7 Nastran driver tests.
+   Round 9 (in flight — `docs/PRODUCT_MAP.md` R9-wip) thickens `NastranPunchDriver`
+   with a **text** static path: `write_input(..., sol=101)` (or an equivalent explicit
+   static method) emits a public SOL 101 case control requesting
+   `DISPLACEMENT(PUNCH)=ALL`, and a driver `read_static` parses the punch
+   `$DISPLACEMENTS` text (an `io.pch` sibling reader). The SOL 103 modal default is
+   unchanged, the same `SolverError` conventions apply, and tests keep stubbing the
+   executable.
    Closed binary result dumps (Nastran OP2, ANSYS rst, Abaqus odb) remain out
-   of scope (N/A) — Rounds 7–8 change nothing there: still no OP2, no RST, no ODB. The
+   of scope (N/A) — Rounds 7–9 change nothing there: the SOL 101 path is punch *text*,
+   not OP2, so there is still no OP2, no RST, no ODB. The
    protocol stays the extension point for third-party binary drivers.
    Only a driver may depend on vendor
    formats; results always land as `ModalResult`/`FRFResult`, and a failed external
