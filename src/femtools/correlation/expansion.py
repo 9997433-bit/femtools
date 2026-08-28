@@ -28,7 +28,10 @@ Both return the same :class:`ExpansionResult`, whose ``modes`` are ordered on
 the full DOF set of the model, so the expanded test shapes can go straight
 into :func:`~femtools.correlation.mac.mac_matrix` or
 :func:`~femtools.correlation.orthogonality.cross_orthogonality` against the FE
-modes.
+modes.  :func:`expanded_mac` is exactly that pairing in one call — expand,
+then correlate on the full DOF set — with the SEREP self-consistency check
+(expanding the analytical modes themselves must give them back, so the MAC
+diagonal is 1) as its built-in sanity criterion.
 
 The master DOFs may be given as row indices, as a boolean mask, as DOF keys
 (``"12Z"``, ``(12, 3)``), or implicitly by handing over the DOF map of the
@@ -54,8 +57,15 @@ from numpy.typing import ArrayLike, NDArray
 
 from ._linalg import as_mode_matrix, mode_frequencies, row_index
 from .dofmap import DOFMap, restrict
+from .mac import mac_matrix
 
-__all__ = ["ExpansionResult", "expand_serep", "expand_guyan"]
+__all__ = [
+    "ExpandedMACResult",
+    "ExpansionResult",
+    "expand_serep",
+    "expand_guyan",
+    "expanded_mac",
+]
 
 
 @dataclass
@@ -127,36 +137,16 @@ def _maybe_dofmap(source: Any, n_full: int) -> DOFMap | None:
     return dmap if len(dmap) == n_full else None
 
 
-def _master_rows(
-    master: Any,
-    dof_map: Any,
-    test_map: Any,
-    n_full: int,
-    n_test: int,
-) -> tuple[NDArray[np.intp], NDArray[np.intp], NDArray[np.float64] | None, DOFMap | None]:
-    """Resolve the master DOFs to ``(rows_full, rows_test, scale, full_map)``.
-
-    ``rows_full[k]`` is the row of the full model that carries the measured
-    row ``rows_test[k]``; ``scale`` is the sensor factor of the test map, or
-    ``None`` when no map was involved.
-    """
+def _model_dofmap(dof_map: Any, n_full: int) -> DOFMap | None:
+    """The DOF map of the model as a :class:`DOFMap`, checked against its size."""
     dmap = None if dof_map is None else DOFMap.from_mapping(dof_map)
     if dmap is not None and len(dmap) != n_full:
         raise ValueError(f"dof_map describes {len(dmap)} DOF but the model has {n_full}")
+    return dmap
 
-    if master is None:
-        if test_map is None:
-            raise ValueError("give the master DOFs, or a test_map to match against dof_map")
-        if dmap is None:
-            raise ValueError("matching a test_map needs the dof_map of the model")
-        tmap = DOFMap.from_mapping(test_map)
-        if len(tmap) != n_test:
-            raise ValueError(f"test_map has {len(tmap)} DOF but phi_test has {n_test} rows")
-        rows_full, rows_test = dmap.common(tmap)
-        if rows_full.size == 0:
-            raise ValueError("the test and model DOF maps have no DOF in common")
-        return rows_full, rows_test, tmap.scale[rows_test], dmap
 
+def _master_index(master: Any, dmap: DOFMap | None, n_full: int) -> NDArray[np.intp]:
+    """Rows of the full model selected by ``master`` (indices, mask or DOF keys)."""
     arr = np.asarray(master)
     if arr.dtype == bool or np.issubdtype(arr.dtype, np.integer):
         rows_full = row_index(arr, n_full)
@@ -171,6 +161,38 @@ def _master_rows(
         raise ValueError("the master DOFs contain duplicates")
     if rows_full.min() < 0 or rows_full.max() >= n_full:
         raise ValueError(f"master DOF out of range 0..{n_full - 1}")
+    return rows_full
+
+
+def _master_rows(
+    master: Any,
+    dof_map: Any,
+    test_map: Any,
+    n_full: int,
+    n_test: int,
+) -> tuple[NDArray[np.intp], NDArray[np.intp], NDArray[np.float64] | None, DOFMap | None]:
+    """Resolve the master DOFs to ``(rows_full, rows_test, scale, full_map)``.
+
+    ``rows_full[k]`` is the row of the full model that carries the measured
+    row ``rows_test[k]``; ``scale`` is the sensor factor of the test map, or
+    ``None`` when no map was involved.
+    """
+    dmap = _model_dofmap(dof_map, n_full)
+
+    if master is None:
+        if test_map is None:
+            raise ValueError("give the master DOFs, or a test_map to match against dof_map")
+        if dmap is None:
+            raise ValueError("matching a test_map needs the dof_map of the model")
+        tmap = DOFMap.from_mapping(test_map)
+        if len(tmap) != n_test:
+            raise ValueError(f"test_map has {len(tmap)} DOF but phi_test has {n_test} rows")
+        rows_full, rows_test = dmap.common(tmap)
+        if rows_full.size == 0:
+            raise ValueError("the test and model DOF maps have no DOF in common")
+        return rows_full, rows_test, tmap.scale[rows_test], dmap
+
+    rows_full = _master_index(master, dmap, n_full)
     if rows_full.size != n_test:
         raise ValueError(f"{rows_full.size} master DOF but phi_test has {n_test} rows")
     return rows_full, np.arange(n_test, dtype=np.intp), None, dmap
@@ -475,4 +497,285 @@ def expand_guyan(
         rank=int(rows_full.size),
         freq_hz=freqs,
         dof_map=dmap,
+    )
+
+
+@dataclass
+class ExpandedMACResult:
+    """MAC of expanded shapes against the full-DOF reference modes.
+
+    ``np.asarray(result)`` gives the ``(n_test, n_reference)`` MAC matrix, and
+    the result also unpacks as the documented pair ``mac, expansion =
+    expanded_mac(...)`` for callers that only want the two arrays.
+    """
+
+    mac: NDArray[np.float64]
+    expansion: ExpansionResult
+    reference: NDArray[Any]
+    freq_test: NDArray[np.float64] | None = None
+    freq_reference: NDArray[np.float64] | None = None
+
+    #: Alias of :attr:`mac`.
+    @property
+    def values(self) -> NDArray[np.float64]:
+        return self.mac
+
+    @property
+    def modes(self) -> NDArray[Any]:
+        """The expanded shapes on the full DOF set."""
+        return self.expansion.modes
+
+    @property
+    def master(self) -> NDArray[np.intp]:
+        return self.expansion.master
+
+    @property
+    def residual(self) -> NDArray[np.float64] | None:
+        """Relative misfit of the SEREP fit at the master DOFs, per mode."""
+        return self.expansion.residual
+
+    @property
+    def method(self) -> str:
+        return self.expansion.method
+
+    @property
+    def n_master(self) -> int:
+        return self.expansion.n_master
+
+    @property
+    def shape(self) -> tuple[int, ...]:
+        return self.mac.shape
+
+    @property
+    def diagonal(self) -> NDArray[np.float64]:
+        """``mac[k, k]``, the correlation of each expanded mode with its own."""
+        n = min(self.mac.shape) if self.mac.size else 0
+        idx = np.arange(n)
+        return np.asarray(self.mac[idx, idx], dtype=float)
+
+    @property
+    def min_diagonal(self) -> float:
+        diag = self.diagonal
+        return float(diag.min()) if diag.size else float("nan")
+
+    @property
+    def diagonal_error(self) -> float:
+        """``max |1 - mac[k, k]|``: the reference-independent SEREP self-check.
+
+        Unlike :attr:`identity_error` this ignores the off-diagonal, which is
+        the auto-MAC of the reference set and therefore not zero unless that
+        set is orthogonal under the MAC weighting.
+        """
+        diag = self.diagonal
+        return float(np.abs(diag - 1.0).max()) if diag.size else 0.0
+
+    @property
+    def max_off_diagonal(self) -> float:
+        """Largest MAC between two *different* modes (0 for a single mode)."""
+        if self.mac.size == 0:
+            return 0.0
+        mask = np.ones(self.mac.shape, dtype=bool)
+        n = min(self.mac.shape)
+        idx = np.arange(n)
+        mask[idx, idx] = False
+        return float(self.mac[mask].max()) if mask.any() else 0.0
+
+    @property
+    def identity_error(self) -> float:
+        """``max |mac - I|``, the worst of :attr:`diagonal_error` and the off-diagonal.
+
+        0 means the expanded shapes reproduce the reference modes *and* those
+        modes are mutually uncorrelated under the criterion used — true for an
+        orthonormal basis, and for mass-normalized FE modes with
+        ``weights=mass``, but not for the plain MAC of a general FE mode set,
+        whose auto-MAC has non-zero off-diagonal terms of its own.
+        """
+        if self.mac.size == 0:
+            return 0.0
+        eye = np.zeros(self.mac.shape)
+        n = min(self.mac.shape)
+        idx = np.arange(n)
+        eye[idx, idx] = 1.0
+        return float(np.abs(self.mac - eye).max())
+
+    def is_identity(self, tol: float = 1e-10) -> bool:
+        """Whether the whole table is the identity to ``tol``.
+
+        Use :attr:`diagonal_error` instead when the reference modes are not
+        orthogonal under the criterion, which is the usual case for an
+        unweighted MAC of FE modes.
+        """
+        return self.identity_error <= float(tol)
+
+    def __array__(self, dtype: Any = None, copy: Any = None) -> NDArray[np.float64]:
+        arr = self.mac
+        if dtype is not None:
+            arr = arr.astype(dtype, copy=False)
+        return np.array(arr, copy=True) if copy else arr
+
+    def __iter__(self) -> Any:
+        """Unpack as ``(mac, expansion)``."""
+        return iter((self.mac, self.expansion))
+
+    def __getitem__(self, item: Any) -> Any:
+        return self.mac[item]
+
+    def table(self) -> str:
+        """Per-mode report: paired MAC, worst off-diagonal and SEREP residual."""
+        head = f"{'mode':>5} {'f [Hz]':>10} {'MAC':>8} {'off-diag':>9} {'residual':>10}"
+        lines = [head, "-" * len(head)]
+        diag = self.diagonal
+        res = self.residual
+        freqs = self.freq_test
+        for k in range(self.mac.shape[0]):
+            f = np.nan if freqs is None or k >= len(freqs) else float(freqs[k])
+            paired = float(diag[k]) if k < diag.size else np.nan
+            row = np.asarray(self.mac[k], dtype=float)
+            others = np.delete(row, k) if k < row.size else row
+            off = float(others.max()) if others.size else 0.0
+            r = np.nan if res is None or k >= len(res) else float(res[k])
+            lines.append(f"{k:>5} {f:>10.4f} {paired:>8.4f} {off:>9.2e} {r:>10.3e}")
+        lines.append(
+            f"method: {self.method}, {self.n_master} master DOF, "
+            f"max |1 - MAC| = {self.diagonal_error:.3e}, "
+            f"max |MAC - I| = {self.identity_error:.3e}"
+        )
+        return "\n".join(lines)
+
+
+def expanded_mac(
+    phi_test: ArrayLike,
+    modes: ArrayLike,
+    master: Any = None,
+    *,
+    reference: ArrayLike | None = None,
+    dof_map: Any = None,
+    test_map: Any = None,
+    n_modes: int | None = None,
+    freq_hz: ArrayLike | None = None,
+    rcond: float = 1e-12,
+    weights: Any = None,
+    return_transform: bool = False,
+) -> ExpandedMACResult:
+    """SEREP-expand the measured shapes and MAC them against the FE modes.
+
+    A MAC computed on the measured DOFs alone answers a smaller question than
+    it appears to: with a few dozen sensors two genuinely different shapes can
+    look alike (spatial aliasing), and the auto-MAC of the FE modes restricted
+    to those sensors is the usual warning for it.  Expanding the test shapes
+    onto the full DOF set with :func:`expand_serep` first and correlating
+    there — O'Callahan, Avitabile & Riemer, *System Equivalent Reduction
+    Expansion Process*, Proc. 7th IMAC, 1989, with Allemang's MAC — moves the
+    comparison back onto the complete model::
+
+        psi_full = Phi pinv(Phi[master]) psi_m       (SEREP expansion)
+        mac[i, j] = MAC(psi_full[:, i], Phi_ref[:, j])
+
+    The check that makes the composition trustworthy is its own fixed point:
+    feed the analytical modes *restricted to the master DOFs* back in and
+    SEREP must return them unchanged, so every paired MAC comes back as 1 to
+    round-off (:attr:`ExpandedMACResult.diagonal_error`) and the whole table
+    collapses onto the auto-MAC of the reference set — the identity for an
+    orthonormal basis, and for mass-normalized FE modes with ``weights=mass``,
+    where :attr:`ExpandedMACResult.identity_error` is the number to read.  A
+    departure from it is not a correlation result but a defect of the master
+    set: too few sensors, a rank-deficient ``Phi[master]``, or a basis
+    truncated below the modes being fitted.  Note what the fixed point does
+    *not* prove: SEREP can only produce shapes inside the span of the basis,
+    so the expanded test shapes are filtered onto it and their MAC is
+    optimistic by construction; read :attr:`ExpandedMACResult.residual`, the
+    part of the measurement the basis could not represent, alongside the
+    table.
+
+    Parameters
+    ----------
+    phi_test:
+        Measured mode shapes, ``(n_master, n_mode)`` in the order of the
+        master DOFs (or of ``test_map``).  A full ``(n_full, n_mode)`` set is
+        accepted as well and is restricted to ``master`` first, which is what
+        the self-check above needs: ``expanded_mac(fe_modes, fe_modes,
+        master)``.
+    modes:
+        Analytical basis ``(n_full, n_basis)`` over the full DOF set, as in
+        :func:`expand_serep`; a
+        :class:`~femtools.fea.eigen.ModalResult` also supplies its DOF map
+        and frequencies.
+    master, dof_map, test_map, n_modes, rcond, return_transform:
+        As in :func:`expand_serep`.
+    reference:
+        Full-DOF mode set the expanded shapes are correlated against.
+        Defaults to the expansion basis itself (truncated by ``n_modes``),
+        which is the SEREP self-consistency check.
+    freq_hz:
+        Frequencies of the *measured* modes, kept for the report.
+    weights:
+        MAC weighting as in :func:`~femtools.correlation.mac.mac_matrix`; the
+        full mass matrix gives the (squared) normalized cross-orthogonality
+        on the expanded DOF set instead of the plain MAC.
+
+    Returns
+    -------
+    ExpandedMACResult
+        ``result.mac`` is the ``(n_mode, n_reference)`` table,
+        ``result.expansion`` the underlying
+        :class:`ExpansionResult`; the object also unpacks as
+        ``mac, expansion = expanded_mac(...)``.
+
+    See Also
+    --------
+    expand_serep : the expansion on its own.
+    femtools.correlation.mac.mac_matrix : the criterion on its own.
+    femtools.correlation.orthogonality.cross_orthogonality : mass-weighted
+        alternative, unsquared and signed.
+    """
+    basis = as_mode_matrix(modes, "modes")
+    n_full = basis.shape[0]
+    if n_modes is not None:
+        if not 1 <= int(n_modes) <= basis.shape[1]:
+            raise ValueError(f"n_modes must be within 1..{basis.shape[1]}")
+        basis = basis[:, : int(n_modes)]
+
+    if freq_hz is None:
+        freq_hz = mode_frequencies(phi_test)
+    psi = as_mode_matrix(phi_test, "phi_test")
+
+    # A full-size test matrix is the self-check: restrict it to the masters
+    # so the caller does not have to spell out `fe_modes[master]`.
+    if master is not None and test_map is None and psi.shape[0] == n_full:
+        source_map = dof_map if dof_map is not None else _maybe_dofmap(modes, n_full)
+        rows = _master_index(master, _model_dofmap(source_map, n_full), n_full)
+        if rows.size != n_full:
+            psi = psi[rows]
+
+    expansion = expand_serep(
+        psi,
+        modes,
+        master,
+        dof_map=dof_map,
+        test_map=test_map,
+        n_modes=n_modes,
+        freq_hz=freq_hz,
+        rcond=rcond,
+        return_transform=return_transform,
+    )
+
+    if reference is None:
+        ref = basis
+        ref_freq = mode_frequencies(modes)
+    else:
+        ref = as_mode_matrix(reference, "reference")
+        ref_freq = mode_frequencies(reference)
+    if ref.shape[0] != n_full:
+        raise ValueError(f"reference has {ref.shape[0]} DOF but the model has {n_full}")
+    if ref_freq is not None:
+        ref_freq = np.asarray(ref_freq, dtype=float).reshape(-1)[: ref.shape[1]]
+        if ref_freq.size != ref.shape[1]:
+            ref_freq = None
+
+    return ExpandedMACResult(
+        mac=mac_matrix(expansion.modes, ref, weights=weights),
+        expansion=expansion,
+        reference=ref,
+        freq_test=expansion.freq_hz,
+        freq_reference=ref_freq,
     )

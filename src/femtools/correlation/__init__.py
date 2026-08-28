@@ -23,6 +23,12 @@ A solved model can be used wherever mode shapes are expected: a
 workflow reads ``align_modes(phi_test, map_test, modal)`` followed by
 ``pair_modes(phi_t, phi_a, f_test)``.
 
+When the two sides do not even share a DOF set, :func:`expand_serep` /
+:func:`expand_guyan` lift the measured shapes onto the full FE DOF set first;
+:func:`expanded_mac` runs that path and the MAC in one call and carries the
+SEREP self-consistency check (expanding the FE modes themselves through the
+master DOFs must give a unit MAC diagonal) with it.
+
 The scalar single-vector MAC lives at :func:`femtools.correlation.mac.mac`
 (exported here as :func:`mac_value`); the name ``femtools.correlation.mac``
 itself remains the module.
@@ -47,7 +53,7 @@ from .dofmap import (
     parse_dof_label,
     restrict,
 )
-from .expansion import ExpansionResult, expand_guyan, expand_serep
+from .expansion import ExpandedMACResult, ExpansionResult, expand_guyan, expand_serep, expanded_mac
 from .frf_corr import csac, csf, fdac, frac, frf_difference
 from .mac import (
     FMACResult,
@@ -75,6 +81,7 @@ __all__ = [
     "COMPONENT_NAMES",
     "AlignmentResult",
     "DOFMap",
+    "ExpandedMACResult",
     "ExpansionResult",
     "FMACResult",
     "MappedMACResult",
@@ -92,6 +99,7 @@ __all__ = [
     "ecomac",
     "expand_guyan",
     "expand_serep",
+    "expanded_mac",
     "fdac",
     "fmac",
     "frac",
