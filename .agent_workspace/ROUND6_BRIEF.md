@@ -1,8 +1,8 @@
 # Round 6 结论简报
 
 **Branch:** `cursor/femtools-remaining-d551`  
-**pytest at Round-5 close:** 109 passed / 3 skipped.  
-Round 6 landed every frozen R5+ API except pyvista extras (still R5+) and the explicit N/A binaries/DAQ.
+**pytest at Round-6 close:** 183 passed / 3 skipped; ruff clean; 128 top-level exports (112 names).  
+Round-5 close was 109/3. Round 6 landed every frozen R5+ API except pyvista extras (still R5+) and the explicit N/A binaries/DAQ.
 
 ## 各代理结论
 

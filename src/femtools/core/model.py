@@ -50,6 +50,7 @@ __all__ = [
     "Material",
     "Property",
     "SPC",
+    "RBE2",
     "Load",
     "DOFSet",
     "FEModel",
@@ -370,6 +371,34 @@ class SPC:
 
 
 @dataclass
+class RBE2:
+    """Rigid interpolation: dependent nodes follow one independent node.
+
+    ``components`` uses Nastran 1..6 (UX..RZ).  Stored on :class:`FEModel`
+    so BDF ``RBE2`` cards and :func:`femtools.fea.mpc.apply_rbe2` share a
+    single table.  The assembler consumes this list; it is not an element.
+    """
+
+    id: int
+    independent: int
+    dependents: tuple[int, ...]
+    components: tuple[int, ...] = (1, 2, 3, 4, 5, 6)
+
+    def __post_init__(self) -> None:
+        self.id = int(self.id)
+        self.independent = int(self.independent)
+        self.dependents = tuple(int(n) for n in self.dependents)
+        comps = tuple(int(c) for c in self.components)
+        if not comps or any(c < 1 or c > 6 for c in comps):
+            raise ModelError(f"RBE2 {self.id}: components must be in 1..6, got {self.components}")
+        if self.independent in self.dependents:
+            raise ModelError(f"RBE2 {self.id}: independent node cannot also be dependent")
+        if not self.dependents:
+            raise ModelError(f"RBE2 {self.id}: at least one dependent node is required")
+        self.components = comps
+
+
+@dataclass
 class Load:
     """Nodal load (force and/or moment vector) in global coordinates."""
 
@@ -479,6 +508,7 @@ class FEModel:
     materials: dict[int, Material] = field(default_factory=dict)
     properties: dict[int, Property] = field(default_factory=dict)
     spcs: list[SPC] = field(default_factory=list)
+    rbe2: list[RBE2] = field(default_factory=list)
     sets: dict[str, NodeSet | ElementSet] = field(default_factory=dict)
     coord_systems: dict[int, CoordSys] = field(default_factory=dict)
     units: UnitSystem = field(default_factory=UnitSystem)
@@ -597,6 +627,30 @@ class FEModel:
             raise ModelError(f"SPC references undefined node {spc.node_id}")
         self.spcs.append(spc)
         return spc
+
+    def add_rbe2(
+        self,
+        id: int,
+        independent: int,
+        dependents: Sequence[int],
+        components: Sequence[int] = (1, 2, 3, 4, 5, 6),
+        check_refs: bool = True,
+    ) -> RBE2:
+        """Rigid body element (Nastran RBE2 layout): slaves follow ``independent``."""
+        rbe = RBE2(
+            id=id,
+            independent=independent,
+            dependents=tuple(dependents),
+            components=tuple(components),
+        )
+        if any(item.id == rbe.id for item in self.rbe2):
+            raise ModelError(f"duplicate RBE2 id {rbe.id}")
+        if check_refs:
+            missing = [n for n in (rbe.independent, *rbe.dependents) if n not in self.nodes]
+            if missing:
+                raise ModelError(f"RBE2 {rbe.id}: undefined node(s) {missing}")
+        self.rbe2.append(rbe)
+        return rbe
 
     def add_load(
         self,

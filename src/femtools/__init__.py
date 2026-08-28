@@ -61,6 +61,7 @@ _EXPORTS: dict[str, str] = {
     "Material": "femtools.core.model",
     "Property": "femtools.core.model",
     "SPC": "femtools.core.model",
+    "RBE2": "femtools.core.model",
     "DOFSet": "femtools.core.model",
     "NodeSet": "femtools.core.sets",
     "ElementSet": "femtools.core.sets",
@@ -241,6 +242,9 @@ if TYPE_CHECKING:
     )
     from femtools.core.errors import (
         UnitError as UnitError,
+    )
+    from femtools.core.model import (
+        RBE2 as RBE2,
     )
     from femtools.core.model import (
         SPC as SPC,

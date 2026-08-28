@@ -1,46 +1,57 @@
-# Remaining capabilities (post Round 3)
+# Remaining capabilities — Cycle C (Rounds 7–9)
 
-Continue the original 1:1 functional equivalent of FEMtools. **Do not** implement NI/DAQ hardware or proprietary closed binaries. Original algorithms from public literature only.
+Continue the original 1:1 functional equivalent of FEMtools. **Do not** implement NI/DAQ hardware or proprietary closed binaries (OP2/RST/ODB). Public algorithms and public text-card layouts only.
 
-Rounds 4–5 froze and hardened the R3+ APIs below. Round 6 freezes the R5+ APIs at the bottom. Existing `docs/CONTRACT_API.md` still holds; do not break it.
+Round 7 freezes the APIs below. Existing `docs/CONTRACT_API.md` still holds; do not break it. Goldens (HEX8 98.6%, Rubin 0.028%, H1/H2=γ², 6 RBM on tilted shells) must stay.
 
-## Round 4 APIs (merged, R5-hardened)
-
-```python
-from femtools.fea.reduction import guyan, irs, serep, ReductionResult
-from femtools.fea.eigen import solve_complex_modes, ComplexModalResult
-from femtools.dynamics.cms_free import rubin, macneal, FreeCMSResult
-from femtools.dynamics.random import psd_response, PSDResult
-from femtools.pretest.exciter import driving_point_residues, select_exciters
-from femtools.correlation.expansion import expand_serep, expand_guyan
-from femtools.correlation.mac import fmac
-from femtools.correlation.alignment import align_geometry
-from femtools.updating.frf_updating import update_from_frf
-from femtools.updating.selection import select_parameters
-from femtools.optimization.surrogate import fit_rsm, predict_rsm
-from femtools.optimization.multi import pareto_weighted
-from femtools.mpe.frf_estimation import estimate_h1, estimate_h2, coherence
-from femtools.mpe.ssi import ssi_cov
-from femtools.rbpe.rbfit import rigid_body_properties  # restraint=, mount_k=
-from femtools.io.pch import read_pch, write_pch
-from femtools.io.cdb import read_cdb
-from femtools.drivers.base import SolverDriver
-```
-
-## Round 6 frozen APIs (R5+ → implement now)
+## Round 7 frozen APIs
 
 ```python
-from femtools.updating.uq import parameter_covariance, monte_carlo_update, UQResult
-from femtools.optimization.shape import shape_optimize, ShapeResult
-from femtools.mpe.ssi import ssi_data
-from femtools.io.inp import read_inp
-from femtools.io.kfile import read_k
-from femtools.correlation.mac import nmd, macx
-from femtools.dynamics.energy import modal_strain_energy, modal_kinetic_energy
+from femtools.core.model import RBE2  # already on FEModel.rbe2 / add_rbe2
+
+from femtools.fea.recover import recover_stress, recover_strain, StressResult
+# Centroid (or averaged Gauss) stress/strain for BAR2, BEAM2, QUAD4, TRIA3, HEX8, TET4.
+# Constant-strain patch test to 1e-12. No nonlinear/plasticity.
+
+from femtools.fea.mpc import apply_rbe2, ConstraintTransform
+# Build T from model.rbe2 (and/or explicit apply_rbe2). assemble_km(..., mpc=T)
+# or assemble_km honors model.rbe2 by default. Free-free two-node rigid pair: 6 RBM.
+
+from femtools.io.cdb import write_cdb
+from femtools.io.kfile import write_k
+# Round-trip the Round-6 HEX8/QUAD4/BEAM2 acceptance decks.
+
+from femtools.io.bdf import read_bdf
+# Follow INCLUDE (relative path, max depth 8, cycle-safe). Parse RBE2 (and RBE3 if cheap)
+# into FEModel.add_rbe2. Do not invent INCLUDE from copyrighted decks.
+
+from femtools.drivers.nastran import NastranPunchDriver
+# Concrete SolverDriver: write_bdf + SOL 103 case control, read_pch.
+# is_available() via shutil.which. run() raises SolverError if the executable is missing.
+# Tests must not require a Nastran install.
+
+from femtools.dynamics.random import psd_response  # new kw base_accel=
+# Base-acceleration PSD. SDOF RMS vs closed form / Miles.
+
+from femtools.dynamics.superelement import dump_cms, load_cms
+# npz dump/load of CraigBamptonResult / FreeCMSResult (K, M, T, boundary ids).
+
+from femtools.correlation.dofmap import map_nearest_nodes
+# xyz_test (n,3) vs model/xyz_fe → (fe_ids, distances). PRODUCT_MAP claimed this since R1.
+
+from femtools.correlation.mac import mac_contribution
+# Per-DOF contribution to a single MAC pair (same inputs as mac_value).
+
+from femtools.optimization.topometry import topometry_optimize, TopometryResult
+# Element-wise thickness (or density) field on an existing mesh; OC or SLSQP;
+# min-compliance 2-D plate first. Distinct from topology_simp (which builds its own grid).
+
+from femtools.updating.responses import static_displacement_response
+# Plug solve_static displacements into update_model as a response.
 ```
 
-Shell drilling: `assemble_km` on an arbitrarily oriented flat shell must not retain a fictitious drilling mechanism (per-node rotational frames). Verified by `fea.verification.shell_drilling_orientation_gap`.
+Optional plotly already exists. Round 7 viz: optional **pyvista** `plot_mesh3d` if pyvista imports, matplotlib remains default.
 
 ## Explicitly still N/A
 
-NI DAQ, commercial OP2/RST/ODB binary dumps, license servers.
+NI DAQ, commercial OP2/RST/ODB binary dumps, license servers, CAD kernels.
